@@ -25,12 +25,12 @@ A run started by the dashboard's webhook may only need step 1. If `grokdash acti
 
 ## What each action means
 
-| Type | What to do |
-|---|---|
-| `choose` | Do what `instruction` says. If it's empty, do what `label` says, in the context of the card. |
-| `send` | Send `text` exactly as written to the card's `draft.to`, on `draft.channel`. Don't rephrase it. |
-| `write` | `text` is an instruction from the user about that card. Follow it as if they had typed it to you. |
-| `complete_todo` | Mark the to-do `todoId` done in the to-do list. |
+| Type            | What to do                                                                                        |
+| --------------- | ------------------------------------------------------------------------------------------------- |
+| `choose`        | Do what `instruction` says. If it's empty, do what `label` says, in the context of the card.      |
+| `send`          | Send `text` exactly as written to the card's `draft.to`, on `draft.channel`. Don't rephrase it.   |
+| `write`         | `text` is an instruction from the user about that card. Follow it as if they had typed it to you. |
+| `complete_todo` | Mark the to-do `todoId` done in the to-do list.                                                   |
 
 The user tapping a button is their approval for that one action. Never send a message, reply, vote or buy anything without an action asking for it.
 
@@ -38,12 +38,12 @@ The user tapping a button is their approval for that one action. Never send a me
 
 A card is JSON passed to `grokdash post`. Always give it a stable `key` made of the source and the thread or message id, like `wa:393401234567@s.whatsapp.net:poll-123` or `gmail:18c2f...`. Posting the same key again updates the card instead of duplicating it.
 
-| Kind | Use it for | Extra fields |
-|---|---|---|
-| `choice` | A question with 2 to 4 likely answers: votes, yes/no approvals, "which day?" | `options`: `[{"label": "Vote Tuesday", "instruction": "Vote Tuesday in the Lab group poll"}]`. Put the answer you'd recommend first. |
-| `draft` | Someone is waiting for a reply and you can write it | `draft`: `{"to": "Sam", "channel": "WhatsApp", "text": "..."}` |
-| `reminder` | Something the user has to do themselves: pay, sign, upload | none |
-| `digest` | Catch-up summary of a busy chat or mailbox | `"section": "catchup"`, `countLabel` like `"46 messages"` |
+| Kind       | Use it for                                                                   | Extra fields                                                                                                                         |
+| ---------- | ---------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------ |
+| `choice`   | A question with 2 to 4 likely answers: votes, yes/no approvals, "which day?" | `options`: `[{"label": "Vote Tuesday", "instruction": "Vote Tuesday in the Lab group poll"}]`. Put the answer you'd recommend first. |
+| `draft`    | Someone is waiting for a reply and you can write it                          | `draft`: `{"to": "Sam", "channel": "WhatsApp", "text": "..."}`                                                                       |
+| `reminder` | Something the user has to do themselves: pay, sign, upload                   | none                                                                                                                                 |
+| `digest`   | Catch-up summary of a busy chat or mailbox                                   | `"section": "catchup"`, `countLabel` like `"46 messages"`                                                                            |
 
 Rules for every card:
 
@@ -70,7 +70,7 @@ One digest per busy chat or mailbox, with a key like `wa:GROUP_ID:digest`. Keep 
 
 ## Your setup
 
-- Sources to scan: _list them, for example "WhatsApp work and personal with wacli, Gmail, Google Calendar, IMAP mailbox work@example.com"_
+- Sources to scan: _list them, for example "WhatsApp work and personal with wacli, Gmail, Google Calendar, IMAP mailbox `work@example.com`"_
 - Card language: _English_
 - Notifier bot for urgent cards: _the name of your secretary bot_
 - Always urgent: _people or topics, or "none"_

@@ -230,7 +230,9 @@ test("agenda times are stored in the server's local time", async () => {
 });
 
 test("refresh pings bots that registered a webhook", async () => {
-  await bot("POST", "/api/bot/register", { bot: "dashboard", name: "Dashboard", webhookUrl: "https://example.com/hook" });
+  const reg = await bot("POST", "/api/bot/register", { bot: "dashboard", name: "Dashboard", webhookUrl: "https://example.com/hook", webhookToken: "secret-key" });
+  assert.equal(reg.body.bot.webhookToken, "set", "the key is stored but never echoed");
+  assert.equal(s.store.getBot("dashboard")!.webhookToken, "secret-key");
   s.pings.length = 0;
   await call("POST", "/api/ui/refresh", {});
   assert.deepEqual(s.pings, ["dashboard:refresh"]);

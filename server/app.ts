@@ -275,8 +275,10 @@ export function createApp(deps: AppDeps) {
       name: b.name === undefined ? undefined : text(b.name, "name", 40, true),
       color: b.color === undefined ? undefined : text(b.color, "color", 20),
       webhookUrl: b.webhookUrl === undefined ? undefined : url(b.webhookUrl, "webhookUrl"),
+      webhookToken: b.webhookToken === undefined ? undefined : text(b.webhookToken, "webhookToken", 500),
     });
-    return { bot: { ...bot, webhookUrl: bot.webhookUrl ? "set" : "" } };
+    // Never echo secrets back.
+    return { bot: { slug: bot.slug, name: bot.name, color: bot.color, webhookUrl: bot.webhookUrl ? "set" : "", webhookToken: bot.webhookToken ? "set" : "" } };
   });
 
   route("POST", "/api/bot/items", "bot", (_r, _p, _q, b) => {

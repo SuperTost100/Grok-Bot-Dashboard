@@ -13,18 +13,29 @@ const todoist = config.todoistToken ? new Todoist(config.todoistToken, config.to
 const log = (msg: string) => console.log(`${new Date().toISOString()} ${msg}`);
 
 // Ping a bot's webhook automation so it picks up work now instead of at its next scheduled run.
-// At most one ping per bot every 20 seconds; the bot fetches everything waiting when it runs.
+// At most one ping per bot every 20 seconds. A ping that comes sooner is sent when the 20 seconds
+// are up, so a second tap isn't left waiting for the bot's next scheduled run.
+const PING_GAP = 20_000;
 const lastPing = new Map<string, number>();
-async function notify(slug: string, reason: "actions" | "refresh") {
+const deferred = new Map<string, NodeJS.Timeout>();
+function notify(slug: string, reason: "actions" | "refresh") {
+  const wait = (lastPing.get(slug) ?? 0) + PING_GAP - Date.now();
+  if (wait <= 0) return void ping(slug, reason);
+  if (deferred.has(slug)) return;
+  deferred.set(slug, setTimeout(() => { deferred.delete(slug); void ping(slug, reason); }, wait));
+}
+
+async function ping(slug: string, reason: "actions" | "refresh") {
   const bot = store.getBot(slug);
   if (!bot?.webhookUrl) return;
-  const now = Date.now();
-  if (now - (lastPing.get(slug) ?? 0) < 20_000) return;
-  lastPing.set(slug, now);
+  lastPing.set(slug, Date.now());
   try {
     const res = await fetch(bot.webhookUrl, {
       method: "POST",
-      headers: { "Content-Type": "application/json" },
+      headers: {
+        "Content-Type": "application/json",
+        ...(bot.webhookToken ? { Authorization: `Bearer ${bot.webhookToken}` } : {}),
+      },
       body: JSON.stringify({
         source: "grok-bot-dashboard",
         reason,
@@ -63,6 +74,7 @@ server.listen(config.port, config.host, () => {
 function shutdown() {
   clearInterval(tick);
   clearInterval(daily);
+  for (const t of deferred.values()) clearTimeout(t);
   server.close(() => {
     store.close();
     process.exit(0);

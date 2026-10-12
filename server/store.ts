@@ -60,6 +60,7 @@ export interface Bot {
   name: string;
   color: string;
   webhookUrl: string;
+  webhookToken: string;
   lastSeenAt: number | null;
   lastScanAt: number | null;
   refreshRequestedAt: number | null;
@@ -94,6 +95,7 @@ CREATE TABLE IF NOT EXISTS bots (
   name TEXT NOT NULL,
   color TEXT NOT NULL DEFAULT '',
   webhook_url TEXT NOT NULL DEFAULT '',
+  webhook_token TEXT NOT NULL DEFAULT '',
   last_seen_at INTEGER,
   last_scan_at INTEGER,
   refresh_requested_at INTEGER
@@ -227,6 +229,7 @@ function toBot(r: Row): Bot {
     name: str(r.name),
     color: str(r.color),
     webhookUrl: str(r.webhook_url),
+    webhookToken: str(r.webhook_token),
     lastSeenAt: num(r.last_seen_at),
     lastScanAt: num(r.last_scan_at),
     refreshRequestedAt: num(r.refresh_requested_at),
@@ -259,6 +262,9 @@ export class Store {
     this.now = now;
     this.db.exec("PRAGMA journal_mode = WAL; PRAGMA foreign_keys = ON; PRAGMA busy_timeout = 3000;");
     this.db.exec(SCHEMA);
+    // Columns added after the first release.
+    const botCols = (this.db.prepare("PRAGMA table_info(bots)").all() as Row[]).map((r) => String(r.name));
+    if (!botCols.includes("webhook_token")) this.db.exec("ALTER TABLE bots ADD COLUMN webhook_token TEXT NOT NULL DEFAULT ''");
   }
 
   close() {
@@ -303,12 +309,15 @@ export class Store {
     return this.db.prepare("SELECT * FROM bots ORDER BY slug").all().map((r) => toBot(r as Row));
   }
 
-  updateBot(slug: string, patch: { name?: string; color?: string; webhookUrl?: string }) {
+  updateBot(slug: string, patch: { name?: string; color?: string; webhookUrl?: string; webhookToken?: string }) {
     this.touchBot(slug);
     if (patch.name !== undefined) this.db.prepare("UPDATE bots SET name = ? WHERE slug = ?").run(patch.name, slug);
     if (patch.color !== undefined) this.db.prepare("UPDATE bots SET color = ? WHERE slug = ?").run(patch.color, slug);
     if (patch.webhookUrl !== undefined) {
       this.db.prepare("UPDATE bots SET webhook_url = ? WHERE slug = ?").run(patch.webhookUrl, slug);
+    }
+    if (patch.webhookToken !== undefined) {
+      this.db.prepare("UPDATE bots SET webhook_token = ? WHERE slug = ?").run(patch.webhookToken, slug);
     }
     return this.getBot(slug)!;
   }
