@@ -5,7 +5,7 @@ import crypto from "node:crypto";
 import type { Config } from "./config.ts";
 import type { Store, Item, ItemInput, Kind, Section, Option, Draft, Action } from "./store.ts";
 import { Todoist, pickTodos } from "./todoist.ts";
-import { addDays, localStamp, parseWhen, snoozeChoices } from "./time.ts";
+import { addDays, localStamp, parseWhen, snoozeChoices, zonedToEpoch } from "./time.ts";
 import { checkWebhookUrl } from "./webhook.ts";
 
 // Errors with a status code become JSON error responses; anything else is a 500.
@@ -214,7 +214,7 @@ export function createApp(deps: AppDeps) {
   async function act(item: Item, b: Record<string, unknown>) {
     const type = text(b.type, "type", 20, true);
     const outward = (fields: { type: "choose" | "send" | "write"; label: string; instruction?: string; text?: string }) => {
-      if (b.rev !== undefined && Number(b.rev) !== item.rev) {
+      if (Number(b.rev) !== item.rev) {
         throw conflict("This card changed since you opened it. Check it again before answering.");
       }
       // A read catch-up summary can still take a follow-up question.
@@ -266,7 +266,9 @@ export function createApp(deps: AppDeps) {
   }
 
   // Todoist calls for the same task run one after another, so a fast Undo can't overtake its completion.
+  // closedHere remembers what this dashboard closed, so a double tap doesn't send two closes.
   const todoLocks = new Map<string, Promise<unknown>>();
+  const closedHere = new Set<string>();
   function serial<T>(key: string, fn: () => Promise<T>): Promise<T> {
     const prev = todoLocks.get(key) ?? Promise.resolve();
     const next = prev.catch(() => {}).then(fn);
@@ -276,9 +278,18 @@ export function createApp(deps: AppDeps) {
   }
 
   async function completeTodo(bot: string, id: string, undo: boolean) {
-    if (bot === "todoist") {
-      if (!todoist) throw new HttpError(404, "Todoist isn't connected.");
-      await serial(id, () => (undo ? todoist.reopen(id) : todoist.close(id)));
+    if (todoist && bot === "todoist") {
+      await serial(id, async () => {
+        if (undo) {
+          if (!closedHere.has(id)) throw conflict("This to-do isn't completed from here.");
+          await todoist.reopen(id);
+          closedHere.delete(id);
+        } else {
+          if (closedHere.has(id)) throw conflict("This to-do is already completed.");
+          await todoist.close(id);
+          closedHere.add(id);
+        }
+      });
       return { ok: true };
     }
     const todo = store.findTodo(bot, id);
@@ -286,7 +297,7 @@ export function createApp(deps: AppDeps) {
     const pending = store.pendingTodoAction(bot, id);
     if (undo) {
       if (!pending) {
-        store.setTodoCompleted(bot, id, false);
+        if (todo.completedAt) throw conflict("Too late to undo: the bot already completed it.");
         return { ok: true };
       }
       if (!store.cancelAction(pending.id)) throw conflict("Too late to undo: the bot already has it.");
@@ -294,7 +305,7 @@ export function createApp(deps: AppDeps) {
     }
     if (pending || todo.completedAt) throw conflict("This to-do is already being completed.");
     store.setTodoCompleted(bot, id, true);
-    const action = store.addAction({ todoId: id, bot, type: "complete_todo", label: todo.content, delayMs: undoMs });
+    const action = store.addAction({ todoId: id, todoDue: todo.due, bot, type: "complete_todo", label: todo.content, delayMs: undoMs });
     return { ok: true, action };
   }
 
@@ -307,7 +318,7 @@ export function createApp(deps: AppDeps) {
       text: a.text,
       todoId: a.todoId,
       // The card exactly as the user saw it when they tapped.
-      card: a.snapshot,
+      card: a.itemId ? a.snapshot : null,
     };
   }
 
@@ -340,7 +351,7 @@ export function createApp(deps: AppDeps) {
       },
       agenda: "PUT /api/bot/agenda {from: 'YYYY-MM-DD', to: 'YYYY-MM-DD' (default from + 2 days), app, events: [{title, start, end, location, allDay}]}. It REPLACES all your events overlapping from..to, so always send the complete list for that window.",
       todos: "PUT /api/bot/todos {app, todos: [{id, content, priority: 'p1'..'p4', due, dueString, deadline, project, url}]}. It REPLACES your whole list. Ignored when the dashboard reads Todoist directly.",
-      scan: "POST /api/bot/scan {} after a full scan where every source was read. GET /api/bot/actions returns lastScanAt: scan for messages since then.",
+      scan: "POST /api/bot/scan {startedAt: 'YYYY-MM-DDTHH:MM:SS'} after a full scan where every source was read, with the time the scan began (the 'now' from grokdash actions). GET /api/bot/actions returns lastScanAt: scan for messages since then.",
       register: "POST /api/bot/register {name, color, webhookUrl, webhookToken}",
     };
   }
@@ -484,7 +495,8 @@ export function createApp(deps: AppDeps) {
   });
 
   route("POST", "/api/bot/scan", "bot", (_r, _p, _q, b) => {
-    store.markScan(slug(b.bot));
+    const started = when(b.startedAt, "startedAt", tz, false);
+    store.markScan(slug(b.bot), started ? zonedToEpoch(started.length === 10 ? started + "T00:00:00" : started, tz) : undefined);
     return { ok: true };
   });
 
@@ -493,8 +505,9 @@ export function createApp(deps: AppDeps) {
   route("GET", "/api/ui/state", "ui", () => state());
 
   route("GET", "/api/ui/archive", "ui", (_r, _p, q) => {
-    const offset = Math.max(0, Math.min(10_000, Number(q.get("offset") ?? 0) || 0));
-    return store.archive(text(q.get("q"), "q", 100), config.archiveDays, 50, offset);
+    const offset = Math.max(0, Math.min(10_000, Math.floor(Number(q.get("offset") ?? 0)) || 0));
+    const bot = q.get("bot");
+    return store.archive(text(q.get("q"), "q", 100), config.archiveDays, 50, offset, bot && bot !== "all" ? slug(bot) : "");
   });
 
   route("POST", "/api/ui/items/:id/act", "ui", async (_r, p, _q, b) => {

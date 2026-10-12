@@ -58,6 +58,10 @@ export interface Snapshot {
   app: string;
   link: string;
   draft: Draft | null;
+  /** The card's status before the tap, to put back on Undo (a read summary stays read). */
+  status?: ItemStatus;
+  /** For to-do completions: which occurrence was completed. */
+  todoDue?: string;
 }
 
 export interface Action {
@@ -210,6 +214,10 @@ const MIGRATIONS: [string, string, string][] = [
   ["actions", "snapshot", "TEXT"],
 ];
 
+// An event overlaps [from, to) when it starts before `to` and is still going at `from`.
+// A datetime end is exclusive (ending at 00:00 doesn't touch that day); a date-only end includes that day.
+const OVERLAP = "start < ? AND ((end = '' AND start >= ?) OR (length(end) = 10 AND end >= ?) OR (length(end) > 10 AND end > ?))";
+
 // Colors for bots that don't pick one. Muted enough to sit next to the ink UI.
 const PALETTE = ["#c2412d", "#2f7d5b", "#3b6fb6", "#8a5cc2", "#b7791f", "#2b8a8a", "#a23b72", "#5b5a55"];
 
@@ -328,6 +336,10 @@ export class Store {
       const cols = (this.db.prepare(`PRAGMA table_info(${table})`).all() as Row[]).map((r) => String(r.name));
       if (!cols.includes(column)) this.db.exec(`ALTER TABLE ${table} ADD COLUMN ${column} ${def}`);
     }
+    // Taps from before snapshots existed can't tell the bot what the user saw: drop the ones still waiting.
+    this.db.exec(`UPDATE items SET status = 'open' WHERE status = 'pending' AND id IN
+      (SELECT item_id FROM actions WHERE snapshot IS NULL AND item_id IS NOT NULL AND status IN ('queued', 'ready'))`);
+    this.db.exec("UPDATE actions SET status = 'cancelled' WHERE snapshot IS NULL AND item_id IS NOT NULL AND status IN ('queued', 'ready')");
   }
 
   close() {
@@ -394,9 +406,17 @@ export class Store {
     return this.getBot(slug)!;
   }
 
-  markScan(slug: string) {
+  /** Record a complete scan. `startedAt` is when the scan began, so the next one looks back to there. */
+  markScan(slug: string, startedAt?: number) {
     this.touchBot(slug);
-    this.db.prepare("UPDATE bots SET last_scan_at = ?, refresh_requested_at = NULL WHERE slug = ?").run(this.now(), slug);
+    const at = startedAt && startedAt <= this.now() ? startedAt : this.now();
+    this.db.prepare("UPDATE bots SET last_scan_at = ?, refresh_requested_at = NULL WHERE slug = ?").run(at, slug);
+  }
+
+  /** Bots with a webhook and a refresh request from the last `withinMs` that they haven't answered with a scan. */
+  botsWithPendingRefresh(withinMs: number): string[] {
+    return (this.db.prepare("SELECT slug FROM bots WHERE refresh_requested_at > ? AND webhook_url != ''").all(this.now() - withinMs) as Row[])
+      .map((r) => String(r.slug));
   }
 
   requestRefresh(): Bot[] {
@@ -557,25 +577,26 @@ export class Store {
       .map((r) => toItem(r as Row));
   }
 
-  archive(q: string, days: number, limit = 50, offset = 0): { items: Item[]; more: boolean } {
+  archive(q: string, days: number, limit = 50, offset = 0, bot = ""): { items: Item[]; more: boolean } {
     const since = this.now() - days * 86_400_000;
     const like = `%${q.replace(/[%_\\]/g, (c) => "\\" + c)}%`;
     const rows = this.db
       .prepare(
         `SELECT * FROM items
-         WHERE ((status = 'closed' AND closed_at >= ?) OR status = 'snoozed')
+         WHERE ((status = 'closed' AND closed_at >= ? AND title != '') OR status = 'snoozed')
+           AND (? = '' OR bot = ?)
            AND (? = '' OR title LIKE ? ESCAPE '\\' OR body LIKE ? ESCAPE '\\' OR context LIKE ? ESCAPE '\\'
                 OR resolution LIKE ? ESCAPE '\\' OR source LIKE ? ESCAPE '\\' OR draft LIKE ? ESCAPE '\\')
          ORDER BY COALESCE(closed_at, updated_at) DESC LIMIT ? OFFSET ?`,
       )
-      .all(since, q, like, like, like, like, like, like, limit + 1, offset)
+      .all(since, bot, bot, q, like, like, like, like, like, like, limit + 1, offset)
       .map((r) => toItem(r as Row));
     return { items: rows.slice(0, limit), more: rows.length > limit };
   }
 
   /**
-   * Drop archived content after `days`. Cards with a key keep an empty row for a year,
-   * so a bot reposting an old key doesn't bring back something you dismissed.
+   * Drop archived content after `days`. Cards with a key keep an empty row (a few bytes),
+   * so a bot reposting an old key never brings back something you dismissed.
    */
   purge(days: number): number {
     const before = this.now() - days * 86_400_000;
@@ -586,7 +607,6 @@ export class Store {
          WHERE status = 'closed' AND closed_at < ? AND key IS NOT NULL AND title != ''`,
       )
       .run(before);
-    this.db.prepare("DELETE FROM items WHERE status = 'closed' AND closed_at < ?").run(this.now() - 365 * 86_400_000);
     this.db.prepare("DELETE FROM actions WHERE finished_at IS NOT NULL AND finished_at < ?").run(before);
     return Number(res.changes);
   }
@@ -594,15 +614,15 @@ export class Store {
   // Actions
 
   addAction(a: {
-    item?: Item | null; todoId?: string | null; bot: string; type: ActionType;
+    item?: Item | null; todoId?: string | null; todoDue?: string; bot: string; type: ActionType;
     label?: string; instruction?: string; text?: string; delayMs: number;
   }): Action {
     return this.tx(() => {
       const now = this.now();
       const i = a.item;
       const snapshot: Snapshot | null = i
-        ? { id: i.id, key: i.key, rev: i.rev, title: i.title, body: i.body, context: i.context, source: i.source, app: i.app, link: i.link, draft: i.draft }
-        : null;
+        ? { id: i.id, key: i.key, rev: i.rev, title: i.title, body: i.body, context: i.context, source: i.source, app: i.app, link: i.link, draft: i.draft, status: i.status }
+        : a.todoId != null ? ({ todoDue: a.todoDue ?? "" } as Snapshot) : null;
       const res = this.db
         .prepare(
           `INSERT INTO actions (item_id, todo_id, bot, type, label, instruction, text, snapshot, status, run_after, created_at)
@@ -636,14 +656,30 @@ export class Store {
     return r ? toAction(r as Row) : null;
   }
 
+  /** Clear a to-do's local completion, but only if it's still the occurrence this action completed. */
+  clearTodoFor(a: Action) {
+    if (!a.todoId) return;
+    const due = a.snapshot?.todoDue;
+    if (due === undefined) {
+      this.db.prepare("UPDATE todos SET completed_at = NULL, completed_due = NULL WHERE bot = ? AND id = ?").run(a.bot, a.todoId);
+    } else {
+      this.db
+        .prepare("UPDATE todos SET completed_at = NULL, completed_due = NULL WHERE bot = ? AND id = ? AND completed_due = ?")
+        .run(a.bot, a.todoId, due);
+    }
+  }
+
   /** Undo works only while the action is still inside its undo window. */
   cancelAction(id: number): Action | null {
     return this.tx(() => {
       const a = this.getAction(id);
       if (!a || a.status !== "queued") return null;
       this.db.prepare("UPDATE actions SET status = 'cancelled', finished_at = ? WHERE id = ?").run(this.now(), id);
-      if (a.itemId) this.db.prepare("UPDATE items SET status = 'open' WHERE id = ? AND status = 'pending'").run(a.itemId);
-      if (a.todoId) this.db.prepare("UPDATE todos SET completed_at = NULL, completed_due = NULL WHERE bot = ? AND id = ?").run(a.bot, a.todoId);
+      if (a.itemId) {
+        const back = a.snapshot?.status === "closed" ? "closed" : "open";
+        this.db.prepare("UPDATE items SET status = ? WHERE id = ? AND status = 'pending'").run(back, a.itemId);
+      }
+      this.clearTodoFor(a);
       return this.getAction(id);
     });
   }
@@ -657,9 +693,10 @@ export class Store {
     return rows.map((r) => String(r.bot));
   }
 
-  /** Bots with actions that are ready but nobody has taken. */
-  botsWithReadyWork(): string[] {
-    return (this.db.prepare("SELECT DISTINCT bot FROM actions WHERE status = 'ready'").all() as Row[]).map((r) => String(r.bot));
+  /** Bots with actions from the last `withinMs` that are ready but nobody has taken. */
+  botsWithReadyWork(withinMs: number): string[] {
+    return (this.db.prepare("SELECT DISTINCT bot FROM actions WHERE status = 'ready' AND created_at > ?").all(this.now() - withinMs) as Row[])
+      .map((r) => String(r.bot));
   }
 
   /** Hand this bot its ready actions. */
@@ -693,7 +730,7 @@ export class Store {
             .prepare("UPDATE items SET status = 'open', error = ? WHERE id = ? AND status = 'pending'")
             .run(`The bot took "${a.label}" but never confirmed it. Check whether it happened before you try again.`, a.itemId);
         }
-        if (a.todoId) this.db.prepare("UPDATE todos SET completed_at = NULL, completed_due = NULL WHERE bot = ? AND id = ?").run(a.bot, a.todoId);
+        this.clearTodoFor(a);
       }
       return stale.length;
     });
@@ -717,7 +754,14 @@ export class Store {
         ? this.db.prepare("SELECT 1 FROM actions WHERE item_id = ? AND id > ? AND status NOT IN ('cancelled', 'failed')").get(a.itemId, id)
         : null;
       if (a.itemId && !newer) {
-        if (ok) {
+        const item = this.getItem(a.itemId);
+        const changed = item && a.snapshot && item.rev !== a.snapshot.rev;
+        if (ok && changed) {
+          // The bot did what was asked, but the card has new content since: keep it open so it isn't lost.
+          this.db
+            .prepare("UPDATE items SET status = 'open', error = ? WHERE id = ?")
+            .run(`Done for the earlier version: ${result || a.label}. The card has changed since, so check it again.`, a.itemId);
+        } else if (ok) {
           this.db
             .prepare("UPDATE items SET status = 'closed', closed_reason = 'action', resolution = ?, closed_at = ?, error = '', acked_at = NULL WHERE id = ?")
             .run(result || a.label || "Done", now, a.itemId);
@@ -725,9 +769,7 @@ export class Store {
           this.db.prepare("UPDATE items SET status = 'open', error = ? WHERE id = ?").run(result || "The bot couldn't do it.", a.itemId);
         }
       }
-      if (a.todoId && !ok) {
-        this.db.prepare("UPDATE todos SET completed_at = NULL, completed_due = NULL WHERE bot = ? AND id = ?").run(a.bot, a.todoId);
-      }
+      if (!ok) this.clearTodoFor(a);
       return { action: this.getAction(id) };
     });
   }
@@ -739,8 +781,8 @@ export class Store {
     this.tx(() => {
       this.touchBot(bot);
       this.db
-        .prepare("DELETE FROM events WHERE bot = ? AND start < ? AND (CASE WHEN end != '' THEN end ELSE start END) >= ?")
-        .run(bot, to, from);
+        .prepare(`DELETE FROM events WHERE bot = ? AND ${OVERLAP}`)
+        .run(bot, to, from, from, from + "T00:00:00");
       const ins = this.db.prepare("INSERT INTO events (bot, title, start, end, location, all_day, app) VALUES (?, ?, ?, ?, ?, ?, ?)");
       for (const e of events) ins.run(bot, e.title, e.start, e.end, e.location, e.allDay ? 1 : 0, e.app);
     });
@@ -749,8 +791,8 @@ export class Store {
   /** Events that overlap [from, to), including ones that started earlier and are still going. */
   listEvents(from: string, to: string): CalEvent[] {
     return this.db
-      .prepare("SELECT * FROM events WHERE start < ? AND (CASE WHEN end != '' THEN end ELSE start END) >= ? ORDER BY start")
-      .all(to, from)
+      .prepare(`SELECT * FROM events WHERE ${OVERLAP} ORDER BY start`)
+      .all(to, from, from, from + "T00:00:00")
       .map((r) => {
         const row = r as Row;
         return {

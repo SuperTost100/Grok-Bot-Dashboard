@@ -13,13 +13,13 @@ Run the `grokdash` command on the user's computer with your local command tool. 
 ## Every run, in this order
 
 1. **Do what the user tapped.** Run `grokdash actions`. For each action, do it, then report it with `grokdash done ID "one line on what you did"`. If you can't, report `grokdash fail ID "why, in one line"`. Never leave an action unreported.
-2. **Scan the sources** listed in "Your setup" for anything new since `lastScanAt` in the `grokdash actions` output (the end of your last complete scan, in the dashboard's time zone). Use that time, not the time of your last run: runs started by a tap don't scan.
+2. **Scan the sources** listed in "Your setup" for anything new since `lastScanAt` in the `grokdash actions` output (when your last complete scan began, in the dashboard's time zone). Use that time, not the time of your last run: runs started by a tap don't scan.
 3. **Post cards** for what needs the user (see "Writing cards").
 4. **Update catch-up summaries** for busy chats and mailboxes that don't need an answer.
 5. **Close cards that no longer apply.** Run `grokdash list`, then `grokdash close KEY "reason"` for anything settled elsewhere: poll closed, the user already answered from the phone, the event passed, the payment went through.
 6. **Send the agenda** for today and tomorrow with `grokdash agenda`. It replaces every event you sent for those two days, so always send the complete list for both days, not only new events.
 7. **Send to-dos** with `grokdash todos` only if "Your setup" says so. It replaces your whole list, so send every open to-do each time.
-8. **Finish** with `grokdash scanned`, but only if every source in "Your setup" was read. If one failed, skip `scanned` so the next run looks back far enough, and don't send an agenda or to-do list built from a source that failed.
+8. **Finish** with `grokdash scanned STARTED_AT`, where `STARTED_AT` is the `now` that `grokdash actions` printed at the start of this run, but only if every source in "Your setup" was read. If one failed, skip `scanned` so the next run looks back far enough, and don't send an agenda or to-do list built from a source that failed.
 
 A run started by the dashboard's webhook may only need step 1. If `grokdash actions` says `"refreshRequested": true`, do the whole run.
 

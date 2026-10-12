@@ -9,6 +9,9 @@ import { Todoist, pickTodos } from "../server/todoist.ts";
 import { loadConfig, type Config } from "../server/config.ts";
 import { parseWhen, snoozeChoices, localStamp } from "../server/time.ts";
 import { checkWebhookUrl, isPrivateAddress } from "../server/webhook.ts";
+import fs from "node:fs";
+import os from "node:os";
+import path from "node:path";
 
 const OWNER = "owner@example.com";
 const TOKEN = "test-token-123";
@@ -63,7 +66,9 @@ async function call(method: string, path: string, body?: unknown, who: Who = "ow
 const bot = (method: string, path: string, body?: unknown, name = "dashboard") => call(method, path, body, { bot: name });
 const state = async () => (await call("GET", "/api/ui/state")).body;
 const card = async (id: number) => (await state()).needs.find((i: { id: number }) => i.id === id);
-const act = (id: number, body: Record<string, unknown>) => call("POST", `/api/ui/items/${id}/act`, body);
+// Like the page: answers carry the revision of the card on screen.
+const act = (id: number, body: Record<string, unknown>) =>
+  call("POST", `/api/ui/items/${id}/act`, ["choose", "send", "write"].includes(String(body.type)) && body.rev === undefined ? { ...body, rev: s.store.getItem(id)?.rev } : body);
 
 // ---------- Auth and transport ----------
 
@@ -147,7 +152,6 @@ test("a choice goes from card to bot and back, with an undo window and a frozen 
   // Tap again and let the window pass. The bot gets the card as it was when tapped.
   const second = await act(id, { type: "choose", option: 1, rev: first.rev, label: "Vote Monday" });
   assert.equal((await act(id, { type: "choose", option: 0, rev: first.rev })).status, 409, "no double actions");
-  await bot("POST", "/api/bot/items", { key: "wa:lab-poll", kind: "choice", title: "Changed later", options: [{ label: "Something else" }] });
   clock += 6000;
   const res = (await bot("GET", "/api/bot/actions")).body;
   assert.equal(res.actions.length, 1);
@@ -166,7 +170,7 @@ test("a choice goes from card to bot and back, with an undo window and a frozen 
   // Once acknowledged it leaves Today but stays in the archive.
   await call("POST", `/api/ui/items/${id}/ack`, {});
   assert.equal(await card(id), undefined);
-  const archive = (await call("GET", "/api/ui/archive?q=Changed")).body.items;
+  const archive = (await call("GET", "/api/ui/archive?q=lab%20swap")).body.items;
   assert.equal(archive[0].id, id);
 });
 
@@ -458,4 +462,118 @@ test("config refuses nonsense numbers and time zones", () => {
   assert.throws(() => loadConfig({ ...base, ARCHIVE_DAYS: "-1" }), /ARCHIVE_DAYS/);
   assert.throws(() => loadConfig({ ...base, TZ: "Mars/Olympus" }), /TZ/);
   assert.equal(loadConfig({ ...base, TZ: "Europe/Rome" }).undoSeconds, 5);
+});
+
+// ---------- Round 2 review ----------
+
+test("an answer without the card's revision is refused", async () => {
+  const { body } = await bot("POST", "/api/bot/items", { kind: "choice", title: "Rev required", options: [{ label: "Yes" }] });
+  assert.equal((await call("POST", `/api/ui/items/${body.id}/act`, { type: "choose", option: 0 })).status, 409);
+  await act(body.id, { type: "dismiss" });
+});
+
+test("a report on a card that changed after the tap keeps the card open with a note", async () => {
+  const { body } = await bot("POST", "/api/bot/items", { key: "changed-after", kind: "reminder", title: "v1" });
+  await act(body.id, { type: "write", text: "handle it" });
+  clock += 6000;
+  const [a] = (await bot("GET", "/api/bot/actions")).body.actions;
+  await bot("POST", "/api/bot/items", { key: "changed-after", kind: "reminder", title: "v2 with news" });
+  await bot("POST", `/api/bot/actions/${a.id}`, { ok: true, result: "Handled" });
+  const c = await card(body.id);
+  assert.equal(c.status, "open");
+  assert.match(c.error, /earlier version/);
+  await act(body.id, { type: "dismiss" });
+});
+
+test("undo on a question about a read summary keeps it read", async () => {
+  const { body } = await bot("POST", "/api/bot/items", { key: "wa:read-undo", section: "catchup", title: "Group", body: "stuff" });
+  await act(body.id, { type: "read" });
+  const tap = await act(body.id, { type: "write", text: "who said that?" });
+  await call("POST", `/api/ui/actions/${tap.body.action.id}/undo`, {});
+  assert.equal(s.store.getItem(body.id)!.status, "closed");
+});
+
+test("to-dos: a bot called todoist works without a Todoist link, and undo after completion is refused", async () => {
+  await bot("PUT", "/api/bot/todos", { todos: [{ id: "x1", content: "From a bot named todoist" }] }, "todoist");
+  assert.equal((await call("POST", "/api/ui/todos/complete", { bot: "todoist", id: "x1" })).status, 200);
+  clock += 6000;
+  const [a] = (await bot("GET", "/api/bot/actions", undefined, "todoist")).body.actions;
+  await bot("POST", `/api/bot/actions/${a.id}`, { ok: true }, "todoist");
+  assert.equal((await call("POST", "/api/ui/todos/complete", { bot: "todoist", id: "x1", undo: true })).status, 409);
+});
+
+test("a late failure on an old occurrence doesn't reopen the next one", async () => {
+  await bot("PUT", "/api/bot/todos", { todos: [{ id: "occ", content: "Daily", due: "2026-12-01" }] }, "daily");
+  await call("POST", "/api/ui/todos/complete", { bot: "daily", id: "occ" });
+  clock += 6000;
+  const [old] = (await bot("GET", "/api/bot/actions", undefined, "daily")).body.actions;
+  clock += 21 * 60_000;
+  s.store.expireClaims(20 * 60_000);
+  await bot("PUT", "/api/bot/todos", { todos: [{ id: "occ", content: "Daily", due: "2026-12-02" }] }, "daily");
+  await call("POST", "/api/ui/todos/complete", { bot: "daily", id: "occ" });
+  await bot("POST", `/api/bot/actions/${old.id}`, { ok: false, result: "old run failed" }, "daily");
+  assert.ok(s.store.findTodo("daily", "occ")!.completedAt, "the new occurrence stays completed");
+});
+
+test("archive: integer offsets only, and filtering by bot happens before paging", async () => {
+  assert.equal((await call("GET", "/api/ui/archive?offset=0.5")).status, 200);
+  for (let i = 0; i < 55; i++) await bot("POST", "/api/bot/items/close", { key: (await bot("POST", "/api/bot/items", { key: `bulk-${i}`, title: `Bulk ${i}` }, "bulk")).body.key, reason: "x" }, "bulk");
+  await bot("POST", "/api/bot/items", { key: "lonely", title: "Only one" }, "lonely");
+  await bot("POST", "/api/bot/items/close", { key: "lonely", reason: "done" }, "lonely");
+  const res = (await call("GET", "/api/ui/archive?bot=lonely")).body;
+  assert.equal(res.items.length, 1);
+  assert.equal(res.items[0].title, "Only one");
+});
+
+test("an event ending at midnight doesn't show on the next day", () => {
+  s.store.replaceEvents("cal", "2030-01-01", "2030-01-03", [
+    { title: "Late show", start: "2030-01-01T22:00:00", end: "2030-01-02T00:00:00", location: "", allDay: false, app: "" },
+    { title: "Two-day fair", start: "2030-01-01", end: "2030-01-02", location: "", allDay: true, app: "" },
+  ]);
+  const next = s.store.listEvents("2030-01-02", "2030-01-03").map((e) => e.title);
+  assert.deepEqual(next, ["Two-day fair"]);
+});
+
+test("a scan records when it started", async () => {
+  await bot("POST", "/api/bot/scan", { startedAt: "2026-10-12T10:00:00" }, "scanner");
+  const res = (await bot("GET", "/api/bot/actions", undefined, "scanner")).body;
+  assert.equal(res.lastScanAt, "2026-10-12T10:00:00");
+});
+
+test("webhooks: hex-mapped IPv6 loopback is private too", () => {
+  assert.ok(isPrivateAddress("::ffff:7f00:1"));
+  assert.notEqual(checkWebhookUrl("https://[::ffff:7f00:1]/hook", false), "");
+});
+
+test("taps queued before snapshots existed are cancelled on upgrade", () => {
+  const file = path.join(fs.mkdtempSync(path.join(os.tmpdir(), "gbd-")), "old.db");
+  const old = new Store(file, () => clock);
+  const { item } = old.upsertItem({ bot: "dashboard", section: "needs", kind: "reminder", title: "Old tap" });
+  old.addAction({ item, bot: "dashboard", type: "write", text: "x", delayMs: 0 });
+  old.db.exec("UPDATE actions SET snapshot = NULL");
+  old.close();
+  const upgraded = new Store(file, () => clock);
+  assert.equal(upgraded.getItem(item.id)!.status, "open");
+  assert.equal(upgraded.claimActions("dashboard").length, 0);
+  upgraded.close();
+  fs.rmSync(path.dirname(file), { recursive: true });
+});
+
+test("direct Todoist: a double tap closes the task once", async () => {
+  let closes = 0;
+  const fake = (async (input: URL | RequestInfo) => {
+    const u = new URL(String(input));
+    if (u.pathname.endsWith("/close")) closes++;
+    return new Response(null, { status: 204 });
+  }) as typeof fetch;
+  const store = new Store(":memory:", () => clock);
+  const server = http.createServer(createApp({ config, store, todoist: new Todoist("tok", "", "Europe/Rome", fake), log: () => {} }));
+  await new Promise<void>((r) => server.listen(0, "127.0.0.1", r));
+  const base = `http://127.0.0.1:${(server.address() as AddressInfo).port}`;
+  const post = (body: unknown) => fetch(base + "/api/ui/todos/complete", { method: "POST", headers: { "Content-Type": "application/json", "Tailscale-User-Login": OWNER }, body: JSON.stringify(body) });
+  const [a, b] = await Promise.all([post({ bot: "todoist", id: "42" }), post({ bot: "todoist", id: "42" })]);
+  assert.deepEqual([a.status, b.status].sort(), [200, 409]);
+  assert.equal(closes, 1);
+  server.close();
+  store.close();
 });

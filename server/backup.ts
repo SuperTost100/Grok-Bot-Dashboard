@@ -4,12 +4,15 @@ import path from "node:path";
 import fs from "node:fs";
 import { DatabaseSync, backup } from "node:sqlite";
 
+// Backups hold the same data as the database: readable by this user only.
+process.umask(0o077);
 const dataDir = path.resolve(process.env.DATA_DIR ?? "data");
 const dest = path.resolve(process.argv[2] ?? path.join(dataDir, "backups", `manual-${new Date().toISOString().replace(/[:.]/g, "-")}.db`));
 fs.mkdirSync(path.dirname(dest), { recursive: true });
 const src = new DatabaseSync(path.join(dataDir, "dashboard.db"), { readOnly: true });
 await backup(src, dest);
 src.close();
+fs.chmodSync(dest, 0o600);
 const check = new DatabaseSync(dest, { readOnly: true });
 const ok = (check.prepare("PRAGMA integrity_check").get() as { integrity_check: string }).integrity_check;
 const items = (check.prepare("SELECT COUNT(*) AS n FROM items").get() as { n: number }).n;

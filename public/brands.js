@@ -78,14 +78,14 @@ const BRAND_ALIASES = {
 function brandFor(app, source) {
   const norm = (s) => String(s || "").toLowerCase().trim();
   const a = norm(app);
-  if (a && BRANDS[a]) return BRANDS[a];
+  if (a && Object.hasOwn(BRANDS, a)) return BRANDS[a];
   const head = norm(String(source || "").split(/[·|:•]| - /)[0]);
   for (const key of [a, head].filter(Boolean)) {
     for (const [slug, names] of Object.entries(BRAND_ALIASES)) {
-      if (names.includes(key)) return BRANDS[slug];
+      if (names.includes(key) && Object.hasOwn(BRANDS, slug)) return BRANDS[slug];
     }
     for (const [slug, names] of Object.entries(BRAND_ALIASES)) {
-      if (names.some((n) => n.length > 3 && key.startsWith(n))) return BRANDS[slug];
+      if (names.some((n) => n.length > 3 && key.startsWith(n)) && Object.hasOwn(BRANDS, slug)) return BRANDS[slug];
     }
   }
   return null;

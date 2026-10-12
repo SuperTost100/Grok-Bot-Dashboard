@@ -1,11 +1,12 @@
 import http from "node:http";
+import https from "node:https";
 import fs from "node:fs";
 import path from "node:path";
 import { loadConfig } from "./config.ts";
 import { Store } from "./store.ts";
 import { Todoist } from "./todoist.ts";
 import { createApp, STALE_CLAIM_MS } from "./app.ts";
-import { assertPublicDestination } from "./webhook.ts";
+import { checkWebhookUrl, guardedLookup } from "./webhook.ts";
 import { localStamp } from "./time.ts";
 
 const log = (msg: string) => console.log(`${new Date().toISOString()} ${msg}`);
@@ -24,7 +25,8 @@ const todoist = config.todoistToken ? new Todoist(config.todoistToken, config.to
 
 // Ping a bot's webhook routine so it picks up work now instead of at its next scheduled run.
 // At most one ping per bot every 20 seconds; a ping that comes sooner is sent when the gap is up.
-// While actions stay ready and unclaimed, the ping repeats every 3 minutes, also after a restart.
+// While actions stay ready and unclaimed, the ping repeats every 3 minutes (for up to 2 hours), also after a
+// restart. An unanswered refresh is retried the same way for 15 minutes. Each ping starts a bot run, so both stop.
 const PING_GAP = 20_000;
 const RETRY_GAP = 3 * 60_000;
 const lastPing = new Map<string, number>();
@@ -42,28 +44,49 @@ async function ping(slug: string, reason: "actions" | "refresh") {
   if (!bot?.webhookUrl) return;
   lastPing.set(slug, Date.now());
   try {
-    await assertPublicDestination(bot.webhookUrl, config.webhookAllowPrivate);
-    const res = await fetch(bot.webhookUrl, {
-      method: "POST",
-      redirect: "error",
-      headers: {
-        "Content-Type": "application/json",
-        ...(bot.webhookToken ? { Authorization: `Bearer ${bot.webhookToken}` } : {}),
-      },
-      body: JSON.stringify({
-        source: "grok-bot-dashboard",
-        reason,
-        message:
-          reason === "actions"
-            ? "You have dashboard actions waiting. Run: grokdash actions"
-            : "Someone pressed refresh on the dashboard. Scan your sources and update it.",
-      }),
-      signal: AbortSignal.timeout(10_000),
+    const status = await post(bot.webhookUrl, bot.webhookToken, {
+      source: "grok-bot-dashboard",
+      reason,
+      message:
+        reason === "actions"
+          ? "You have dashboard actions waiting. Run: grokdash actions"
+          : "Someone pressed refresh on the dashboard. Scan your sources and update it.",
     });
-    log(`webhook ${slug} (${reason}): ${res.status}`);
+    log(`webhook ${slug} (${reason}): ${status}`);
   } catch (err) {
     log(`webhook ${slug} (${reason}) failed: ${(err as Error).message}`);
   }
+}
+
+/** POST without following redirects, connecting only to an address that passed the private-network check. */
+function post(url: string, token: string, body: unknown): Promise<number> {
+  const problem = checkWebhookUrl(url, config.webhookAllowPrivate);
+  if (problem) return Promise.reject(new Error(problem));
+  const data = JSON.stringify(body);
+  const u = new URL(url);
+  const client = u.protocol === "https:" ? https : http;
+  return new Promise((resolve, reject) => {
+    const req = client.request(
+      u,
+      {
+        method: "POST",
+        lookup: guardedLookup(config.webhookAllowPrivate) as never,
+        timeout: 10_000,
+        headers: {
+          "Content-Type": "application/json",
+          "Content-Length": Buffer.byteLength(data),
+          ...(token ? { Authorization: `Bearer ${token}` } : {}),
+        },
+      },
+      (res) => {
+        res.resume();
+        resolve(res.statusCode ?? 0);
+      },
+    );
+    req.on("timeout", () => req.destroy(new Error("timed out after 10 s")));
+    req.on("error", reject);
+    req.end(data);
+  });
 }
 
 const handle = createApp({ config, store, todoist, notify, log });
@@ -81,8 +104,11 @@ const tick = setInterval(() => {
     store.wakeSnoozed();
     store.expireClaims(STALE_CLAIM_MS);
     for (const bot of store.promoteDue()) notify(bot, "actions");
-    for (const bot of store.botsWithReadyWork()) {
+    for (const bot of store.botsWithReadyWork(2 * 3600_000)) {
       if (Date.now() - (lastPing.get(bot) ?? 0) > RETRY_GAP) notify(bot, "actions");
+    }
+    for (const bot of store.botsWithPendingRefresh(15 * 60_000)) {
+      if (Date.now() - (lastPing.get(bot) ?? 0) > RETRY_GAP) notify(bot, "refresh");
     }
   } catch (err) {
     log(`tick failed: ${(err as Error).message}`);

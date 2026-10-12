@@ -23,9 +23,11 @@ const ui = {
 // ---------- talking to the server ----------
 
 // Every state request gets a number. A response older than one already shown is dropped,
-// so a slow poll can't undo what a tap just changed.
+// so a slow poll can't undo what a tap just changed. While a tap is on its way, polls are ignored
+// altogether, and the tap's own answer always wins.
 let seq = 0;
 let shown = 0;
+let mutating = 0;
 
 async function api(method, path, body) {
   const res = await fetch(path, {
@@ -50,22 +52,27 @@ async function load() {
   try {
     const state = await api("GET", "/api/ui/state");
     showBanner("");
-    applyState(id, state);
+    if (!mutating) applyState(id, state);
   } catch (err) {
     showBanner(`Can't reach the dashboard server: ${err.message} Retrying every 20 seconds.`);
   }
 }
 
 async function run(method, path, body) {
-  const id = ++seq;
+  mutating++;
+  let failed = false;
   try {
     const data = await api(method, path, body);
-    if (data.state) applyState(id, data.state);
+    if (data.state) applyState(++seq, data.state);
     return data;
   } catch (err) {
+    failed = true;
     toast(err.message);
-    await load();
     return null;
+  } finally {
+    mutating--;
+    // After a refused tap, fetch the real state so the page shows what the server has.
+    if (failed && !mutating) load();
   }
 }
 
@@ -253,6 +260,17 @@ function cardActions(c) {
   return `<button class="btn primary" data-act="done" data-id="${id}">${icon("check")}Mark done</button>${end}`;
 }
 
+/**
+ * What an answer will make the bot do, shown when the instruction isn't just the button's words
+ * with more detail. That's the case worth a second look before tapping.
+ */
+function answersList(c) {
+  if (c.kind !== "choice") return "";
+  const rows = c.options.filter((o) => o.instruction && !o.instruction.toLowerCase().includes(o.label.trim().toLowerCase()));
+  if (!rows.length) return "";
+  return `<dl class="answers">${rows.map((o) => `<dt>${esc(o.label)}</dt><dd>${esc(o.instruction)}</dd>`).join("")}</dl>`;
+}
+
 /** The row that replaces a card while the bot works on it, with Undo during the undo window. */
 function pendingRow(c) {
   const p = c.pendingAction;
@@ -292,7 +310,7 @@ function renderCard(c) {
     <div class="meta">${logo(c)}${source}<time class="num" title="${esc(whenFull(c.updatedAt))}">${when(c.updatedAt)}</time></div>
     ${c.urgent ? `<div class="flag-row"><span class="flag">Urgent · ${esc(c.urgent)}</span></div>` : ""}
     <h3 id="t-${c.id}"><button class="title-btn" data-act="expand" data-id="${c.id}" aria-expanded="${open}">${esc(c.title)}${icon("chev", "i more")}</button></h3>
-    <div class="detail">${c.body ? `<p>${esc(c.body)}</p>` : ""}${c.context ? `<p class="context">${esc(c.context)}</p>` : ""}</div>
+    <div class="detail">${c.body ? `<p>${esc(c.body)}</p>` : ""}${c.context ? `<p class="context">${esc(c.context)}</p>` : ""}${answersList(c)}</div>
     ${draft}
     ${c.error ? `<div class="error">${esc(c.error)}</div>` : ""}
     <div class="actions">${cardActions(c)}</div>
@@ -373,7 +391,9 @@ function renderAgenda() {
   const day = (label, date) => {
     const next = addDay(date, 1);
     // Every event that touches this day, including ones that started earlier.
-    const evs = s.agenda.filter((e) => e.start.slice(0, 10) <= date && (e.end || e.start).slice(0, 10) >= date && e.start < next);
+    // A datetime end is exclusive (ending at 00:00 doesn't touch that day); a date-only end includes it.
+    const touches = (e) => !e.end ? e.start.slice(0, 10) === date : e.end.length === 10 ? e.end >= date : e.end > `${date}T00:00:00`;
+    const evs = s.agenda.filter((e) => e.start < next && (e.start.slice(0, 10) === date || touches(e)));
     const rows = evs.map((e) => {
       const startsToday = e.start.slice(0, 10) === date;
       const time = e.allDay || !startsToday ? (startsToday ? "All day" : "Ongoing") : e.start.slice(11, 16);
@@ -406,7 +426,7 @@ function renderCatch() {
         const pending = c.status === "pending" && c.pendingAction;
         const isOpen = openIds.has(String(c.id)) || ui.writing.has(c.id) || pending;
         return `<details class="catch${read ? " read" : ""}" data-id="${c.id}"${isOpen ? " open" : ""}>
-          <summary>${logo(c)}<span class="ttl">${esc(c.title)}</span><span class="n num">${esc(c.countLabel)}</span>${icon("chev", "i chev")}</summary>
+          <summary data-act="toggle-catch" data-id="${c.id}">${logo(c)}<span class="ttl">${esc(c.title)}</span><span class="n num">${esc(c.countLabel)}</span>${icon("chev", "i chev")}</summary>
           <p class="gist">${esc(c.body)}</p>
           ${pending ? `<div class="catch-pending">${pendingRow(c)}</div>` : `
           ${ui.writing.has(c.id) ? writeForm(c, `Ask ${botOf(c.bot).name} about this`) : ""}
@@ -422,7 +442,7 @@ async function loadArchive(append = false) {
   const q = $("#arch-q").value.trim();
   const offset = append ? ui.archive.items.length : 0;
   try {
-    const res = await api("GET", `/api/ui/archive?q=${encodeURIComponent(q)}&offset=${offset}`);
+    const res = await api("GET", `/api/ui/archive?q=${encodeURIComponent(q)}&offset=${offset}&bot=${encodeURIComponent(ui.filter)}`);
     if (seqId !== archiveSeq) return;
     ui.archive = { items: append ? [...ui.archive.items, ...res.items] : res.items, more: res.more, q };
     renderArchive();
@@ -432,7 +452,7 @@ async function loadArchive(append = false) {
 }
 
 function renderArchive() {
-  const items = ui.archive.items.filter(visible);
+  const items = ui.archive.items;
   const q = ui.archive.q;
   $("#archive").innerHTML = items.length
     ? items.map((a) => {
@@ -490,7 +510,7 @@ document.addEventListener("click", async (e) => {
   if (b.dataset.bot) {
     ui.filter = b.dataset.bot;
     render();
-    if (ui.tab === "archive") renderArchive();
+    if (ui.tab === "archive") loadArchive();
     return;
   }
   const id = Number(b.dataset.id);

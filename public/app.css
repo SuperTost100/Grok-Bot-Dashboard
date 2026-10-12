@@ -385,3 +385,8 @@ details.arch + details.arch { border-top: 1px solid var(--border); }
 .arch-detail .actions { align-items: center; margin-top: 8px; }
 .arch-detail .actions a { color: var(--muted); font-size: 14px; }
 .resolved .status strong, .resolved .status .line { display: block; }
+.btn { max-width: 100%; min-width: 0; }
+.btn.primary[data-act="send"], .btn.primary[data-act="send-edited"] { overflow: hidden; text-overflow: ellipsis; display: inline-block; line-height: 38px; }
+.answers { margin: 8px 0 0; font-size: 14px; display: grid; grid-template-columns: auto 1fr; gap: 2px 10px; }
+.answers dt { font-weight: 600; }
+.answers dd { margin: 0; color: var(--muted); }
