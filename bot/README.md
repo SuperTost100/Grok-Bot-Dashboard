@@ -51,7 +51,7 @@ Close it again:
 
 ## 2. Create the Dashboard bot
 
-1. Copy [`dashboard-bot.md`](dashboard-bot.md) and fill in its "Your setup" section: which sources to scan, the card language and the name of your secretary bot.
+1. Copy [`dashboard-bot.md`](dashboard-bot.md) and fill in its "Your setup" section: which sources to scan, the card language (by default each card follows the language of its source) and the name of your secretary bot.
 2. In Grok Bot, create a new bot named "Dashboard" and paste the filled-in text as its instructions. Check that the instructions really saved: open the bot's settings and look. A bot that designs other bots may leave them empty.
 3. Send the new bot this message:
 
