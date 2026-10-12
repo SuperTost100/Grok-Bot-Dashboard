@@ -27,14 +27,14 @@ GROKDASH_BOT=venduto "$g" post '{"key":"demo:sonos","kind":"choice","title":"Can
 GROKDASH_BOT=comprato "$g" post '{"key":"demo:sonoff","kind":"choice","title":"SONOFF ZBMINIL2 for 9 euro. Message the seller?","body":"Listed 20 minutes ago, 3 km away. Your max is 12.","source":"Subito · Torino",
  "options":[{"label":"Yes, ask if available"},{"label":"Skip this one"}]}' >/dev/null
 
-GROKDASH_BOT=dashboard "$g" agenda "{\"from\":\"$today\",\"events\":[
+GROKDASH_BOT=dashboard "$g" agenda "{\"app\":\"googlecalendar\",\"from\":\"$today\",\"events\":[
  {\"title\":\"Short film meeting\",\"start\":\"${today}T10:00\",\"end\":\"${today}T11:00\",\"location\":\"Urban vineyard\"},
  {\"title\":\"Io Sono Cultura\",\"start\":\"${today}T14:30\",\"end\":\"${today}T16:00\"},
  {\"title\":\"Gym\",\"start\":\"${today}T17:00\",\"end\":\"${today}T18:00\"},
  {\"title\":\"Production lab\",\"start\":\"${tomorrow}T10:00\",\"end\":\"${tomorrow}T11:30\",\"location\":\"Lab 3\"},
  {\"title\":\"NTT Data tech talk\",\"start\":\"${tomorrow}T14:30\",\"end\":\"${tomorrow}T16:00\",\"location\":\"Room 10C\"}]}" >/dev/null
 
-GROKDASH_BOT=dashboard "$g" todos "{\"todos\":[
+GROKDASH_BOT=dashboard "$g" todos "{\"app\":\"todoist\",\"todos\":[
  {\"id\":\"d1\",\"content\":\"Io Sono Cultura comparison\",\"priority\":\"p1\",\"deadline\":\"$tomorrow\"},
  {\"id\":\"d2\",\"content\":\"Reply to CFR\",\"priority\":\"p2\",\"due\":\"$today\",\"project\":\"Work\"},
  {\"id\":\"d3\",\"content\":\"Upload field photos to Drive\",\"priority\":\"p3\",\"due\":\"$today\",\"project\":\"Scouts\"},

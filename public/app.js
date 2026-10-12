@@ -141,6 +141,24 @@ const avatar = (slug) => {
 };
 const visible = (item) => ui.filter === "all" || item.bot === ui.filter;
 
+/** Brand tile for where a card comes from, with the posting bot as a small badge when there are several bots. */
+function brandTile(b, extra = "") {
+  const mark = b.path
+    ? `<svg viewBox="0 0 24 24" aria-hidden="true"><path d="${b.path}"/></svg>`
+    : `<span class="letter" aria-hidden="true">${esc(b.letter)}</span>`;
+  return `<span class="logo" data-color="${esc(b.color)}" title="${esc(b.name)}">${mark}${extra}</span>`;
+}
+
+function logo(item) {
+  const b = brandFor(item.app, item.source);
+  if (!b) return avatar(item.bot);
+  const bot = botOf(item.bot);
+  const badge = ui.state.bots.length > 1
+    ? `<span class="bot-badge" data-color="${esc(bot.color)}" title="${esc(bot.name)} bot">${esc((bot.name || "?").charAt(0).toUpperCase())}</span>`
+    : "";
+  return brandTile(b, badge);
+}
+
 function paintColors() {
   // The page's CSP forbids inline style attributes, so colors are set through the DOM.
   for (const el of $$("[data-color]")) el.style.background = el.dataset.color;
@@ -246,7 +264,7 @@ function renderCard(c) {
     : "";
   const source = c.link ? `<a class="src" href="${esc(c.link)}" target="_blank" rel="noopener">${esc(c.source || "Open")}</a>` : `<span class="src">${esc(c.source)}</span>`;
   return `<article class="card${c.urgent ? " urgent" : ""}${open ? " open" : ""}" aria-labelledby="t-${c.id}">
-    <div class="meta">${avatar(c.bot)}${source}<time class="num">${when(c.createdAt)}</time></div>
+    <div class="meta">${logo(c)}${source}<time class="num">${when(c.createdAt)}</time></div>
     ${c.urgent ? `<div class="flag-row"><span class="flag">Urgent · ${esc(c.urgent)}</span></div>` : ""}
     <h3 id="t-${c.id}"><button class="title-btn" data-act="expand" data-id="${c.id}" aria-expanded="${open}">${esc(c.title)}${icon("chev", "i more")}</button></h3>
     <div class="detail">${c.body ? `<p>${esc(c.body)}</p>` : ""}${c.context ? `<p class="context">${esc(c.context)}</p>` : ""}</div>
@@ -281,7 +299,8 @@ function renderTodos() {
   const s = ui.state;
   const t = s.todos;
   const today = s.today;
-  $("#todo-source").textContent = t.source === "todoist" ? "From Todoist" : t.source === "bot" ? "From your bots" : "";
+  const todoBrand = t.source === "todoist" ? BRANDS.todoist : t.items.length && t.items.every((x) => x.app === t.items[0].app) ? brandFor(t.items[0].app, "") : null;
+  $("#todo-source").innerHTML = t.source === "none" ? "" : todoBrand ? `${brandTile(todoBrand)}<span>From ${esc(todoBrand.name)}</span>` : "From your bots";
   const now = Date.now();
   for (const [id, v] of ui.doneTodos) if (now - v.at > 15000) ui.doneTodos.delete(id);
   const items = t.items.filter((x) => !ui.doneTodos.has(x.id));
@@ -332,6 +351,9 @@ function renderAgenda() {
     return `<div class="day">${label}</div><div class="list">${rows.join("") || `<div class="empty-row">Nothing in the calendar.</div>`}</div>`;
   };
   $("#agenda").innerHTML = day("Today", s.today) + day("Tomorrow", tomorrow);
+  const apps = [...new Set(s.agenda.map((e) => e.app).filter(Boolean))];
+  const calBrand = apps.length === 1 ? brandFor(apps[0], "") : null;
+  $("#agenda-source").innerHTML = calBrand ? `${brandTile(calBrand)}<span>From ${esc(calBrand.name)}</span>` : "";
 }
 
 function renderCatch() {
@@ -343,7 +365,7 @@ function renderCatch() {
         const read = c.status === "closed";
         const pending = c.status === "pending";
         return `<details class="catch${read ? " read" : ""}" data-id="${c.id}"${openIds.has(String(c.id)) ? " open" : ""}>
-          <summary>${avatar(c.bot)}<span class="ttl">${esc(c.title)}</span><span class="n num">${esc(c.countLabel)}</span>${icon("chev", "i chev")}</summary>
+          <summary>${logo(c)}<span class="ttl">${esc(c.title)}</span><span class="n num">${esc(c.countLabel)}</span>${icon("chev", "i chev")}</summary>
           <p class="gist">${esc(c.body)}</p>
           ${ui.writing.has(c.id) ? `<form class="write catch-write" data-form="${c.id}"><label class="sr-only" for="w-${c.id}">Ask about this</label><input id="w-${c.id}" placeholder="Ask ${esc(botOf(c.bot).name)} about this" autocomplete="off" maxlength="2000"><button class="btn primary" aria-label="Send">${icon("send")}</button></form>` : ""}
           <div class="actions">${pending ? `<span class="context">${esc(botOf(c.bot).name)} is on it</span>` : `${read ? "" : `<button class="btn" data-act="read" data-id="${c.id}">${icon("check")}Mark as read</button>`}<button class="btn ghost" data-act="write" data-id="${c.id}">${icon("msg")}Ask about this</button>`}</div>
@@ -371,7 +393,7 @@ async function renderArchive() {
           ? `Snoozed until ${whenFull(a.snoozedUntil)}`
           : `${a.closedReason === "bot" ? `Closed by ${botOf(a.bot).name}: ` : ""}${a.resolution || a.closedReason} · ${when(a.closedAt)}`;
         const restore = a.closedReason === "action" ? "" : `<button class="btn" data-act="restore" data-id="${a.id}">Restore</button>`;
-        return `<div class="arch">${avatar(a.bot)}<div class="body"><div class="t">${esc(a.title)}</div><div class="why">${esc(why)}</div></div>${restore}</div>`;
+        return `<div class="arch">${logo(a)}<div class="body"><div class="t">${esc(a.title)}</div><div class="why">${esc(why)}</div></div>${restore}</div>`;
       }).join("")
     : `<div class="empty arch-empty"><strong>${q ? "No matches" : "Nothing archived yet"}</strong>${q ? "Try another word, or clear the bot filter." : "Cards you finish, dismiss or snooze land here for 30 days."}</div>`;
   paintColors();

@@ -22,6 +22,7 @@ export interface Item {
   body: string;
   context: string;
   source: string;
+  app: string;
   link: string;
   urgent: string;
   countLabel: string;
@@ -74,6 +75,7 @@ export interface CalEvent {
   end: string;
   location: string;
   allDay: boolean;
+  app: string;
 }
 
 export interface BotTodo {
@@ -86,6 +88,7 @@ export interface BotTodo {
   deadline: string;
   project: string;
   url: string;
+  app: string;
   completedAt: number | null;
 }
 
@@ -187,6 +190,7 @@ function toItem(r: Row): Item {
     body: str(r.body),
     context: str(r.context),
     source: str(r.source),
+    app: str(r.app),
     link: str(r.link),
     urgent: str(r.urgent),
     countLabel: str(r.count_label),
@@ -245,6 +249,7 @@ export interface ItemInput {
   body?: string;
   context?: string;
   source?: string;
+  app?: string;
   link?: string;
   urgent?: string;
   countLabel?: string;
@@ -265,6 +270,10 @@ export class Store {
     // Columns added after the first release.
     const botCols = (this.db.prepare("PRAGMA table_info(bots)").all() as Row[]).map((r) => String(r.name));
     if (!botCols.includes("webhook_token")) this.db.exec("ALTER TABLE bots ADD COLUMN webhook_token TEXT NOT NULL DEFAULT ''");
+    for (const table of ["items", "events", "todos"]) {
+      const cols = (this.db.prepare(`PRAGMA table_info(${table})`).all() as Row[]).map((r) => String(r.name));
+      if (!cols.includes("app")) this.db.exec(`ALTER TABLE ${table} ADD COLUMN app TEXT NOT NULL DEFAULT ''`);
+    }
   }
 
   close() {
@@ -360,6 +369,7 @@ export class Store {
         body: input.body ?? "",
         context: input.context ?? "",
         source: input.source ?? "",
+        app: input.app ?? "",
         link: input.link ?? "",
         urgent: input.urgent ?? "",
         count_label: input.countLabel ?? "",
@@ -370,12 +380,12 @@ export class Store {
       if (!existing) {
         const res = this.db
           .prepare(
-            `INSERT INTO items (bot, key, section, kind, title, body, context, source, link, urgent, count_label, options, draft, status, created_at, updated_at)
-             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'open', ?, ?)`,
+            `INSERT INTO items (bot, key, section, kind, title, body, context, source, app, link, urgent, count_label, options, draft, status, created_at, updated_at)
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'open', ?, ?)`,
           )
           .run(
             input.bot, input.key ?? null, fields.section, fields.kind, fields.title, fields.body, fields.context,
-            fields.source, fields.link, fields.urgent, fields.count_label, fields.options, fields.draft, now, now,
+            fields.source, fields.app, fields.link, fields.urgent, fields.count_label, fields.options, fields.draft, now, now,
           );
         return { item: this.getItem(Number(res.lastInsertRowid))!, created: true, reopened: false, ignored: false };
       }
@@ -387,12 +397,12 @@ export class Store {
       }
       this.db
         .prepare(
-          `UPDATE items SET section = ?, kind = ?, title = ?, body = ?, context = ?, source = ?, link = ?, urgent = ?,
+          `UPDATE items SET section = ?, kind = ?, title = ?, body = ?, context = ?, source = ?, app = ?, link = ?, urgent = ?,
              count_label = ?, options = ?, draft = ?, updated_at = ?
            WHERE id = ?`,
         )
         .run(
-          fields.section, fields.kind, fields.title, fields.body, fields.context, fields.source, fields.link,
+          fields.section, fields.kind, fields.title, fields.body, fields.context, fields.source, fields.app, fields.link,
           fields.urgent, fields.count_label, fields.options, fields.draft, now, existing.id,
         );
       if (reopen) {
@@ -596,8 +606,8 @@ export class Store {
     this.tx(() => {
       this.touchBot(bot);
       this.db.prepare("DELETE FROM events WHERE bot = ? AND start >= ? AND start < ?").run(bot, from, to);
-      const ins = this.db.prepare("INSERT INTO events (bot, title, start, end, location, all_day) VALUES (?, ?, ?, ?, ?, ?)");
-      for (const e of events) ins.run(bot, e.title, e.start, e.end, e.location, e.allDay ? 1 : 0);
+      const ins = this.db.prepare("INSERT INTO events (bot, title, start, end, location, all_day, app) VALUES (?, ?, ?, ?, ?, ?, ?)");
+      for (const e of events) ins.run(bot, e.title, e.start, e.end, e.location, e.allDay ? 1 : 0, e.app);
     });
   }
 
@@ -615,6 +625,7 @@ export class Store {
           end: str(row.end),
           location: str(row.location),
           allDay: Number(row.all_day) === 1,
+          app: str(row.app),
         };
       });
   }
@@ -630,10 +641,10 @@ export class Store {
       );
       this.db.prepare("DELETE FROM todos WHERE bot = ?").run(bot);
       const ins = this.db.prepare(
-        "INSERT INTO todos (id, bot, content, priority, due, due_string, deadline, project, url, completed_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+        "INSERT INTO todos (id, bot, content, priority, due, due_string, deadline, project, url, app, completed_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
       );
       for (const t of todos) {
-        ins.run(t.id, bot, t.content, t.priority, t.due, t.dueString, t.deadline, t.project, t.url, done.has(t.id) ? this.now() : null);
+        ins.run(t.id, bot, t.content, t.priority, t.due, t.dueString, t.deadline, t.project, t.url, t.app, done.has(t.id) ? this.now() : null);
       }
     });
   }
@@ -654,6 +665,7 @@ export class Store {
           deadline: str(row.deadline),
           project: str(row.project),
           url: str(row.url),
+          app: str(row.app),
           completedAt: num(row.completed_at),
         };
       });

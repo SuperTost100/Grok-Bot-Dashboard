@@ -37,6 +37,12 @@ function slug(v: unknown): string {
   return s;
 }
 
+/** A short app id like "whatsapp". Bots get this wrong often, so it's normalized rather than rejected. */
+function app(v: unknown): string {
+  if (typeof v !== "string") return "";
+  return v.toLowerCase().replace(/[^a-z0-9]+/g, "").slice(0, 40);
+}
+
 function url(v: unknown, field: string): string {
   const s = text(v, field, 2000);
   if (s && !/^https?:\/\//i.test(s)) throw bad(`"${field}" must start with http:// or https://`);
@@ -74,6 +80,7 @@ export function parseItem(b: Record<string, unknown>): ItemInput {
     body: text(b.body, "body", 2000),
     context: text(b.context, "context", 1000),
     source: text(b.source, "source", 120),
+    app: app(b.app),
     link: url(b.link, "link"),
     urgent: text(b.urgent, "urgent", 60),
     countLabel: text(b.countLabel, "countLabel", 40),
@@ -323,6 +330,7 @@ export function createApp(deps: AppDeps) {
         end: normalizeWhen(e.end, `events[${i}].end`, tz, false),
         location: text(e.location, `events[${i}].location`, 200),
         allDay: e.allDay === true || start.length === 10,
+        app: app(e.app ?? b.app),
       };
     });
     store.replaceEvents(bot, from, to, events);
@@ -345,6 +353,7 @@ export function createApp(deps: AppDeps) {
         deadline: normalizeWhen(t.deadline, `todos[${i}].deadline`, tz, false).slice(0, 10),
         project: text(t.project, `todos[${i}].project`, 80),
         url: url(t.url, `todos[${i}].url`),
+        app: app(t.app ?? b.app),
       };
     });
     store.replaceTodos(bot, todos);

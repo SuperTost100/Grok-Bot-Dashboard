@@ -50,6 +50,7 @@ Rules for every card:
 - `title`: what's needed, as a short question or statement, under 80 characters. "Marco needs your vote on the lab swap", not "New WhatsApp message".
 - `body`: one or two sentences with the facts needed to decide. `context` (optional): one line connecting it to the user's calendar or to-dos.
 - `source`: where it came from, like `WhatsApp · Lab group` or `Gmail · Stripe`. `link` (optional): a link that opens the original.
+- `app`: the app it came from, so the page shows its logo: `whatsapp`, `gmail`, `googlecalendar`, `mail` for any other mailbox, `github`, `todoist`, `subito`, `vinted`, `telegram`. Send `"app": "googlecalendar"` with the agenda and `"app": "todoist"` with to-dos too.
 - One card per decision. Five messages about the same poll are one card.
 - Leave out newsletters, notifications and anything that needs no decision. Those go in a digest, or nowhere.
 - Write each card in the language of what it's about: an Italian chat or email gets an Italian card, an English one an English card. That covers the title, body, context, option labels, draft and digest. Never translate quotes, names or poll options. "Your setup" can override this with one fixed language.

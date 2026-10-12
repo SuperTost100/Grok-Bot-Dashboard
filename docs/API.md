@@ -19,21 +19,22 @@ A card is one thing that needs the user (section `needs`) or one catch-up summar
 
 `POST /api/bot/items` with one card, or `{"items": [...]}` with up to 50.
 
-| Field        | Required                   | Notes                                                                                                                                                                                          |
-| ------------ | -------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `key`        | strongly recommended       | Stable id for the source thread, like `wa:GROUP_ID:poll-1`. Posting the same key updates the card.                                                                                             |
-| `kind`       | no, defaults to `reminder` | `choice`, `draft`, `reminder` or `digest`                                                                                                                                                      |
-| `section`    | no                         | `catchup` for digests, otherwise `needs`                                                                                                                                                       |
-| `title`      | yes                        | Up to 200 characters. What's needed, as a question or a statement.                                                                                                                             |
-| `body`       | no                         | Up to 2000 characters. The facts needed to decide.                                                                                                                                             |
-| `context`    | no                         | One line linking it to the calendar or to-dos.                                                                                                                                                 |
-| `source`     | no                         | Where it came from, like `WhatsApp · Lab group`.                                                                                                                                               |
-| `link`       | no                         | `http(s)` link that opens the original.                                                                                                                                                        |
-| `urgent`     | no                         | A few words with the deadline, like `answer by 14:00`. Urgent cards sort first and get a red outline.                                                                                          |
-| `options`    | for `choice`               | 1 to 4 of `{"label": "Vote Tuesday", "instruction": "Vote Tuesday in the Lab group poll"}`. The first is shown as the main button.                                                             |
-| `draft`      | for `draft`                | `{"to": "Sam", "channel": "WhatsApp", "text": "..."}`                                                                                                                                          |
-| `countLabel` | for `digest`               | Short label like `46 messages`.                                                                                                                                                                |
-| `reopen`     | no                         | `true` to bring back a card the user closed. Without it, posting a closed card's key does nothing and returns `"ignored": true`. Catch-up digests reopen on their own when their text changes. |
+| Field        | Required                   | Notes                                                                                                                                                                                                                   |
+| ------------ | -------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `key`        | strongly recommended       | Stable id for the source thread, like `wa:GROUP_ID:poll-1`. Posting the same key updates the card.                                                                                                                      |
+| `kind`       | no, defaults to `reminder` | `choice`, `draft`, `reminder` or `digest`                                                                                                                                                                               |
+| `section`    | no                         | `catchup` for digests, otherwise `needs`                                                                                                                                                                                |
+| `title`      | yes                        | Up to 200 characters. What's needed, as a question or a statement.                                                                                                                                                      |
+| `body`       | no                         | Up to 2000 characters. The facts needed to decide.                                                                                                                                                                      |
+| `context`    | no                         | One line linking it to the calendar or to-dos.                                                                                                                                                                          |
+| `source`     | no                         | Where it came from, like `WhatsApp · Lab group`.                                                                                                                                                                        |
+| `app`        | no                         | Which app it came from, for the logo: `whatsapp`, `gmail`, `googlecalendar`, `mail` (any other mailbox), `github`, `todoist`, `subito`, `vinted`, `telegram` and more. Leave it out and the page guesses from `source`. |
+| `link`       | no                         | `http(s)` link that opens the original.                                                                                                                                                                                 |
+| `urgent`     | no                         | A few words with the deadline, like `answer by 14:00`. Urgent cards sort first and get a red outline.                                                                                                                   |
+| `options`    | for `choice`               | 1 to 4 of `{"label": "Vote Tuesday", "instruction": "Vote Tuesday in the Lab group poll"}`. The first is shown as the main button.                                                                                      |
+| `draft`      | for `draft`                | `{"to": "Sam", "channel": "WhatsApp", "text": "..."}`                                                                                                                                                                   |
+| `countLabel` | for `digest`               | Short label like `46 messages`.                                                                                                                                                                                         |
+| `reopen`     | no                         | `true` to bring back a card the user closed. Without it, posting a closed card's key does nothing and returns `"ignored": true`. Catch-up digests reopen on their own when their text changes.                          |
 
 Response:
 
@@ -119,7 +120,7 @@ An action that isn't reported within 20 minutes is handed out again. `refreshReq
 }
 ```
 
-`start` and `end` take a date (`2026-10-13`, an all-day event) or a datetime with or without an offset. The dashboard stores them in its own time zone (`TZ`).
+Add `"app": "googlecalendar"` (or another app) at the top level or per event to show its logo. `start` and `end` take a date (`2026-10-13`, an all-day event) or a datetime with or without an offset. The dashboard stores them in its own time zone (`TZ`).
 
 ## To-dos
 
@@ -141,7 +142,7 @@ Only used when the server has no `TODOIST_TOKEN`. `PUT /api/bot/todos` replaces 
 }
 ```
 
-The page shows what's overdue, due or with a deadline in the next 7 days, plus anything `p1` or `p2`.
+Add `"app": "todoist"` to show its logo. The page shows what's overdue, due or with a deadline in the next 7 days, plus anything `p1` or `p2`.
 
 ## Bot settings and scans
 
