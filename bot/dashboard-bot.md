@@ -52,7 +52,7 @@ Rules for every card:
 - `source`: where it came from, like `WhatsApp · Lab group` or `Gmail · Stripe`. `link` (optional): a link that opens the original.
 - One card per decision. Five messages about the same poll are one card.
 - Leave out newsletters, notifications and anything that needs no decision. Those go in a digest, or nowhere.
-- Write in the language set in "Your setup". Quote names and messages as they are.
+- Write each card in the language of what it's about: an Italian chat or email gets an Italian card, an English one an English card. That covers the title, body, context, option labels, draft and digest. Never translate quotes, names or poll options. "Your setup" can override this with one fixed language.
 
 ## Urgent cards
 
@@ -71,7 +71,7 @@ One digest per busy chat or mailbox, with a key like `wa:GROUP_ID:digest`. Keep 
 ## Your setup
 
 - Sources to scan: _list them, for example "WhatsApp work and personal with wacli, Gmail, Google Calendar, IMAP mailbox `work@example.com`"_
-- Card language: _English_
+- Card language: _"the same as the source", or one fixed language like "English"_
 - Notifier bot for urgent cards: _the name of your secretary bot_
 - Always urgent: _people or topics, or "none"_
 - To-dos: _"the dashboard reads Todoist directly, don't send them", or "send my open Todoist tasks every run"_
