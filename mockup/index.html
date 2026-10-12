@@ -1,0 +1,690 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>Grok Bot Dashboard</title>
+<meta name="theme-color" content="#f6f5f2" media="(prefers-color-scheme: light)">
+<meta name="theme-color" content="#121211" media="(prefers-color-scheme: dark)">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-status-bar-style" content="default">
+<meta name="apple-mobile-web-app-title" content="Grok Dash">
+<link rel="manifest" href="manifest.webmanifest">
+<link rel="apple-touch-icon" href="icon-180.png">
+<link rel="icon" href="icon-192.png">
+<style>
+:root {
+  --bg: #f6f5f2;
+  --surface: #ffffff;
+  --surface-2: #efeee9;
+  --text: #1b1a17;
+  --muted: #64615a;
+  --border: #e3e1da;
+  --border-strong: #c9c6bd;
+  --primary: #1b1a17;
+  --on-primary: #ffffff;
+  --urgent: #b42318;
+  --urgent-bg: #fdecea;
+  --ok: #1e6e42;
+  --ok-bg: #e7f4ec;
+  --focus: #3d63dd;
+  --bot-dashboard: #1b1a17;
+  --bot-secretary: #c2412d;
+  --bot-venduto: #2f7d5b;
+  --bot-comprato: #3b6fb6;
+  --radius: 14px;
+  --tab-h: 64px;
+  color-scheme: light dark;
+}
+@media (prefers-color-scheme: dark) {
+  :root {
+    --bg: #121211;
+    --surface: #1b1b19;
+    --surface-2: #262623;
+    --text: #ecebe6;
+    --muted: #a6a39a;
+    --border: #2f2e2a;
+    --border-strong: #46443e;
+    --primary: #ecebe6;
+    --on-primary: #121211;
+    --urgent: #ff8a7a;
+    --urgent-bg: #3a1c18;
+    --ok: #6fd39b;
+    --ok-bg: #16301f;
+    --focus: #8aa6ff;
+    --bot-dashboard: #5b5a55;
+  }
+}
+* { box-sizing: border-box; }
+html { -webkit-text-size-adjust: 100%; }
+body {
+  margin: 0;
+  background: var(--bg);
+  color: var(--text);
+  font: 16px/1.45 system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+  -webkit-font-smoothing: antialiased;
+  padding-bottom: calc(var(--tab-h) + env(safe-area-inset-bottom));
+}
+button, input, textarea { font: inherit; color: inherit; }
+button { cursor: pointer; }
+:focus-visible { outline: 2px solid var(--focus); outline-offset: 2px; border-radius: 8px; }
+::selection { background: color-mix(in oklab, var(--focus) 30%, transparent); }
+.num { font-variant-numeric: tabular-nums; }
+.sr-only { position: absolute; width: 1px; height: 1px; overflow: hidden; clip: rect(0 0 0 0); white-space: nowrap; }
+svg.i { width: 18px; height: 18px; flex: none; stroke: currentColor; fill: none; stroke-width: 1.7; stroke-linecap: round; stroke-linejoin: round; }
+
+/* Header */
+.top {
+  position: sticky; top: 0; z-index: 5;
+  background: color-mix(in oklab, var(--bg) 88%, transparent);
+  backdrop-filter: saturate(1.4) blur(14px);
+  -webkit-backdrop-filter: saturate(1.4) blur(14px);
+  border-bottom: 1px solid var(--border);
+  padding: calc(env(safe-area-inset-top) + 12px) 16px 10px;
+}
+.top-inner { max-width: 1200px; margin: 0 auto; }
+.top-row { display: flex; align-items: center; gap: 12px; }
+.top h1 { font-size: 24px; line-height: 1.2; margin: 0; font-weight: 650; letter-spacing: -0.01em; }
+.top .date { color: var(--muted); font-size: 14px; }
+.top .spacer { flex: 1; }
+.refresh {
+  display: inline-flex; align-items: center; gap: 6px;
+  min-height: 40px; padding: 0 12px; border-radius: 999px;
+  border: 1px solid var(--border); background: var(--surface);
+  font-size: 14px; color: var(--muted); white-space: nowrap;
+}
+.refresh:hover { border-color: var(--border-strong); color: var(--text); }
+.refresh.busy svg { animation: spin 0.9s linear infinite; }
+@keyframes spin { to { transform: rotate(360deg); } }
+.desk-tabs { display: none; gap: 4px; }
+.desk-tabs button {
+  border: 0; background: none; min-height: 36px; padding: 0 12px; border-radius: 8px; color: var(--muted); font-size: 15px;
+}
+.desk-tabs button[aria-selected="true"] { background: var(--surface-2); color: var(--text); font-weight: 600; }
+
+.filters { display: flex; gap: 8px; overflow-x: auto; margin: 10px -16px 0; padding: 0 16px 2px; scrollbar-width: none; }
+.filters::-webkit-scrollbar { display: none; }
+.chip-filter {
+  display: inline-flex; align-items: center; gap: 6px; flex: none;
+  min-height: 36px; padding: 0 12px 0 6px; border-radius: 999px;
+  border: 1px solid var(--border); background: var(--surface); font-size: 14px; white-space: nowrap;
+}
+.chip-filter.all { padding-left: 12px; }
+.chip-filter[aria-pressed="true"] { background: var(--primary); color: var(--on-primary); border-color: var(--primary); }
+.chip-filter .count { color: var(--muted); }
+.chip-filter[aria-pressed="true"] .count { color: inherit; opacity: 0.75; }
+
+/* Layout */
+main { max-width: 1200px; margin: 0 auto; padding: 16px; }
+.view[hidden] { display: none; }
+.grid { display: flex; flex-direction: column; gap: 28px; }
+.col-main, .aside { display: contents; }
+.s-needs { order: 1; } .s-todo { order: 2; } .s-agenda { order: 3; } .s-catch { order: 4; }
+section + section { margin-top: 0; }
+@media (min-width: 1000px) {
+  body { padding-bottom: 0; }
+  .grid { display: grid; grid-template-columns: minmax(0, 1fr) 380px; align-items: start; }
+  .col-main, .aside { display: block; }
+  .aside { position: sticky; top: 132px; }
+  .col-main section + section, .aside section + section { margin-top: 28px; }
+  .desk-tabs { display: flex; }
+  .tabbar { display: none !important; }
+}
+.sec-head { display: flex; align-items: baseline; gap: 8px; margin: 0 0 10px; }
+.sec-head h2 { font-size: 18px; margin: 0; font-weight: 650; }
+.sec-head .count { color: var(--muted); font-size: 15px; }
+.sec-head .note { margin-left: auto; color: var(--muted); font-size: 13px; }
+
+/* Cards */
+.stack { display: grid; gap: 10px; }
+.card {
+  background: var(--surface); border: 1px solid var(--border); border-radius: var(--radius);
+  padding: 14px 14px 12px;
+}
+.card.urgent { border-color: color-mix(in oklab, var(--urgent) 45%, var(--border)); }
+.meta { display: flex; align-items: center; gap: 8px; font-size: 13px; color: var(--muted); min-width: 0; }
+.meta .src { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.meta time { margin-left: auto; flex: none; }
+.avatar {
+  width: 22px; height: 22px; border-radius: 7px; flex: none;
+  display: grid; place-items: center; color: #fff; font-size: 12px; font-weight: 650;
+}
+.flag {
+  display: inline-flex; align-items: center; gap: 4px; flex: none;
+  font-size: 12px; font-weight: 600; color: var(--urgent); background: var(--urgent-bg);
+  padding: 2px 8px; border-radius: 999px;
+}
+.card h3 { font-size: 16px; line-height: 1.35; margin: 8px 0 4px; font-weight: 600; }
+.card p { margin: 0; color: var(--text); font-size: 15px; }
+.card .context { color: var(--muted); font-size: 14px; margin-top: 4px; }
+.card .notified { color: var(--muted); font-size: 13px; margin-top: 8px; display: flex; gap: 6px; align-items: center; }
+.draft {
+  margin-top: 10px; padding: 10px 12px; border-radius: 10px; background: var(--surface-2);
+  font-size: 15px; white-space: pre-wrap;
+}
+.draft-label { font-size: 13px; color: var(--muted); margin-top: 10px; }
+textarea.draft-edit {
+  display: block; width: 100%; margin-top: 10px; padding: 10px 12px; min-height: 96px; resize: vertical;
+  border-radius: 10px; border: 1px solid var(--border-strong); background: var(--surface); font-size: 16px;
+}
+.actions { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 12px; }
+.btn {
+  display: inline-flex; align-items: center; justify-content: center; gap: 6px;
+  min-height: 40px; padding: 0 14px; border-radius: 10px; white-space: nowrap;
+  border: 1px solid var(--border-strong); background: var(--surface); font-size: 15px; font-weight: 500;
+  transition: background-color 150ms ease-out, border-color 150ms ease-out, transform 100ms ease-out;
+}
+.btn:hover { background: var(--surface-2); }
+.btn:active { transform: scale(0.97); }
+.btn.primary { background: var(--primary); color: var(--on-primary); border-color: var(--primary); }
+.btn.primary:hover { background: color-mix(in oklab, var(--primary) 88%, var(--bg)); }
+.btn.ghost { border-color: transparent; color: var(--muted); padding: 0 10px; }
+.btn.ghost:hover { color: var(--text); background: var(--surface-2); }
+.btn.suggest { border-radius: 999px; }
+.actions .end { margin-left: auto; display: flex; gap: 2px; }
+.write { display: flex; gap: 8px; margin-top: 10px; }
+.write input {
+  flex: 1; min-width: 0; min-height: 44px; padding: 0 12px; border-radius: 10px;
+  border: 1px solid var(--border-strong); background: var(--surface); font-size: 16px;
+}
+.write input::placeholder { color: var(--muted); }
+.menu {
+  display: flex; flex-wrap: wrap; gap: 6px; margin-top: 10px; padding-top: 10px; border-top: 1px solid var(--border);
+}
+.menu .label { width: 100%; font-size: 13px; color: var(--muted); }
+
+/* Resolved state */
+.resolved {
+  display: flex; align-items: center; gap: 10px; padding: 12px 14px;
+  background: var(--surface); border: 1px dashed var(--border-strong); border-radius: var(--radius);
+  font-size: 15px; color: var(--muted);
+}
+.resolved .status { flex: 1; min-width: 0; }
+.resolved strong { color: var(--text); font-weight: 600; }
+.resolved.done { border-style: solid; border-color: color-mix(in oklab, var(--ok) 35%, var(--border)); }
+.resolved .ok { color: var(--ok); }
+.pending-dot { width: 8px; height: 8px; border-radius: 50%; background: var(--muted); flex: none; animation: pulse 1.2s ease-in-out infinite; }
+@keyframes pulse { 50% { opacity: 0.3; } }
+
+/* Empty */
+.empty {
+  text-align: center; padding: 28px 16px; border: 1px dashed var(--border-strong); border-radius: var(--radius);
+  color: var(--muted); font-size: 15px;
+}
+.empty strong { display: block; color: var(--text); font-size: 16px; margin-bottom: 2px; }
+
+/* To-dos */
+.list { background: var(--surface); border: 1px solid var(--border); border-radius: var(--radius); }
+.todo { display: flex; gap: 12px; padding: 10px 14px; align-items: flex-start; }
+.todo + .todo, .ev + .ev, .catch + .catch { border-top: 1px solid var(--border); }
+.check {
+  width: 24px; height: 24px; margin-top: 1px; flex: none; border-radius: 50%;
+  border: 1.5px solid var(--border-strong); background: none; display: grid; place-items: center; padding: 0;
+  position: relative;
+}
+.check::after { content: ""; position: absolute; inset: -10px; }
+.check.p1 { border-color: var(--urgent); }
+.check svg { width: 14px; height: 14px; opacity: 0; }
+.todo.is-done .check { background: var(--ok); border-color: var(--ok); color: #fff; }
+.todo.is-done .check svg { opacity: 1; }
+.todo .body { flex: 1; min-width: 0; }
+.todo .t { font-size: 15px; }
+.todo.is-done .t { text-decoration: line-through; color: var(--muted); }
+.todo .sub { display: flex; flex-wrap: wrap; gap: 4px 10px; font-size: 13px; color: var(--muted); margin-top: 2px; }
+.todo .sub .late { color: var(--urgent); }
+.prio { font-weight: 600; }
+.prio.p1 { color: var(--urgent); }
+.todo .undo { font-size: 14px; }
+.list-foot { display: flex; justify-content: space-between; align-items: center; padding: 8px 14px; border-top: 1px solid var(--border); font-size: 13px; color: var(--muted); }
+.list-foot a { color: var(--muted); }
+
+/* Agenda */
+.day { font-size: 13px; color: var(--muted); font-weight: 600; margin: 14px 0 6px; }
+.day:first-child { margin-top: 0; }
+.ev { display: grid; grid-template-columns: 56px 1fr; gap: 10px; padding: 10px 14px; }
+.ev .when { font-size: 14px; color: var(--muted); }
+.ev .what { font-size: 15px; }
+.ev .where { font-size: 13px; color: var(--muted); }
+.ev.past .what { color: var(--muted); }
+.ev.now { background: color-mix(in oklab, var(--surface-2) 60%, var(--surface)); }
+.ev.now .when { color: var(--text); font-weight: 600; }
+.now-label { font-size: 12px; font-weight: 600; color: var(--ok); }
+
+/* Catch-up */
+.catch { padding: 12px 14px; }
+.catch summary { list-style: none; display: flex; gap: 10px; align-items: center; cursor: pointer; min-height: 32px; }
+.catch summary::-webkit-details-marker { display: none; }
+.catch .ttl { flex: 1; min-width: 0; font-size: 15px; font-weight: 500; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.catch .n { font-size: 13px; color: var(--muted); }
+.catch .chev { color: var(--muted); transition: transform 150ms ease-out; }
+.catch[open] .chev { transform: rotate(90deg); }
+.catch .gist { font-size: 15px; margin: 8px 0 0 32px; }
+.catch .actions { margin-left: 32px; }
+.catch.read .ttl { color: var(--muted); font-weight: 400; }
+
+/* Archive */
+.search {
+  display: flex; align-items: center; gap: 8px; min-height: 44px; padding: 0 12px; margin-bottom: 12px;
+  border-radius: 10px; border: 1px solid var(--border-strong); background: var(--surface); color: var(--muted);
+}
+.search input { flex: 1; border: 0; background: none; outline: none; font-size: 16px; min-width: 0; color: var(--text); }
+.arch { display: flex; gap: 10px; padding: 12px 14px; align-items: flex-start; }
+.arch + .arch { border-top: 1px solid var(--border); }
+.arch .body { flex: 1; min-width: 0; }
+.arch .t { font-size: 15px; }
+.arch .why { font-size: 13px; color: var(--muted); margin-top: 2px; }
+
+/* Bottom tab bar (phone) */
+.tabbar {
+  position: fixed; left: 0; right: 0; bottom: 0; z-index: 6;
+  display: grid; grid-template-columns: 1fr 1fr;
+  padding-bottom: env(safe-area-inset-bottom);
+  background: color-mix(in oklab, var(--bg) 90%, transparent);
+  backdrop-filter: saturate(1.4) blur(14px); -webkit-backdrop-filter: saturate(1.4) blur(14px);
+  border-top: 1px solid var(--border);
+}
+.tabbar button {
+  height: var(--tab-h); border: 0; background: none; display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 3px;
+  font-size: 12px; color: var(--muted);
+}
+.tabbar button svg { width: 24px; height: 24px; }
+.tabbar button[aria-selected="true"] { color: var(--text); font-weight: 600; }
+
+.mock-note { max-width: 1200px; margin: 0 auto; padding: 4px 16px 24px; font-size: 13px; color: var(--muted); }
+
+@media (prefers-reduced-motion: reduce) {
+  *, *::before, *::after { animation: none !important; transition: none !important; }
+}
+</style>
+</head>
+<body>
+<svg width="0" height="0" style="position:absolute" aria-hidden="true">
+  <symbol id="i-refresh" viewBox="0 0 24 24"><path d="M20 11a8 8 0 0 0-14.6-4.5M4 4v4h4"/><path d="M4 13a8 8 0 0 0 14.6 4.5M20 20v-4h-4"/></symbol>
+  <symbol id="i-check" viewBox="0 0 24 24"><path d="M5 12.5l4.5 4.5L19 7.5"/></symbol>
+  <symbol id="i-clock" viewBox="0 0 24 24"><circle cx="12" cy="12" r="8.5"/><path d="M12 7.5V12l3 2"/></symbol>
+  <symbol id="i-send" viewBox="0 0 24 24"><path d="M4.5 12L20 4.5 14 20l-2.5-6.5z"/><path d="M11.5 13.5L20 4.5"/></symbol>
+  <symbol id="i-pencil" viewBox="0 0 24 24"><path d="M15 5.5l3.5 3.5M4.5 19.5l1-4.5L16 4.5a1.8 1.8 0 0 1 2.5 0l1 1a1.8 1.8 0 0 1 0 2.5L9 18.5z"/></symbol>
+  <symbol id="i-chev" viewBox="0 0 24 24"><path d="M9.5 6l6 6-6 6"/></symbol>
+  <symbol id="i-search" viewBox="0 0 24 24"><circle cx="11" cy="11" r="6.5"/><path d="M16 16l4 4"/></symbol>
+  <symbol id="i-today" viewBox="0 0 24 24"><rect x="4" y="5" width="16" height="15" rx="3"/><path d="M4 10h16M9 3v4M15 3v4"/></symbol>
+  <symbol id="i-archive" viewBox="0 0 24 24"><rect x="3.5" y="4.5" width="17" height="4.5" rx="1.5"/><path d="M5 9v9a2 2 0 0 0 2 2h10a2 2 0 0 0 2-2V9M10 13h4"/></symbol>
+  <symbol id="i-bell" viewBox="0 0 24 24"><path d="M6 16V11a6 6 0 0 1 12 0v5l1.5 2h-15z"/><path d="M10 20.5a2 2 0 0 0 4 0"/></symbol>
+  <symbol id="i-x" viewBox="0 0 24 24"><path d="M6 6l12 12M18 6L6 18"/></symbol>
+  <symbol id="i-msg" viewBox="0 0 24 24"><path d="M5 18.5V7a2 2 0 0 1 2-2h10a2 2 0 0 1 2 2v7a2 2 0 0 1-2 2H8z"/></symbol>
+</svg>
+
+<header class="top">
+  <div class="top-inner">
+    <div class="top-row">
+      <div>
+        <h1 id="view-title">Today</h1>
+        <div class="date num">Monday 12 October</div>
+      </div>
+      <div class="spacer"></div>
+      <div class="desk-tabs" role="tablist" aria-label="Views">
+        <button role="tab" aria-selected="true" data-tab="today">Today</button>
+        <button role="tab" aria-selected="false" data-tab="archive">Archive</button>
+      </div>
+      <button class="refresh" id="refresh" type="button" aria-live="polite">
+        <svg class="i"><use href="#i-refresh"/></svg><span id="refresh-label">Updated 4 min ago</span>
+      </button>
+    </div>
+    <div class="filters" role="group" aria-label="Filter by bot" id="filters">
+      <button class="chip-filter all" aria-pressed="true" data-bot="all">All <span class="count num" data-count="all"></span></button>
+      <button class="chip-filter" aria-pressed="false" data-bot="dashboard"><span class="avatar" style="background:var(--bot-dashboard)">D</span>Dashboard <span class="count num" data-count="dashboard"></span></button>
+      <button class="chip-filter" aria-pressed="false" data-bot="venduto"><span class="avatar" style="background:var(--bot-venduto)">V</span>Venduto <span class="count num" data-count="venduto"></span></button>
+      <button class="chip-filter" aria-pressed="false" data-bot="comprato"><span class="avatar" style="background:var(--bot-comprato)">C</span>Comprato <span class="count num" data-count="comprato"></span></button>
+    </div>
+  </div>
+</header>
+
+<main>
+  <!-- TODAY -->
+  <div class="view" id="view-today">
+    <div class="grid">
+      <div class="col-main">
+        <section class="s-needs" aria-labelledby="h-needs">
+          <div class="sec-head"><h2 id="h-needs">Needs you</h2><span class="count num" id="needs-count"></span></div>
+          <div class="stack" id="needs"></div>
+        </section>
+
+        <section class="s-catch" aria-labelledby="h-catch">
+          <div class="sec-head"><h2 id="h-catch">Catch up</h2><span class="count num" id="catch-count"></span><span class="note">Nothing here needs an answer</span></div>
+          <div class="list" id="catchup"></div>
+        </section>
+      </div>
+
+      <div class="aside">
+        <section class="s-todo" aria-labelledby="h-todo">
+          <div class="sec-head"><h2 id="h-todo">To-dos</h2><span class="count num" id="todo-count"></span><span class="note">From Todoist</span></div>
+          <div class="list" id="todos"></div>
+        </section>
+
+        <section class="s-agenda" aria-labelledby="h-agenda">
+          <div class="sec-head"><h2 id="h-agenda">Agenda</h2></div>
+          <div id="agenda"></div>
+        </section>
+      </div>
+    </div>
+  </div>
+
+  <!-- ARCHIVE -->
+  <div class="view" id="view-archive" hidden>
+    <label class="search"><svg class="i"><use href="#i-search"/></svg><span class="sr-only">Search the archive</span><input id="arch-q" type="search" placeholder="Search the last 30 days"></label>
+    <div class="list" id="archive"></div>
+  </div>
+</main>
+
+<p class="mock-note">Mockup with made-up data. Buttons work but nothing leaves this page.</p>
+
+<nav class="tabbar" role="tablist" aria-label="Views">
+  <button role="tab" aria-selected="true" data-tab="today"><svg class="i"><use href="#i-today"/></svg>Today</button>
+  <button role="tab" aria-selected="false" data-tab="archive"><svg class="i"><use href="#i-archive"/></svg>Archive</button>
+</nav>
+
+<script>
+const BOTS = {
+  dashboard: { name: "Dashboard", initial: "D", color: "var(--bot-dashboard)" },
+  venduto:   { name: "Venduto",   initial: "V", color: "var(--bot-venduto)" },
+  comprato:  { name: "Comprato",  initial: "C", color: "var(--bot-comprato)" },
+};
+
+// Card kinds: decision (suggested answers), approval (yes/no), draft (send/edit), fyi-action (done/snooze)
+const NEEDS = [
+  {
+    id: "n1", bot: "dashboard", kind: "decision", urgent: "answer by 14:00",
+    source: "WhatsApp · Lab group", time: "12:58",
+    title: "Marco needs your vote on the lab swap",
+    body: "Group 2 wants to move your Production lab to Monday 10:00. It's 4 to 4 and you haven't voted. Marco answers them at 14:00.",
+    context: "Tuesday 10:00 is already in your calendar.",
+    notified: "Secretary notified you at 13:02",
+    suggestions: [
+      { label: "Vote Tuesday", result: "Voted Tuesday in the Lab group poll" },
+      { label: "Vote Monday", result: "Voted Monday in the Lab group poll" },
+    ],
+  },
+  {
+    id: "n2", bot: "dashboard", kind: "draft",
+    source: "WhatsApp · Sam", time: "11:50",
+    title: "Sam asked how to check if his data leaked",
+    body: "Someone on Discord knew part of his phone number. He's worried and asked for a safe site to check.",
+    draft: "That sucks, sorry. Turn on two-factor on Discord and change the password there and on the linked email. Then check your email on haveibeenpwned.com and report the account to Discord.",
+    to: "Sam",
+  },
+  {
+    id: "n3", bot: "venduto", kind: "approval",
+    source: "Subito · Sonos One", time: "11:31",
+    title: "Can I counter Giulia at €45?",
+    body: "She offered €40 for the Sonos One. Your floor is €45 and the listing is at €55.",
+    yes: { label: "Yes, counter €45", result: "Countered Giulia at €45" },
+    no: { label: "No, hold at €55", result: "Told Giulia the price stays €55" },
+  },
+  {
+    id: "n4", bot: "dashboard", kind: "decision",
+    source: "WhatsApp · Halloween crew", time: "10:12",
+    title: "Halloween prep poll: 30th, 31st or not coming",
+    body: "Richi proposes prepping the games on the afternoon of the 30th, then dinner together.",
+    context: "You have scout camp overnight on the 30th, so only the afternoon works that day.",
+    suggestions: [
+      { label: "Vote 30th, afternoon only", result: "Voted the 30th and added \"afternoon only\"" },
+      { label: "Vote 31st", result: "Voted the 31st" },
+      { label: "Vote not coming", result: "Voted not coming" },
+    ],
+  },
+  {
+    id: "n5", bot: "comprato", kind: "approval",
+    source: "Subito · Torino", time: "09:40",
+    title: "SONOFF ZBMINIL2 for €9. Message the seller?",
+    body: "Listed 20 minutes ago, 3 km from Porta Susa. Your max is €12.",
+    yes: { label: "Yes, ask if it's available", result: "Asked the seller if it's still available" },
+    no: { label: "Skip this one", result: "Skipped, still watching" },
+  },
+  {
+    id: "n6", bot: "dashboard", kind: "fyi-action",
+    source: "Gmail · Stripe", time: "Yesterday",
+    title: "Perplexity payment of $244 failed again",
+    body: "Update the card by Thursday or the subscription ends.",
+  },
+];
+
+const TODOS = [
+  { id: "t1", t: "Io Sono Cultura comparison", p: 1, when: "Deadline tomorrow 11:00", project: "University" },
+  { id: "t2", t: "Reply to CFR", p: 2, when: "Today", project: "Work" },
+  { id: "t3", t: "Upload field photos to Drive", p: 3, when: "Today", project: "Scouts" },
+  { id: "t4", t: "Monthly accounting", p: 2, when: "Tomorrow", project: "Work" },
+  { id: "t5", t: "Hardware store and blinds", p: 2, when: "Planned Wed 14:30 · deadline Fri", project: "Home" },
+  { id: "t6", t: "LinkedIn post for the client", p: 3, when: "Wed 14", project: "Work" },
+  { id: "t7", t: "SEO pass on the website", p: 3, when: "Fri 16", project: "Work" },
+];
+
+const AGENDA = [
+  { day: "Today", items: [
+    { when: "10:00", what: "Short film meeting", where: "Urban vineyard, between rooms T and R", past: true },
+    { when: "14:30", what: "Io Sono Cultura", where: "Focus block until 16:00", now: true },
+    { when: "16:00", what: "Reply to CFR, upload photos", where: "Until 16:30" },
+    { when: "16:30", what: "Monthly accounting", where: "Until 16:45" },
+    { when: "17:00", what: "Gym", where: "Until 18:00" },
+  ]},
+  { day: "Tomorrow", items: [
+    { when: "10:00", what: "Production lab", where: "Lab 3, until 11:30" },
+    { when: "14:30", what: "NTT Data tech talk", where: "Room 10C, until 16:00" },
+  ]},
+];
+
+const CATCH = [
+  { id: "c1", bot: "dashboard", ttl: "Gift for Luca", n: "46 messages", gist: "They dropped the F1 simulator. Luca will pick between Zero Gravity and paintball, revealed with a treasure hunt that ends in Piazza Santa Giulia. Pietro makes the fake voucher. About €8 each." },
+  { id: "c2", bot: "dashboard", ttl: "Uni mail", n: "3 emails", gist: "Tomorrow's tech talk moved to Room 10C. I fixed the calendar event. The other two are newsletters." },
+  { id: "c3", bot: "dashboard", ttl: "GitHub · notes-app", n: "2 updates", gist: "The maintainer merged your fixes into #23 and #24. Nothing to do until the final review." },
+  { id: "c4", bot: "dashboard", ttl: "Family", n: "12 messages", gist: "Dad sent some AliExpress links and asked you to list the old Panda parts on Subito. Want me to pass that to Venduto?" },
+];
+
+const ARCHIVE = [
+  { bot: "dashboard", t: "Reply to Sam about Discord", why: "You sent it · 09:34" },
+  { bot: "dashboard", t: "Vote in the short film meeting poll", why: "Poll closed · Yesterday" },
+  { bot: "venduto", t: "Buyer asked about battery health on the iPad", why: "You answered · Yesterday" },
+  { bot: "dashboard", t: "Upload Sunday's photos", why: "Snoozed until today 16:00" },
+  { bot: "comprato", t: "Sonoff on Vinted for €14", why: "You skipped it · Sat 10" },
+  { bot: "dashboard", t: "SellaLab event on Friday 17", why: "Closed by Dashboard bot: you're in Torino all day" },
+];
+
+const state = { filter: "all", resolved: {}, catchRead: {} };
+const $ = (s, el = document) => el.querySelector(s);
+const esc = s => s.replace(/[&<>"]/g, c => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" }[c]));
+const icon = (id, cls = "i") => `<svg class="${cls}" aria-hidden="true"><use href="#i-${id}"/></svg>`;
+const avatar = b => `<span class="avatar" style="background:${BOTS[b].color}" title="${BOTS[b].name} bot">${BOTS[b].initial}</span>`;
+const visible = item => state.filter === "all" || item.bot === state.filter;
+
+function cardActions(c) {
+  const write = `<button class="btn ghost" data-act="write" data-id="${c.id}">${icon("msg")}Write</button>`;
+  const snooze = `<button class="btn ghost" data-act="snooze" data-id="${c.id}">${icon("clock")}Snooze</button>`;
+  const dismiss = `<button class="btn ghost" data-act="dismiss" data-id="${c.id}" aria-label="Dismiss">${icon("x")}</button>`;
+  if (c.kind === "decision") {
+    return c.suggestions.map((s, i) =>
+      `<button class="btn suggest${i === 0 ? " primary" : ""}" data-act="do" data-id="${c.id}" data-result="${esc(s.result)}">${esc(s.label)}</button>`
+    ).join("") + `<span class="end">${write}${snooze}</span>`;
+  }
+  if (c.kind === "approval") {
+    return `<button class="btn primary" data-act="do" data-id="${c.id}" data-result="${esc(c.yes.result)}">${esc(c.yes.label)}</button>
+      <button class="btn" data-act="do" data-id="${c.id}" data-result="${esc(c.no.result)}">${esc(c.no.label)}</button>
+      <span class="end">${write}${snooze}</span>`;
+  }
+  if (c.kind === "draft") {
+    return `<button class="btn primary" data-act="send" data-id="${c.id}">${icon("send")}Send to ${esc(c.to)}</button>
+      <button class="btn" data-act="edit" data-id="${c.id}">${icon("pencil")}Edit</button>
+      <span class="end">${write}${dismiss}</span>`;
+  }
+  return `<button class="btn primary" data-act="done" data-id="${c.id}">${icon("check")}Mark done</button>
+    <span class="end">${write}${snooze}</span>`;
+}
+
+function renderNeeds() {
+  const list = NEEDS.filter(visible);
+  const open = list.filter(c => !state.resolved[c.id] || state.resolved[c.id].phase !== "gone");
+  $("#needs-count").textContent = open.filter(c => !state.resolved[c.id]).length || "";
+  if (!open.length) {
+    $("#needs").innerHTML = `<div class="empty"><strong>Nothing needs you right now</strong>New questions from your bots show up here. Next scan at 13:50.</div>`;
+    return;
+  }
+  $("#needs").innerHTML = open.map(c => {
+    const r = state.resolved[c.id];
+    if (r) {
+      if (r.phase === "pending") return `<div class="resolved" role="status"><span class="pending-dot"></span><span class="status"><strong>${esc(r.text)}</strong><br>Sending to ${BOTS[c.bot].name} bot in <span class="num" data-countdown="${c.id}">${r.left}</span>s</span><button class="btn" data-act="undo" data-id="${c.id}">Undo</button></div>`;
+      if (r.phase === "working") return `<div class="resolved" role="status"><span class="pending-dot"></span><span class="status"><strong>${esc(r.text)}</strong><br>${BOTS[c.bot].name} bot is on it</span></div>`;
+      if (r.phase === "snoozed") return `<div class="resolved" role="status"><span class="status"><strong>Snoozed until ${esc(r.text)}</strong><br>${esc(c.title)}</span><button class="btn" data-act="undo" data-id="${c.id}">Undo</button></div>`;
+      return `<div class="resolved done" role="status"><span class="ok">${icon("check")}</span><span class="status"><strong>${esc(r.text)}</strong><br>${r.note}</span><button class="btn ghost" data-act="hide" data-id="${c.id}" aria-label="Hide">${icon("x")}</button></div>`;
+    }
+    const draft = c.kind === "draft"
+      ? (c.editing
+        ? `<label class="sr-only" for="d-${c.id}">Edit the reply</label><textarea class="draft-edit" id="d-${c.id}">${esc(c.draft)}</textarea>`
+        : `<div class="draft-label">Draft reply</div><div class="draft">${esc(c.draft)}</div>`)
+      : "";
+    const actions = c.editing
+      ? `<button class="btn primary" data-act="send-edited" data-id="${c.id}">${icon("send")}Send to ${esc(c.to)}</button><button class="btn" data-act="cancel-edit" data-id="${c.id}">Cancel</button>`
+      : cardActions(c);
+    const write = c.writing ? `<form class="write" data-form="${c.id}"><label class="sr-only" for="w-${c.id}">Tell the bot what to do</label><input id="w-${c.id}" placeholder="Tell ${BOTS[c.bot].name} what to do" autocomplete="off"><button class="btn primary" aria-label="Send">${icon("send")}</button></form>` : "";
+    const snooze = c.snoozing ? `<div class="menu"><span class="label">Snooze until</span>${["In 1 hour", "Tonight 19:00", "Tomorrow 9:00", "Monday 9:00"].map(s => `<button class="btn suggest" data-act="snooze-to" data-id="${c.id}" data-to="${s}">${s}</button>`).join("")}</div>` : "";
+    return `<article class="card${c.urgent ? " urgent" : ""}" aria-labelledby="t-${c.id}">
+      <div class="meta">${avatar(c.bot)}<span class="src">${esc(c.source)}</span><time class="num">${c.time}</time></div>
+      ${c.urgent ? `<div style="margin-top:8px"><span class="flag">Urgent · ${esc(c.urgent)}</span></div>` : ""}
+      <h3 id="t-${c.id}">${esc(c.title)}</h3>
+      <p>${esc(c.body)}</p>
+      ${c.context ? `<p class="context">${esc(c.context)}</p>` : ""}
+      ${draft}
+      ${c.notified ? `<div class="notified">${icon("bell")}${esc(c.notified)}</div>` : ""}
+      <div class="actions">${actions}</div>
+      ${write}${snooze}
+    </article>`;
+  }).join("");
+}
+
+function renderTodos() {
+  const open = TODOS.filter(t => !t.done).length;
+  $("#todo-count").textContent = open;
+  $("#todos").innerHTML = TODOS.map(t => `
+    <div class="todo${t.done ? " is-done" : ""}">
+      <button class="check p${t.p}" data-act="todo" data-id="${t.id}" aria-pressed="${!!t.done}" aria-label="${t.done ? "Mark not done" : "Complete"}: ${esc(t.t)}">${icon("check")}</button>
+      <div class="body">
+        <div class="t">${esc(t.t)}</div>
+        <div class="sub">${t.done ? `<span>Completed in Todoist</span><button class="btn ghost undo" style="min-height:28px;padding:0 6px" data-act="todo" data-id="${t.id}">Undo</button>` : `<span class="prio p${t.p}">P${t.p}</span><span class="${/Deadline tomorrow/.test(t.when) ? "late" : ""}">${esc(t.when)}</span><span>${esc(t.project)}</span>`}</div>
+      </div>
+    </div>`).join("") + `<div class="list-foot"><span>Sorted by deadline, then priority</span><a href="#" onclick="return false">Open Todoist</a></div>`;
+}
+
+function renderAgenda() {
+  $("#agenda").innerHTML = AGENDA.map(d => `
+    <div class="day">${d.day}</div>
+    <div class="list">${d.items.map(e => `
+      <div class="ev${e.past ? " past" : ""}${e.now ? " now" : ""}">
+        <div class="when num">${e.when}</div>
+        <div><div class="what">${esc(e.what)}${e.now ? ` <span class="now-label">Next</span>` : ""}</div><div class="where">${esc(e.where)}</div></div>
+      </div>`).join("")}</div>`).join("");
+}
+
+function renderCatch() {
+  const list = CATCH.filter(visible);
+  $("#catch-count").textContent = list.filter(c => !state.catchRead[c.id]).length || "";
+  $("#catchup").innerHTML = list.length ? list.map(c => `
+    <details class="catch${state.catchRead[c.id] ? " read" : ""}">
+      <summary>${avatar(c.bot)}<span class="ttl">${esc(c.ttl)}</span><span class="n num">${c.n}</span><svg class="i chev" aria-hidden="true"><use href="#i-chev"/></svg></summary>
+      <p class="gist">${esc(c.gist)}</p>
+      <div class="actions"><button class="btn" data-act="read" data-id="${c.id}">${icon("check")}Mark as read</button><button class="btn ghost" data-act="ask" data-id="${c.id}">${icon("msg")}Ask about this</button></div>
+    </details>`).join("") : `<div class="empty" style="border:0">All caught up.</div>`;
+}
+
+function renderArchive() {
+  const q = $("#arch-q").value.trim().toLowerCase();
+  const rows = ARCHIVE.filter(visible).filter(a => !q || (a.t + a.why).toLowerCase().includes(q));
+  $("#archive").innerHTML = rows.length ? rows.map(a => `
+    <div class="arch">${avatar(a.bot)}<div class="body"><div class="t">${esc(a.t)}</div><div class="why">${esc(a.why)}</div></div></div>`).join("")
+    : `<div class="empty" style="border:0"><strong>No matches</strong>Try another word, or clear the bot filter.</div>`;
+}
+
+function renderCounts() {
+  const n = b => NEEDS.filter(c => (b === "all" || c.bot === b) && !state.resolved[c.id]).length;
+  document.querySelectorAll("[data-count]").forEach(el => { const v = n(el.dataset.count); el.textContent = v || ""; });
+}
+
+function render() { renderNeeds(); renderTodos(); renderAgenda(); renderCatch(); renderArchive(); renderCounts(); }
+
+const timers = {};
+function startAction(c, text, done) {
+  state.resolved[c.id] = { phase: "pending", text, left: 5 };
+  c.writing = c.snoozing = c.editing = false;
+  timers[c.id] = setInterval(() => {
+    const r = state.resolved[c.id];
+    if (!r) return clearInterval(timers[c.id]);
+    r.left -= 1;
+    if (r.left > 0) { const el = document.querySelector(`[data-countdown="${c.id}"]`); if (el) el.textContent = r.left; return; }
+    clearInterval(timers[c.id]);
+    r.phase = "working"; render();
+    setTimeout(() => {
+      if (!state.resolved[c.id]) return;
+      Object.assign(state.resolved[c.id], { phase: "done", text: done || text, note: `${BOTS[c.bot].name} bot confirmed at 13:21` });
+      ARCHIVE.unshift({ bot: c.bot, t: c.title, why: `${done || text} · 13:21` });
+      render();
+    }, 1600);
+  }, 1000);
+  render();
+}
+
+document.addEventListener("click", e => {
+  const b = e.target.closest("[data-act], [data-tab], [data-bot]");
+  if (!b) return;
+  if (b.dataset.tab) {
+    const tab = b.dataset.tab;
+    document.querySelectorAll("[data-tab]").forEach(t => t.setAttribute("aria-selected", t.dataset.tab === tab));
+    $("#view-today").hidden = tab !== "today";
+    $("#view-archive").hidden = tab !== "archive";
+    $("#view-title").textContent = tab === "today" ? "Today" : "Archive";
+    window.scrollTo({ top: 0 });
+    return;
+  }
+  if (b.dataset.bot) {
+    state.filter = b.dataset.bot;
+    document.querySelectorAll("[data-bot]").forEach(x => x.setAttribute("aria-pressed", x === b));
+    render(); return;
+  }
+  const id = b.dataset.id, act = b.dataset.act;
+  const c = NEEDS.find(x => x.id === id);
+  switch (act) {
+    case "do": startAction(c, b.dataset.result); break;
+    case "send": startAction(c, `Sending your reply to ${c.to}`, `Sent to ${c.to}`); break;
+    case "send-edited": c.draft = $(`#d-${id}`).value; startAction(c, `Sending your edited reply to ${c.to}`, `Sent to ${c.to}`); break;
+    case "edit": c.editing = true; render(); $(`#d-${id}`).focus(); break;
+    case "cancel-edit": c.editing = false; render(); break;
+    case "done": startAction(c, "Marked done", "Marked done"); break;
+    case "dismiss": state.resolved[id] = { phase: "done", text: "Dismissed", note: "Moved to the archive" }; render(); break;
+    case "write": c.writing = !c.writing; c.snoozing = false; render(); if (c.writing) $(`#w-${id}`).focus(); break;
+    case "snooze": c.snoozing = !c.snoozing; c.writing = false; render(); break;
+    case "snooze-to": c.snoozing = false; state.resolved[id] = { phase: "snoozed", text: b.dataset.to }; render(); break;
+    case "undo": clearInterval(timers[id]); delete state.resolved[id]; render(); break;
+    case "hide": state.resolved[id].phase = "gone"; render(); break;
+    case "todo": { const t = TODOS.find(x => x.id === id); t.done = !t.done; renderTodos(); break; }
+    case "read": state.catchRead[id] = true; renderCatch(); break;
+    case "ask": alert("In the real app this opens a text field on the summary, like the Write button on cards."); break;
+  }
+});
+
+document.addEventListener("submit", e => {
+  const id = e.target.dataset.form;
+  if (!id) return;
+  e.preventDefault();
+  const v = $(`#w-${id}`).value.trim();
+  if (!v) return $(`#w-${id}`).focus();
+  startAction(NEEDS.find(x => x.id === id), `"${v}"`, `Done: "${v}"`);
+});
+
+$("#arch-q").addEventListener("input", renderArchive);
+
+$("#refresh").addEventListener("click", () => {
+  const r = $("#refresh");
+  if (r.classList.contains("busy")) return;
+  r.classList.add("busy"); $("#refresh-label").textContent = "Scanning…";
+  setTimeout(() => { r.classList.remove("busy"); $("#refresh-label").textContent = "Updated just now"; }, 2200);
+});
+
+render();
+</script>
+</body>
+</html>
