@@ -1,0 +1,98 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>Grok Bot Dashboard</title>
+<meta name="theme-color" content="#f6f5f2" media="(prefers-color-scheme: light)">
+<meta name="theme-color" content="#121211" media="(prefers-color-scheme: dark)">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-status-bar-style" content="default">
+<meta name="apple-mobile-web-app-title" content="Grok Dash">
+<link rel="manifest" href="manifest.webmanifest">
+<link rel="apple-touch-icon" href="icon-180.png">
+<link rel="icon" href="icon-192.png">
+<link rel="stylesheet" href="app.css">
+<script src="app.js" defer></script>
+</head>
+<body>
+<svg width="0" height="0" class="sprite" aria-hidden="true">
+  <symbol id="i-refresh" viewBox="0 0 24 24"><path d="M20 11a8 8 0 0 0-14.6-4.5M4 4v4h4"/><path d="M4 13a8 8 0 0 0 14.6 4.5M20 20v-4h-4"/></symbol>
+  <symbol id="i-check" viewBox="0 0 24 24"><path d="M5 12.5l4.5 4.5L19 7.5"/></symbol>
+  <symbol id="i-clock" viewBox="0 0 24 24"><circle cx="12" cy="12" r="8.5"/><path d="M12 7.5V12l3 2"/></symbol>
+  <symbol id="i-send" viewBox="0 0 24 24"><path d="M4.5 12L20 4.5 14 20l-2.5-6.5z"/><path d="M11.5 13.5L20 4.5"/></symbol>
+  <symbol id="i-pencil" viewBox="0 0 24 24"><path d="M15 5.5l3.5 3.5M4.5 19.5l1-4.5L16 4.5a1.8 1.8 0 0 1 2.5 0l1 1a1.8 1.8 0 0 1 0 2.5L9 18.5z"/></symbol>
+  <symbol id="i-chev" viewBox="0 0 24 24"><path d="M9.5 6l6 6-6 6"/></symbol>
+  <symbol id="i-search" viewBox="0 0 24 24"><circle cx="11" cy="11" r="6.5"/><path d="M16 16l4 4"/></symbol>
+  <symbol id="i-today" viewBox="0 0 24 24"><rect x="4" y="5" width="16" height="15" rx="3"/><path d="M4 10h16M9 3v4M15 3v4"/></symbol>
+  <symbol id="i-archive" viewBox="0 0 24 24"><rect x="3.5" y="4.5" width="17" height="4.5" rx="1.5"/><path d="M5 9v9a2 2 0 0 0 2 2h10a2 2 0 0 0 2-2V9M10 13h4"/></symbol>
+  <symbol id="i-bell" viewBox="0 0 24 24"><path d="M6 16V11a6 6 0 0 1 12 0v5l1.5 2h-15z"/><path d="M10 20.5a2 2 0 0 0 4 0"/></symbol>
+  <symbol id="i-x" viewBox="0 0 24 24"><path d="M6 6l12 12M18 6L6 18"/></symbol>
+  <symbol id="i-msg" viewBox="0 0 24 24"><path d="M5 18.5V7a2 2 0 0 1 2-2h10a2 2 0 0 1 2 2v7a2 2 0 0 1-2 2H8z"/></symbol>
+</svg>
+
+<header class="top">
+  <div class="top-inner">
+    <div class="top-row">
+      <div>
+        <h1 id="view-title">Today</h1>
+        <div class="date num"><span class="full-date" id="full-date"></span><span class="glance" id="glance"></span></div>
+      </div>
+      <div class="spacer"></div>
+      <div class="desk-tabs" role="tablist" aria-label="Views">
+        <button role="tab" aria-selected="true" data-tab="today">Today</button>
+        <button role="tab" aria-selected="false" data-tab="archive">Archive</button>
+      </div>
+      <button class="refresh" id="refresh" type="button" aria-label="Ask the bots for a fresh scan">
+        <svg class="i" aria-hidden="true"><use href="#i-refresh"/></svg><span id="refresh-label">Loading</span>
+      </button>
+    </div>
+    <div class="filters" role="group" aria-label="Filter by bot" id="filters"></div>
+  </div>
+</header>
+
+<div class="banner" id="banner" role="alert" hidden></div>
+
+<main>
+  <div class="view" id="view-today">
+    <div class="grid">
+      <div class="col-main">
+        <section class="s-needs" aria-labelledby="h-needs">
+          <div class="sec-head"><h2 id="h-needs">Needs you</h2><span class="count num" id="needs-count"></span><span class="fresh" id="fresh"></span></div>
+          <div class="stack" id="needs"><div class="skeleton" aria-label="Loading"><div></div><div></div><div></div></div></div>
+        </section>
+        <section class="s-catch" aria-labelledby="h-catch">
+          <div class="sec-head"><h2 id="h-catch">Catch up</h2><span class="count num" id="catch-count"></span><span class="note">Nothing here needs an answer</span></div>
+          <div class="list" id="catchup"></div>
+        </section>
+      </div>
+      <div class="aside">
+        <section class="s-todo" aria-labelledby="h-todo">
+          <div class="sec-head"><h2 id="h-todo">To-dos</h2><span class="count num" id="todo-count"></span><span class="note" id="todo-source"></span></div>
+          <div class="list" id="todos"></div>
+        </section>
+        <section class="s-agenda" aria-labelledby="h-agenda">
+          <div class="sec-head"><h2 id="h-agenda">Agenda</h2></div>
+          <div id="agenda"></div>
+        </section>
+      </div>
+    </div>
+  </div>
+
+  <div class="view" id="view-archive" hidden>
+    <label class="search"><svg class="i" aria-hidden="true"><use href="#i-search"/></svg><span class="sr-only">Search the archive</span><input id="arch-q" type="search" placeholder="Search the last 30 days" autocomplete="off"></label>
+    <div class="list" id="archive"></div>
+  </div>
+</main>
+
+<p class="foot" id="foot"></p>
+
+<div class="toast" id="toast" role="status" aria-live="polite" hidden></div>
+
+<nav class="tabbar" role="tablist" aria-label="Views">
+  <button role="tab" aria-selected="true" data-tab="today"><svg class="i" aria-hidden="true"><use href="#i-today"/></svg>Today</button>
+  <button role="tab" aria-selected="false" data-tab="archive"><svg class="i" aria-hidden="true"><use href="#i-archive"/></svg>Archive</button>
+</nav>
+</body>
+</html>

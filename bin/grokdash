@@ -1,0 +1,96 @@
+#!/usr/bin/env bash
+# grokdash: the command a Grok Bot runs to talk to the Grok Bot Dashboard.
+# Needs only bash and curl.
+#
+# Config, first match wins:
+#   GROKDASH_URL, GROKDASH_TOKEN, GROKDASH_BOT environment variables
+#   ~/.config/grokdash/config with lines URL=..., TOKEN=..., BOT=...
+set -euo pipefail
+
+CONFIG="${GROKDASH_CONFIG:-$HOME/.config/grokdash/config}"
+if [[ -f "$CONFIG" ]]; then
+  while IFS='=' read -r k v; do
+    case "$k" in
+      URL) : "${GROKDASH_URL:=$v}" ;;
+      TOKEN) : "${GROKDASH_TOKEN:=$v}" ;;
+      BOT) : "${GROKDASH_BOT:=$v}" ;;
+    esac
+  done < "$CONFIG"
+fi
+BOT="${GROKDASH_BOT:-dashboard}"
+
+usage() {
+  cat <<'HELP'
+grokdash: post to and read from the Grok Bot Dashboard.
+
+  grokdash post [JSON]            Add or update a card (JSON from the argument or stdin)
+  grokdash list [open|closed|all] List this bot's cards
+  grokdash close KEY [REASON]     Close a card by its key (or #ID)
+  grokdash agenda [JSON]          Replace today's and tomorrow's events
+  grokdash todos [JSON]           Replace the to-do list (only without a direct Todoist link)
+  grokdash actions                Take the taps waiting for you (do each one, then report it)
+  grokdash done ID [RESULT]       Report an action as done, with one line on what you did
+  grokdash fail ID REASON         Report an action you couldn't do
+  grokdash scanned                Say you finished a scan ("Updated N min ago")
+  grokdash register [JSON]        Set your name, color, webhookUrl or webhookToken
+  grokdash raw METHOD PATH [JSON] Call any API path
+
+Card JSON: {"key":"wa:lab-poll","kind":"choice","title":"...","body":"...","source":"WhatsApp · Lab group",
+  "urgent":"answer by 14:00","options":[{"label":"Vote Tuesday","instruction":"Vote Tuesday in the poll"}]}
+Kinds: choice (options), draft ("draft":{"to","channel","text"}), reminder, digest ("section":"catchup","countLabel").
+Full reference: docs/API.md in the repo.
+HELP
+}
+
+die() { echo "grokdash: $*" >&2; exit 1; }
+
+json_str() {
+  local s=$1
+  s=${s//\\/\\\\}; s=${s//\"/\\\"}; s=${s//$'\n'/\\n}; s=${s//$'\r'/}; s=${s//$'\t'/\\t}
+  printf '"%s"' "$s"
+}
+
+body_arg() {
+  if [[ $# -gt 0 && "$1" != "-" ]]; then printf '%s' "$1"; else cat; fi
+}
+
+call() {
+  local method=$1 path=$2 body=${3:-}
+  [[ -n "${GROKDASH_URL:-}" ]] || die "no URL. Set GROKDASH_URL or URL= in $CONFIG"
+  [[ -n "${GROKDASH_TOKEN:-}" ]] || die "no token. Set GROKDASH_TOKEN or TOKEN= in $CONFIG"
+  local args=(-sS -X "$method" -H "Authorization: Bearer $GROKDASH_TOKEN" -H "X-Bot: $BOT" -w '\n%{http_code}')
+  [[ -n "$body" ]] && args+=(-H "Content-Type: application/json" --data-binary "$body")
+  local out code
+  out=$(curl "${args[@]}" "${GROKDASH_URL%/}$path") || die "can't reach $GROKDASH_URL"
+  code=${out##*$'\n'}
+  out=${out%$'\n'*}
+  printf '%s\n' "$out"
+  [[ "$code" == 2* ]] || exit 1
+}
+
+cmd=${1:-help}
+shift || true
+case "$cmd" in
+  post) call POST /api/bot/items "$(body_arg "$@")" ;;
+  list) call GET "/api/bot/items?status=${1:-open}" ;;
+  close)
+    [[ $# -ge 1 ]] || die "usage: grokdash close KEY [REASON]"
+    if [[ "$1" == \#* ]]; then target="\"id\":${1#\#}"; else target="\"key\":$(json_str "$1")"; fi
+    call POST /api/bot/items/close "{$target,\"reason\":$(json_str "${2:-}")}" ;;
+  agenda) call PUT /api/bot/agenda "$(body_arg "$@")" ;;
+  todos) call PUT /api/bot/todos "$(body_arg "$@")" ;;
+  actions) call GET /api/bot/actions ;;
+  done)
+    [[ $# -ge 1 ]] || die "usage: grokdash done ID [RESULT]"
+    call POST "/api/bot/actions/$1" "{\"ok\":true,\"result\":$(json_str "${2:-}")}" ;;
+  fail)
+    [[ $# -ge 2 ]] || die "usage: grokdash fail ID REASON"
+    call POST "/api/bot/actions/$1" "{\"ok\":false,\"result\":$(json_str "$2")}" ;;
+  scanned) call POST /api/bot/scan '{}' ;;
+  register) call POST /api/bot/register "$(body_arg "$@")" ;;
+  raw)
+    [[ $# -ge 2 ]] || die "usage: grokdash raw METHOD PATH [JSON]"
+    call "$1" "$2" "${3:-}" ;;
+  help|-h|--help) usage ;;
+  *) usage >&2; exit 2 ;;
+esac

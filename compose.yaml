@@ -1,0 +1,17 @@
+name: grok-bot-dashboard
+
+services:
+  dashboard:
+    build: .
+    image: grok-bot-dashboard
+    restart: unless-stopped
+    env_file: .env
+    environment:
+      HOST: 0.0.0.0
+      PORT: 8787
+      DATA_DIR: /data
+    # Only this machine can reach the port. Tailscale Serve puts it on your tailnet.
+    ports:
+      - "127.0.0.1:${PORT:-8787}:8787"
+    volumes:
+      - ./data:/data
