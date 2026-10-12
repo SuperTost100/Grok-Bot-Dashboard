@@ -1,5 +1,7 @@
 // Direct link to Todoist (API v1) so ticking a to-do is instant and Todoist stays the only list.
 
+import { parseWhen, addDays } from "./time.ts";
+
 const BASE = "https://api.todoist.com/api/v1";
 
 export interface Todo {
@@ -31,13 +33,15 @@ type Fetch = typeof fetch;
 export class Todoist {
   token: string;
   filter: string;
+  tz: string;
   fetch: Fetch;
   cache: { at: number; todos: Todo[] } | null = null;
   projects: { at: number; names: Map<string, string> } | null = null;
 
-  constructor(token: string, filter = "", fetchImpl: Fetch = fetch) {
+  constructor(token: string, filter = "", tz = "UTC", fetchImpl: Fetch = fetch) {
     this.token = token;
     this.filter = filter;
+    this.tz = tz;
     this.fetch = fetchImpl;
   }
 
@@ -91,7 +95,8 @@ export class Todoist {
       content: t.content,
       // The API counts the other way round: 4 is p1.
       priority: 5 - t.priority,
-      due: t.due ? (t.due.datetime ?? t.due.date) : "",
+      // Todoist sends fixed-time tasks in UTC ("...Z"); show them in the dashboard's time zone.
+      due: t.due ? (parseWhen(t.due.datetime ?? t.due.date, this.tz) ?? t.due.date) : "",
       dueString: t.due?.string ?? "",
       recurring: Boolean(t.due?.is_recurring),
       deadline: t.deadline?.date ?? "",
@@ -131,10 +136,4 @@ export function pickTodos<T extends { due: string; deadline: string; priority: n
       return da === db ? a.priority - b.priority : da < db ? -1 : 1;
     });
   return { todos: shown.slice(0, limit), hidden: todos.length - Math.min(shown.length, limit) };
-}
-
-export function addDays(day: string, n: number): string {
-  const d = new Date(day + "T12:00:00Z");
-  d.setUTCDate(d.getUTCDate() + n);
-  return d.toISOString().slice(0, 10);
 }

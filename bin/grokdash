@@ -33,12 +33,13 @@ grokdash: post to and read from the Grok Bot Dashboard.
   grokdash fail ID REASON         Report an action you couldn't do
   grokdash scanned                Say you finished a scan ("Updated N min ago")
   grokdash register [JSON]        Set your name, color, webhookUrl or webhookToken
+  grokdash guide                  Full reference: fields, limits, the server's time zone, examples
   grokdash raw METHOD PATH [JSON] Call any API path
 
 Card JSON: {"key":"wa:lab-poll","kind":"choice","title":"...","body":"...","source":"WhatsApp · Lab group",
   "urgent":"answer by 14:00","options":[{"label":"Vote Tuesday","instruction":"Vote Tuesday in the poll"}]}
 Kinds: choice (options), draft ("draft":{"to","channel","text"}), reminder, digest ("section":"catchup","countLabel").
-Full reference: docs/API.md in the repo.
+Full reference: grokdash guide
 HELP
 }
 
@@ -87,6 +88,7 @@ case "$cmd" in
     [[ $# -ge 2 ]] || die "usage: grokdash fail ID REASON"
     call POST "/api/bot/actions/$1" "{\"ok\":false,\"result\":$(json_str "$2")}" ;;
   scanned) call POST /api/bot/scan '{}' ;;
+  guide) call GET /api/bot/help ;;
   register) call POST /api/bot/register "$(body_arg "$@")" ;;
   raw)
     [[ $# -ge 2 ]] || die "usage: grokdash raw METHOD PATH [JSON]"

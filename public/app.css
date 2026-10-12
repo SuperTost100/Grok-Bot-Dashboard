@@ -363,3 +363,25 @@ textarea.draft-edit {
 .sec-head .note .logo { width: 18px; height: 18px; border-radius: 5px; }
 .sec-head .note .logo svg { width: 11px; height: 11px; }
 @media (prefers-color-scheme: dark) { .logo { box-shadow: inset 0 0 0 1px rgb(255 255 255 / 0.18); } }
+
+/* Review fixes: long answers wrap instead of pushing the page sideways */
+.btn.suggest { white-space: normal; text-align: left; max-width: 100%; line-height: 1.25; padding-top: 8px; padding-bottom: 8px; }
+.actions { min-width: 0; }
+.will-do { display: block; font-size: 13px; font-weight: 400; color: var(--muted); }
+.catch-pending { margin: 10px 0 0 32px; }
+.catch-pending .resolved { border-style: dashed; }
+.btn:disabled, .check:disabled { cursor: not-allowed; opacity: 0.6; }
+.todo .t a { color: inherit; text-decoration: none; }
+.todo .t a:hover { text-decoration: underline; }
+/* Archive rows expand to show what the card said */
+details.arch { padding: 0; display: block; }
+details.arch summary { list-style: none; display: flex; gap: 10px; padding: 12px 14px; align-items: flex-start; cursor: pointer; }
+details.arch summary::-webkit-details-marker { display: none; }
+details.arch summary .chev { color: var(--muted); margin-top: 4px; transition: transform 150ms ease-out; }
+details.arch[open] summary .chev { transform: rotate(90deg); }
+details.arch + details.arch { border-top: 1px solid var(--border); }
+.arch-detail { padding: 0 14px 12px 50px; font-size: 15px; }
+.arch-detail p { margin: 0 0 6px; }
+.arch-detail .actions { align-items: center; margin-top: 8px; }
+.arch-detail .actions a { color: var(--muted); font-size: 14px; }
+.resolved .status strong, .resolved .status .line { display: block; }

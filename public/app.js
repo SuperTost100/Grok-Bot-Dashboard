@@ -14,12 +14,18 @@ const ui = {
   writing: new Set(),   // cards with the Write field open
   snoozing: new Set(),  // cards with the snooze menu open
   editing: new Set(),   // drafts being edited
-  doneTodos: new Map(), // id -> { todo, at } for the Undo row after ticking a to-do
-  busy: false,
-  refreshAskedAt: 0,
+  text: new Map(),      // unsent text by field id, kept until it's sent or cancelled
+  doneTodos: new Map(), // "bot|id" -> { todo, at } for the Undo row after ticking a to-do
+  todoBusy: new Set(),  // "bot|id" with a request in flight
+  archive: { items: [], more: false, q: "" },
 };
 
 // ---------- talking to the server ----------
+
+// Every state request gets a number. A response older than one already shown is dropped,
+// so a slow poll can't undo what a tap just changed.
+let seq = 0;
+let shown = 0;
 
 async function api(method, path, body) {
   const res = await fetch(path, {
@@ -28,27 +34,33 @@ async function api(method, path, body) {
     body: body === undefined ? undefined : JSON.stringify(body),
   });
   const data = await res.json().catch(() => ({}));
-  if (!res.ok) throw new Error(data.error || `The server answered ${res.status}.`);
+  if (!res.ok) throw Object.assign(new Error(data.error || `The server answered ${res.status}.`), { status: res.status });
   return data;
 }
 
+function applyState(id, state) {
+  if (id < shown) return;
+  shown = id;
+  ui.state = state;
+  render();
+}
+
 async function load() {
+  const id = ++seq;
   try {
-    ui.state = await api("GET", "/api/ui/state");
+    const state = await api("GET", "/api/ui/state");
     showBanner("");
-    render();
+    applyState(id, state);
   } catch (err) {
     showBanner(`Can't reach the dashboard server: ${err.message} Retrying every 20 seconds.`);
   }
 }
 
 async function run(method, path, body) {
+  const id = ++seq;
   try {
     const data = await api(method, path, body);
-    if (data.state) {
-      ui.state = data.state;
-      render();
-    }
+    if (data.state) applyState(id, data.state);
     return data;
   } catch (err) {
     toast(err.message);
@@ -78,14 +90,15 @@ function toast(msg) {
 const tz = () => ui.state?.tz || undefined;
 function parts(d) {
   const p = Object.fromEntries(new Intl.DateTimeFormat("en-CA", {
-    timeZone: tz(), year: "numeric", month: "2-digit", day: "2-digit", hour: "2-digit", minute: "2-digit", hourCycle: "h23",
+    timeZone: tz(), year: "numeric", month: "2-digit", day: "2-digit", hour: "2-digit", minute: "2-digit", second: "2-digit", hourCycle: "h23",
   }).formatToParts(d).map((x) => [x.type, x.value]));
-  return { day: `${p.year}-${p.month}-${p.day}`, time: `${p.hour}:${p.minute}` };
+  return { day: `${p.year}-${p.month}-${p.day}`, time: `${p.hour}:${p.minute}`, stamp: `${p.year}-${p.month}-${p.day}T${p.hour}:${p.minute}:${p.second}` };
 }
 const dayName = (d) => d.toLocaleDateString("en-GB", { weekday: "short", timeZone: tz() });
 const localDay = (d) => parts(d).day;
 const hhmm = (d) => parts(d).time;
 const dayOfMonth = (d) => Number(parts(d).day.slice(8));
+const nowStamp = () => parts(new Date()).stamp;
 
 function when(ms) {
   const d = new Date(ms);
@@ -110,7 +123,9 @@ function ago(ms) {
   return h < 24 ? `Updated ${h} h ago` : `Updated ${when(ms)}`;
 }
 
-/** "2026-10-13" or "2026-10-13T14:30:00" relative to the server's today. */
+const addDay = (day, n) => new Date(Date.parse(day + "T12:00:00Z") + n * 86400000).toISOString().slice(0, 10);
+
+/** "2026-10-13" relative to the server's today. */
 function dayLabel(day, today) {
   if (!day) return "";
   const diff = Math.round((Date.parse(day + "T12:00:00Z") - Date.parse(today + "T12:00:00Z")) / 86400000);
@@ -118,18 +133,8 @@ function dayLabel(day, today) {
   if (diff === 1) return "Tomorrow";
   if (diff === -1) return "Yesterday";
   const d = new Date(day + "T12:00:00Z");
-  return diff > 1 && diff < 7 ? d.toLocaleDateString("en-GB", { weekday: "short", timeZone: "UTC" }) : `${d.toLocaleDateString("en-GB", { weekday: "short", timeZone: "UTC" })} ${d.getUTCDate()}`;
-}
-
-function snoozeChoices() {
-  const now = new Date();
-  const at = (days, h) => { const d = new Date(now); d.setDate(d.getDate() + days); d.setHours(h, 0, 0, 0); return d; };
-  const list = [{ label: "In 1 hour", until: new Date(now.getTime() + 3600000) }];
-  if (now.getHours() < 18) list.push({ label: "Tonight 19:00", until: at(0, 19) });
-  list.push({ label: "Tomorrow 9:00", until: at(1, 9) });
-  const toMonday = ((8 - now.getDay()) % 7) || 7;
-  if (toMonday > 1) list.push({ label: "Monday 9:00", until: at(toMonday, 9) });
-  return list;
+  const name = d.toLocaleDateString("en-GB", { weekday: "short", timeZone: "UTC" });
+  return diff > 1 && diff < 7 ? name : `${name} ${d.getUTCDate()}`;
 }
 
 // ---------- rendering ----------
@@ -150,7 +155,7 @@ function brandTile(b, extra = "") {
 }
 
 function logo(item) {
-  const b = brandFor(item.app, item.source);
+  const b = brandFor(item.app, item.source) || brandFor("", item.title);
   if (!b) return avatar(item.bot);
   const bot = botOf(item.bot);
   const badge = ui.state.bots.length > 1
@@ -164,23 +169,34 @@ function paintColors() {
   for (const el of $$("[data-color]")) el.style.background = el.dataset.color;
 }
 
+/** A selector that finds "the same" control after a re-render, so keyboard focus isn't lost. */
+function focusKey(el) {
+  if (!el || el === document.body) return null;
+  if (el.id) return `#${CSS.escape(el.id)}`;
+  const a = el.dataset;
+  const attrs = ["act", "id", "option", "todo", "action", "until", "bot", "tab"].filter((k) => a[k] !== undefined);
+  if (!attrs.length) return null;
+  return attrs.map((k) => `[data-${k}="${CSS.escape(a[k])}"]`).join("");
+}
+
 function render() {
   if (!ui.state) return;
-  // Keep whatever is being typed when the page re-renders under it.
-  const typing = $$("input[id^='w-'], textarea[id^='d-']").map((el) => ({ id: el.id, value: el.value, focused: el === document.activeElement, pos: el.selectionStart }));
+  const active = document.activeElement;
+  const key = focusKey(active);
+  const caret = active && "selectionStart" in active ? active.selectionStart : null;
   renderHeader();
   renderFilters();
   renderNeeds();
   renderTodos();
   renderAgenda();
   renderCatch();
-  if (ui.tab === "archive") renderArchive();
   paintColors();
-  for (const t of typing) {
-    const el = document.getElementById(t.id);
-    if (!el) continue;
-    el.value = t.value;
-    if (t.focused) { el.focus(); el.setSelectionRange(t.pos, t.pos); }
+  if (key && document.activeElement !== active) {
+    const again = document.querySelector(key);
+    if (again) {
+      again.focus({ preventScroll: true });
+      if (caret != null && "setSelectionRange" in again) again.setSelectionRange(caret, caret);
+    }
   }
 }
 
@@ -188,7 +204,8 @@ function renderHeader() {
   const s = ui.state;
   const now = new Date();
   $("#full-date").textContent = now.toLocaleDateString("en-GB", { weekday: "long", day: "numeric", month: "long", timeZone: tz() });
-  const next = s.agenda.find((e) => e.start.length > 10 && e.start.slice(0, 10) === s.today && e.start.slice(11, 16) >= hhmm(now));
+  const stamp = nowStamp();
+  const next = s.agenda.find((e) => e.start.length > 10 && e.start.slice(0, 10) === s.today && e.start >= stamp);
   const short = now.toLocaleDateString("en-GB", { weekday: "short", day: "numeric", month: "short", timeZone: tz() });
   $("#glance").innerHTML = next ? `${esc(short)} · Next <strong>${esc(next.start.slice(11, 16))}</strong> ${esc(next.title)}` : esc(short);
   const asked = s.bots.some((b) => b.refreshRequestedAt);
@@ -203,14 +220,14 @@ function renderHeader() {
 }
 
 function renderFilters() {
-  const needs = ui.state.needs.filter((i) => i.status !== "closed");
-  const bots = ui.state.bots.filter((b) => ui.state.needs.some((i) => i.bot === b.slug) || ui.state.catchup.some((i) => i.bot === b.slug));
+  const bots = ui.state.bots;
   if (ui.filter !== "all" && !bots.some((b) => b.slug === ui.filter)) ui.filter = "all";
+  const open = ui.state.needs.filter((i) => i.status !== "closed");
   const chip = (slug, label, count, extra = "") =>
     `<button class="chip-filter${extra}" aria-pressed="${ui.filter === slug}" data-bot="${esc(slug)}">${label} <span class="count num">${count || ""}</span></button>`;
   $("#filters").innerHTML = bots.length < 2 ? "" :
-    chip("all", "All", needs.length, " all") +
-    bots.map((b) => chip(b.slug, `${avatar(b.slug)}${esc(b.name)}`, needs.filter((i) => i.bot === b.slug).length)).join("");
+    chip("all", "All", open.length, " all") +
+    bots.map((b) => chip(b.slug, `${avatar(b.slug)}${esc(b.name)}`, open.filter((i) => i.bot === b.slug).length)).join("");
   $("#filters").hidden = bots.length < 2;
 }
 
@@ -218,22 +235,40 @@ function cardActions(c) {
   const id = c.id;
   const write = `<button class="btn ghost" data-act="write" data-id="${id}">${icon("msg")}<span class="lbl">Write</span></button>`;
   const snooze = `<button class="btn ghost" data-act="snooze" data-id="${id}">${icon("clock")}<span class="lbl">Snooze</span></button>`;
-  const dismiss = `<button class="btn ghost" data-act="dismiss" data-id="${id}" aria-label="Dismiss">${icon("x")}</button>`;
+  const dismiss = `<button class="btn ghost" data-act="dismiss" data-id="${id}" aria-label="Dismiss" title="Dismiss">${icon("x")}</button>`;
+  const end = `<span class="end">${write}${snooze}${dismiss}</span>`;
   if (ui.editing.has(id)) {
     return `<button class="btn primary" data-act="send-edited" data-id="${id}">${icon("send")}Send to ${esc(c.draft.to)}</button>
       <button class="btn" data-act="cancel-edit" data-id="${id}">Cancel</button>`;
   }
   if (c.kind === "choice") {
-    return c.options.map((o, i) => `<button class="btn suggest${i === 0 ? " primary" : ""}" data-act="choose" data-id="${id}" data-option="${i}">${esc(o.label)}</button>`).join("") +
-      `<span class="end">${write}${snooze}</span>`;
+    return c.options.map((o, i) =>
+      `<button class="btn suggest${i === 0 ? " primary" : ""}" data-act="choose" data-id="${id}" data-option="${i}"${o.instruction ? ` title="${esc(o.instruction)}"` : ""}>${esc(o.label)}</button>`,
+    ).join("") + end;
   }
   if (c.kind === "draft") {
     return `<button class="btn primary" data-act="send" data-id="${id}">${icon("send")}Send to ${esc(c.draft.to)}</button>
-      <button class="btn" data-act="edit" data-id="${id}">${icon("pencil")}Edit</button>
-      <span class="end">${write}${dismiss}</span>`;
+      <button class="btn" data-act="edit" data-id="${id}">${icon("pencil")}Edit</button>${end}`;
   }
-  return `<button class="btn primary" data-act="done" data-id="${id}">${icon("check")}Mark done</button>
-    <span class="end">${write}${snooze}${dismiss}</span>`;
+  return `<button class="btn primary" data-act="done" data-id="${id}">${icon("check")}Mark done</button>${end}`;
+}
+
+/** The row that replaces a card while the bot works on it, with Undo during the undo window. */
+function pendingRow(c) {
+  const p = c.pendingAction;
+  const bot = botOf(c.bot).name;
+  const what = p.type === "send" ? `Sending your reply to ${c.draft?.to ?? "them"}` : p.type === "write" ? `"${p.text}"` : p.label;
+  const detail = p.instruction && p.instruction !== p.label ? `<span class="will-do">${esc(bot)} will: ${esc(p.instruction)}</span>` : "";
+  if (p.status === "queued") {
+    const left = Math.max(0, Math.ceil((p.runAfter - Date.now()) / 1000));
+    return `<div class="resolved" role="status"><span class="pending-dot"></span><span class="status"><strong>${esc(what)}</strong>${detail}<span class="line">Sending to ${esc(bot)} in <span class="num" data-countdown="${p.runAfter}">${left}</span>s</span></span><button class="btn" data-act="undo" data-action="${p.id}">Undo</button></div>`;
+  }
+  return `<div class="resolved" role="status"><span class="pending-dot"></span><span class="status"><strong>${esc(what)}</strong>${detail}<span class="line">${esc(bot)} is on it</span></span></div>`;
+}
+
+function writeForm(c, placeholder) {
+  const fid = `w-${c.id}`;
+  return `<form class="write" data-form="${c.id}"><label class="sr-only" for="${fid}">${esc(placeholder)}</label><input id="${fid}" placeholder="${esc(placeholder)}" autocomplete="off" maxlength="2000" value="${esc(ui.text.get(fid) ?? "")}"><button class="btn primary" aria-label="Send">${icon("send")}</button></form>`;
 }
 
 function renderCard(c) {
@@ -241,37 +276,27 @@ function renderCard(c) {
   if (c.status === "closed") {
     return `<div class="resolved done" role="status"><span class="ok">${icon("check")}</span><span class="status"><strong>${esc(c.resolution || "Done")}</strong><br>${esc(c.title)}</span><button class="btn ghost" data-act="ack" data-id="${c.id}" aria-label="Hide">${icon("x")}</button></div>`;
   }
-  const p = c.pendingAction;
-  if (c.status === "pending" && p) {
-    const what = p.type === "send" ? `Sending your reply to ${c.draft?.to ?? "them"}` : p.type === "write" ? `"${p.text}"` : p.label;
-    if (p.status === "queued") {
-      const left = Math.max(0, Math.ceil((p.runAfter - Date.now()) / 1000));
-      return `<div class="resolved" role="status"><span class="pending-dot"></span><span class="status"><strong>${esc(what)}</strong><br>Sending to ${esc(bot)} in <span class="num" data-countdown="${p.runAfter}">${left}</span>s</span><button class="btn" data-act="undo" data-action="${p.id}">Undo</button></div>`;
-    }
-    return `<div class="resolved" role="status"><span class="pending-dot"></span><span class="status"><strong>${esc(what)}</strong><br>${esc(bot)} is on it</span></div>`;
-  }
+  if (c.status === "pending" && c.pendingAction) return pendingRow(c);
   const open = ui.open.has(c.id) || Boolean(c.urgent) || Boolean(c.error) || ui.editing.has(c.id) || ui.writing.has(c.id) || ui.snoozing.has(c.id);
+  const did = `d-${c.id}`;
   const draft = c.kind === "draft" && c.draft
     ? ui.editing.has(c.id)
-      ? `<label class="sr-only" for="d-${c.id}">Edit the reply</label><textarea class="draft-edit" id="d-${c.id}">${esc(c.draft.text)}</textarea>`
+      ? `<label class="sr-only" for="${did}">Edit the reply</label><textarea class="draft-edit" id="${did}" maxlength="4000">${esc(ui.text.get(did) ?? c.draft.text)}</textarea>`
       : `<div class="draft-label">Draft reply${c.draft.channel ? ` on ${esc(c.draft.channel)}` : ""}</div><div class="draft">${esc(c.draft.text)}</div>`
     : "";
-  const write = ui.writing.has(c.id)
-    ? `<form class="write" data-form="${c.id}"><label class="sr-only" for="w-${c.id}">Tell ${esc(bot)} what to do</label><input id="w-${c.id}" placeholder="Tell ${esc(bot)} what to do" autocomplete="off" maxlength="2000"><button class="btn primary" aria-label="Send">${icon("send")}</button></form>`
-    : "";
   const snooze = ui.snoozing.has(c.id)
-    ? `<div class="menu"><span class="label">Snooze until</span>${snoozeChoices().map((s) => `<button class="btn suggest" data-act="snooze-to" data-id="${c.id}" data-until="${s.until.getTime()}">${s.label}</button>`).join("")}</div>`
+    ? `<div class="menu"><span class="label">Snooze until</span>${ui.state.snoozeChoices.map((s) => `<button class="btn suggest" data-act="snooze-to" data-id="${c.id}" data-until="${s.until}">${esc(s.label)}</button>`).join("")}</div>`
     : "";
-  const source = c.link ? `<a class="src" href="${esc(c.link)}" target="_blank" rel="noopener">${esc(c.source || "Open")}</a>` : `<span class="src">${esc(c.source)}</span>`;
+  const source = c.link ? `<a class="src" href="${esc(c.link)}" target="_blank" rel="noopener noreferrer">${esc(c.source || "Open")}</a>` : `<span class="src">${esc(c.source)}</span>`;
   return `<article class="card${c.urgent ? " urgent" : ""}${open ? " open" : ""}" aria-labelledby="t-${c.id}">
-    <div class="meta">${logo(c)}${source}<time class="num">${when(c.createdAt)}</time></div>
+    <div class="meta">${logo(c)}${source}<time class="num" title="${esc(whenFull(c.updatedAt))}">${when(c.updatedAt)}</time></div>
     ${c.urgent ? `<div class="flag-row"><span class="flag">Urgent · ${esc(c.urgent)}</span></div>` : ""}
     <h3 id="t-${c.id}"><button class="title-btn" data-act="expand" data-id="${c.id}" aria-expanded="${open}">${esc(c.title)}${icon("chev", "i more")}</button></h3>
     <div class="detail">${c.body ? `<p>${esc(c.body)}</p>` : ""}${c.context ? `<p class="context">${esc(c.context)}</p>` : ""}</div>
     ${draft}
-    ${c.error ? `<div class="error">Last try failed: ${esc(c.error)}</div>` : ""}
+    ${c.error ? `<div class="error">${esc(c.error)}</div>` : ""}
     <div class="actions">${cardActions(c)}</div>
-    ${write}${snooze}
+    ${ui.writing.has(c.id) ? writeForm(c, `Tell ${bot} what to do`) : ""}${snooze}
   </article>`;
 }
 
@@ -288,12 +313,14 @@ function todoWhen(t, today) {
   const parts = [];
   if (t.due) {
     const time = t.due.length > 10 ? ` ${t.due.slice(11, 16)}` : "";
-    const late = t.due.slice(0, 10) < today;
+    const late = t.due.length > 10 ? t.due < nowStamp() : t.due.slice(0, 10) < today;
     parts.push({ text: (late ? "Overdue · " : "") + dayLabel(t.due.slice(0, 10), today) + time, late });
   }
   if (t.deadline) parts.push({ text: `Deadline ${dayLabel(t.deadline, today).toLowerCase()}`, late: t.deadline <= today });
   return parts;
 }
+
+const todoKey = (t) => `${t.bot}|${t.id}`;
 
 function renderTodos() {
   const s = ui.state;
@@ -302,27 +329,31 @@ function renderTodos() {
   const todoBrand = t.source === "todoist" ? BRANDS.todoist : t.items.length && t.items.every((x) => x.app === t.items[0].app) ? brandFor(t.items[0].app, "") : null;
   $("#todo-source").innerHTML = t.source === "none" ? "" : todoBrand ? `${brandTile(todoBrand)}<span>From ${esc(todoBrand.name)}</span>` : "From your bots";
   const now = Date.now();
-  for (const [id, v] of ui.doneTodos) if (now - v.at > 15000) ui.doneTodos.delete(id);
-  const items = t.items.filter((x) => !ui.doneTodos.has(x.id));
+  for (const [k, v] of ui.doneTodos) if (now - v.at > 15000) ui.doneTodos.delete(k);
+  const items = t.items.filter((x) => !ui.doneTodos.has(todoKey(x)));
   $("#todo-count").textContent = items.length || "";
   if (t.source === "none") {
     $("#todos").innerHTML = `<div class="empty-row"><strong>No to-do list connected.</strong> Set <code>TODOIST_TOKEN</code> on the server, or let a bot send your to-dos.</div>`;
     return;
   }
-  const row = (x, done) => `
+  const row = (x, done) => {
+    const k = todoKey(x);
+    const busy = ui.todoBusy.has(k) ? " disabled" : "";
+    return `
     <div class="todo${done ? " is-done" : ""}">
-      <button class="check p${x.priority}" data-act="todo" data-todo="${esc(x.id)}" aria-pressed="${done}" aria-label="${done ? "Undo" : "Complete"}: ${esc(x.content)}">${icon("check")}</button>
+      <button class="check p${x.priority}" data-act="todo" data-todo="${esc(k)}" aria-pressed="${done}" aria-label="${done ? "Completed" : "Complete"}: ${esc(x.content)}"${done ? " disabled" : busy}>${icon("check")}</button>
       <div class="body">
-        <div class="t">${esc(x.content)}</div>
+        <div class="t">${x.url ? `<a href="${esc(x.url)}" target="_blank" rel="noopener noreferrer">${esc(x.content)}</a>` : esc(x.content)}</div>
         <div class="sub">${done
-          ? `<span>Completed</span><button class="btn ghost undo" data-act="todo-undo" data-todo="${esc(x.id)}">Undo</button>`
+          ? `<span>Completed</span><button class="btn ghost undo" data-act="todo-undo" data-todo="${esc(k)}"${busy}>Undo</button>`
           : `<span class="prio p${x.priority}">P${x.priority}</span>${todoWhen(x, today).map((w) => `<span class="${w.late ? "late" : ""}">${esc(w.text)}</span>`).join("")}${x.project ? `<span>${esc(x.project)}</span>` : ""}`}</div>
       </div>
     </div>`;
+  };
   const done = [...ui.doneTodos.values()].map((v) => row(v.todo, true));
   const body = done.join("") + items.map((x) => row(x, false)).join("");
   const more = t.hidden ? `${t.hidden} more without a date this week` : "Sorted by date, then priority";
-  const link = t.source === "todoist" ? `<a href="https://app.todoist.com/app/today" target="_blank" rel="noopener">Open Todoist</a>` : "";
+  const link = t.source === "todoist" ? `<a href="https://app.todoist.com/app/today" target="_blank" rel="noopener noreferrer">Open Todoist</a>` : "";
   $("#todos").innerHTML =
     (t.error ? `<div class="empty-row"><strong>Todoist didn't answer.</strong> ${esc(t.error)}</div>` : "") +
     (body || `<div class="empty-row">Nothing due this week.</div>`) +
@@ -331,18 +362,27 @@ function renderTodos() {
 
 function renderAgenda() {
   const s = ui.state;
-  const tomorrow = new Date(Date.parse(s.today + "T12:00:00Z") + 86400000).toISOString().slice(0, 10);
-  const now = hhmm(new Date());
+  const tomorrow = addDay(s.today, 1);
+  const stamp = nowStamp();
   let nextMarked = false;
+  const endLabel = (e, date) => {
+    if (!e.end) return "";
+    if (e.end.slice(0, 10) === date) return e.end.length > 10 ? `until ${e.end.slice(11, 16)}` : "";
+    return e.end.length > 10 ? `until ${dayLabel(e.end.slice(0, 10), s.today)} ${e.end.slice(11, 16)}` : `until ${dayLabel(e.end.slice(0, 10), s.today)}`;
+  };
   const day = (label, date) => {
-    const evs = s.agenda.filter((e) => e.start.slice(0, 10) === date);
+    const next = addDay(date, 1);
+    // Every event that touches this day, including ones that started earlier.
+    const evs = s.agenda.filter((e) => e.start.slice(0, 10) <= date && (e.end || e.start).slice(0, 10) >= date && e.start < next);
     const rows = evs.map((e) => {
-      const time = e.allDay ? "All day" : e.start.slice(11, 16);
-      const end = e.end && e.end.length > 10 ? `${e.location ? "until" : "Until"} ${e.end.slice(11, 16)}` : "";
-      const past = date === s.today && !e.allDay && (e.end ? e.end.slice(11, 16) : time) < now;
-      const isNext = !nextMarked && date === s.today && !e.allDay && time >= now;
+      const startsToday = e.start.slice(0, 10) === date;
+      const time = e.allDay || !startsToday ? (startsToday ? "All day" : "Ongoing") : e.start.slice(11, 16);
+      const finish = e.end || e.start;
+      const past = !e.allDay && finish.length > 10 && finish < stamp;
+      const isNext = !nextMarked && date === s.today && startsToday && !e.allDay && e.start >= stamp;
       if (isNext) nextMarked = true;
-      const where = [e.location, end].filter(Boolean).join(", ");
+      const end = endLabel(e, date);
+      const where = [e.location, e.location ? end : end.charAt(0).toUpperCase() + end.slice(1)].filter(Boolean).join(", ");
       return `<div class="ev${past ? " past" : ""}${isNext ? " now" : ""}">
         <div class="when num">${esc(time)}</div>
         <div><div class="what">${esc(e.title)}${isNext ? ` <span class="now-label">Next</span>` : ""}</div>${where ? `<div class="where">${esc(where)}</div>` : ""}</div>
@@ -363,38 +403,53 @@ function renderCatch() {
   $("#catchup").innerHTML = list.length
     ? list.map((c) => {
         const read = c.status === "closed";
-        const pending = c.status === "pending";
-        return `<details class="catch${read ? " read" : ""}" data-id="${c.id}"${openIds.has(String(c.id)) ? " open" : ""}>
+        const pending = c.status === "pending" && c.pendingAction;
+        const isOpen = openIds.has(String(c.id)) || ui.writing.has(c.id) || pending;
+        return `<details class="catch${read ? " read" : ""}" data-id="${c.id}"${isOpen ? " open" : ""}>
           <summary>${logo(c)}<span class="ttl">${esc(c.title)}</span><span class="n num">${esc(c.countLabel)}</span>${icon("chev", "i chev")}</summary>
           <p class="gist">${esc(c.body)}</p>
-          ${ui.writing.has(c.id) ? `<form class="write catch-write" data-form="${c.id}"><label class="sr-only" for="w-${c.id}">Ask about this</label><input id="w-${c.id}" placeholder="Ask ${esc(botOf(c.bot).name)} about this" autocomplete="off" maxlength="2000"><button class="btn primary" aria-label="Send">${icon("send")}</button></form>` : ""}
-          <div class="actions">${pending ? `<span class="context">${esc(botOf(c.bot).name)} is on it</span>` : `${read ? "" : `<button class="btn" data-act="read" data-id="${c.id}">${icon("check")}Mark as read</button>`}<button class="btn ghost" data-act="write" data-id="${c.id}">${icon("msg")}Ask about this</button>`}</div>
+          ${pending ? `<div class="catch-pending">${pendingRow(c)}</div>` : `
+          ${ui.writing.has(c.id) ? writeForm(c, `Ask ${botOf(c.bot).name} about this`) : ""}
+          <div class="actions">${read ? "" : `<button class="btn" data-act="read" data-id="${c.id}">${icon("check")}Mark as read</button>`}<button class="btn ghost" data-act="write" data-id="${c.id}">${icon("msg")}Ask about this</button></div>`}
         </details>`;
       }).join("")
     : `<div class="empty-row">All caught up.</div>`;
 }
 
 let archiveSeq = 0;
-async function renderArchive() {
-  const seq = ++archiveSeq;
+async function loadArchive(append = false) {
+  const seqId = ++archiveSeq;
   const q = $("#arch-q").value.trim();
-  let items;
+  const offset = append ? ui.archive.items.length : 0;
   try {
-    items = (await api("GET", `/api/ui/archive?q=${encodeURIComponent(q)}`)).items;
+    const res = await api("GET", `/api/ui/archive?q=${encodeURIComponent(q)}&offset=${offset}`);
+    if (seqId !== archiveSeq) return;
+    ui.archive = { items: append ? [...ui.archive.items, ...res.items] : res.items, more: res.more, q };
+    renderArchive();
   } catch (err) {
     $("#archive").innerHTML = `<div class="empty-row"><strong>Couldn't load the archive.</strong> ${esc(err.message)}</div>`;
-    return;
   }
-  if (seq !== archiveSeq) return;
-  items = items.filter(visible);
+}
+
+function renderArchive() {
+  const items = ui.archive.items.filter(visible);
+  const q = ui.archive.q;
   $("#archive").innerHTML = items.length
     ? items.map((a) => {
         const why = a.status === "snoozed"
           ? `Snoozed until ${whenFull(a.snoozedUntil)}`
           : `${a.closedReason === "bot" ? `Closed by ${botOf(a.bot).name}: ` : ""}${a.resolution || a.closedReason} · ${when(a.closedAt)}`;
         const restore = a.closedReason === "action" ? "" : `<button class="btn" data-act="restore" data-id="${a.id}">Restore</button>`;
-        return `<div class="arch">${logo(a)}<div class="body"><div class="t">${esc(a.title)}</div><div class="why">${esc(why)}</div></div>${restore}</div>`;
-      }).join("")
+        const draft = a.draft ? `<div class="draft-label">Draft to ${esc(a.draft.to)}</div><div class="draft">${esc(a.draft.text)}</div>` : "";
+        const link = a.link ? `<a href="${esc(a.link)}" target="_blank" rel="noopener noreferrer">Open the original</a>` : "";
+        return `<details class="arch">
+          <summary>${logo(a)}<div class="body"><div class="t">${esc(a.title)}</div><div class="why">${esc(why)}</div></div>${icon("chev", "i chev")}</summary>
+          <div class="arch-detail">
+            ${a.source ? `<p class="context">${esc(a.source)}</p>` : ""}${a.body ? `<p>${esc(a.body)}</p>` : ""}${a.context ? `<p class="context">${esc(a.context)}</p>` : ""}${draft}
+            <div class="actions">${restore}${link}</div>
+          </div>
+        </details>`;
+      }).join("") + (ui.archive.more ? `<div class="list-foot"><button class="btn" data-act="more-archive">Show older</button></div>` : "")
     : `<div class="empty arch-empty"><strong>${q ? "No matches" : "Nothing archived yet"}</strong>${q ? "Try another word, or clear the bot filter." : "Cards you finish, dismiss or snooze land here for 30 days."}</div>`;
   paintColors();
 }
@@ -407,35 +462,55 @@ function setTab(tab) {
   $("#view-today").hidden = tab !== "today";
   $("#view-archive").hidden = tab !== "archive";
   $("#view-title").textContent = tab === "today" ? "Today" : "Archive";
-  if (tab === "archive") renderArchive();
+  if (tab === "archive") loadArchive();
   window.scrollTo({ top: 0 });
 }
 
 const item = (id) => [...ui.state.needs, ...ui.state.catchup].find((x) => x.id === Number(id));
 const actOn = (id, body) => run("POST", `/api/ui/items/${id}/act`, body);
 
+async function todoRequest(key, undo) {
+  const [bot, ...rest] = key.split("|");
+  ui.todoBusy.add(key);
+  renderTodos();
+  const res = await run("POST", "/api/ui/todos/complete", { bot, id: rest.join("|"), undo });
+  ui.todoBusy.delete(key);
+  return res;
+}
+
+document.addEventListener("input", (e) => {
+  const id = e.target.id;
+  if (id && /^[wd]-\d+$/.test(id)) ui.text.set(id, e.target.value);
+});
+
 document.addEventListener("click", async (e) => {
   const b = e.target.closest("[data-act], [data-tab], [data-bot]");
-  if (!b || !ui.state) return;
+  if (!b || !ui.state || b.disabled) return;
   if (b.dataset.tab) return setTab(b.dataset.tab);
   if (b.dataset.bot) {
     ui.filter = b.dataset.bot;
     render();
+    if (ui.tab === "archive") renderArchive();
     return;
   }
   const id = Number(b.dataset.id);
   const toggle = (set) => { set.has(id) ? set.delete(id) : set.add(id); };
+  const c = id ? item(id) : null;
   switch (b.dataset.act) {
     case "expand": toggle(ui.open); render(); break;
-    case "choose": await actOn(id, { type: "choose", option: Number(b.dataset.option) }); break;
-    case "send": await actOn(id, { type: "send" }); break;
+    case "choose": {
+      const n = Number(b.dataset.option);
+      await actOn(id, { type: "choose", option: n, rev: c?.rev, label: c?.options[n]?.label });
+      break;
+    }
+    case "send": await actOn(id, { type: "send", rev: c?.rev }); break;
     case "edit": ui.editing.add(id); render(); $(`#d-${id}`)?.focus(); break;
-    case "cancel-edit": ui.editing.delete(id); render(); break;
+    case "cancel-edit": ui.editing.delete(id); ui.text.delete(`d-${id}`); render(); break;
     case "send-edited": {
-      const text = $(`#d-${id}`).value.trim();
-      if (!text) return $(`#d-${id}`).focus();
-      ui.editing.delete(id);
-      await actOn(id, { type: "send", text });
+      const text = ($(`#d-${id}`)?.value ?? "").trim();
+      if (!text) return $(`#d-${id}`)?.focus();
+      const ok = await actOn(id, { type: "send", text, rev: c?.rev });
+      if (ok) { ui.editing.delete(id); ui.text.delete(`d-${id}`); render(); }
       break;
     }
     case "write":
@@ -446,30 +521,34 @@ document.addEventListener("click", async (e) => {
       $(`#w-${id}`)?.focus();
       break;
     case "snooze": toggle(ui.snoozing); ui.writing.delete(id); render(); break;
-    case "snooze-to":
-      ui.snoozing.delete(id);
-      await actOn(id, { type: "snooze", until: Number(b.dataset.until) });
-      toast(`Snoozed. It's in the archive until then.`);
+    case "snooze-to": {
+      const ok = await actOn(id, { type: "snooze", until: Number(b.dataset.until) });
+      if (ok) { ui.snoozing.delete(id); toast("Snoozed. It's in the archive until then."); }
       break;
+    }
     case "done": await actOn(id, { type: "done" }); break;
-    case "dismiss": await actOn(id, { type: "dismiss" }); toast("Dismissed. Restore it from the archive."); break;
+    case "dismiss": if (await actOn(id, { type: "dismiss" })) toast("Dismissed. Restore it from the archive."); break;
     case "read": e.preventDefault(); await actOn(id, { type: "read" }); break;
-    case "restore": await actOn(id, { type: "restore" }); renderArchive(); break;
+    case "restore": if (await actOn(id, { type: "restore" })) loadArchive(); break;
+    case "more-archive": loadArchive(true); break;
     case "undo": await run("POST", `/api/ui/actions/${b.dataset.action}/undo`, {}); break;
-    case "ack": await run("POST", `/api/ui/items/${id}/ack`, {}); await load(); break;
+    case "ack": await run("POST", `/api/ui/items/${id}/ack`, {}); break;
     case "todo": {
-      const t = ui.state.todos.items.find((x) => x.id === b.dataset.todo);
-      if (!t) return;
-      ui.doneTodos.set(t.id, { todo: t, at: Date.now() });
+      const key = b.dataset.todo;
+      const t = ui.state.todos.items.find((x) => todoKey(x) === key);
+      if (!t || ui.todoBusy.has(key)) return;
+      ui.doneTodos.set(key, { todo: t, at: Date.now() });
+      const ok = await todoRequest(key, false);
+      if (!ok) ui.doneTodos.delete(key);
       renderTodos();
-      const ok = await run("POST", `/api/ui/todos/${encodeURIComponent(t.id)}/complete`, {});
-      if (!ok) { ui.doneTodos.delete(t.id); renderTodos(); }
       break;
     }
     case "todo-undo": {
-      const id2 = b.dataset.todo;
-      ui.doneTodos.delete(id2);
-      await run("POST", `/api/ui/todos/${encodeURIComponent(id2)}/complete`, { undo: true });
+      const key = b.dataset.todo;
+      if (ui.todoBusy.has(key)) return;
+      const ok = await todoRequest(key, true);
+      if (ok) ui.doneTodos.delete(key);
+      renderTodos();
       break;
     }
   }
@@ -482,8 +561,12 @@ document.addEventListener("submit", async (e) => {
   const input = $(`#w-${id}`);
   const text = input.value.trim();
   if (!text) return input.focus();
-  ui.writing.delete(id);
-  await actOn(id, { type: "write", text });
+  const ok = await actOn(id, { type: "write", text, rev: item(id)?.rev });
+  if (ok) {
+    ui.writing.delete(id);
+    ui.text.delete(`w-${id}`);
+    render();
+  }
 });
 
 $("#refresh").addEventListener("click", async () => {
@@ -494,7 +577,7 @@ $("#refresh").addEventListener("click", async () => {
 let searchTimer;
 $("#arch-q").addEventListener("input", () => {
   clearTimeout(searchTimer);
-  searchTimer = setTimeout(renderArchive, 200);
+  searchTimer = setTimeout(() => loadArchive(), 200);
 });
 
 // Undo countdowns tick locally; the server state is refreshed when one runs out.
@@ -512,7 +595,7 @@ setInterval(() => {
 function schedule() {
   const busy = ui.state && [...ui.state.needs, ...ui.state.catchup].some((i) => i.status === "pending");
   setTimeout(async () => {
-    if (document.visibilityState === "visible" && !document.activeElement?.matches("input, textarea")) await load();
+    if (document.visibilityState === "visible") await load();
     schedule();
   }, busy ? 4000 : 20000);
 }

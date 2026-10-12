@@ -47,7 +47,13 @@ Open `.env` and set `OWNER_LOGIN` to your Tailscale login and `BOT_TOKEN` to a r
 openssl rand -hex 24
 ```
 
-Create the data folder yourself so it belongs to you rather than to root, then start the container:
+`.env` holds that secret, so make it readable by you only:
+
+```bash
+chmod 600 .env
+```
+
+Create the data folder yourself so it belongs to you rather than to root, then start the container. It runs as user and group 1000; if `id -u` prints something else, set `DASHBOARD_UID` and `DASHBOARD_GID` in `.env` first.
 
 ```bash
 mkdir -p data
@@ -73,35 +79,47 @@ npm run dev
 In a second terminal:
 
 ```bash
-GROKDASH_URL=http://127.0.0.1:8787 GROKDASH_TOKEN=dev-token scripts/demo.sh
+GROKDASH_URL=http://127.0.0.1:8788 GROKDASH_TOKEN=dev-token scripts/demo.sh
 ```
 
-Open `http://127.0.0.1:8787`. `npm run dev` turns off the Tailscale check and keeps its data in `data/`, so delete that folder afterwards.
+Open `http://127.0.0.1:8788`. `npm run dev` turns off the Tailscale check and keeps its data in `data-dev/`, apart from a real install's `data/`. Delete `data-dev/` when you're done.
 
 ## Configuration
 
 Set these in `.env`. The full list with comments is in [`.env.example`](.env.example).
 
-| Variable         | Required | Default     | What it does                                                             |
-| ---------------- | -------- | ----------- | ------------------------------------------------------------------------ |
-| `OWNER_LOGIN`    | yes      |             | The Tailscale login allowed to open the page                             |
-| `BOT_TOKEN`      | yes      |             | Secret the bots send with every call                                     |
-| `TZ`             | no       | system zone | Time zone for "today", the agenda and to-do dates                        |
-| `TODOIST_TOKEN`  | no       |             | Read and complete to-dos in Todoist directly                             |
-| `TODOIST_FILTER` | no       |             | Show only tasks matching a Todoist filter, like `today \| overdue \| p1` |
-| `UNDO_SECONDS`   | no       | `5`         | How long a tap waits before it goes to the bot                           |
-| `ARCHIVE_DAYS`   | no       | `30`        | How long closed cards stay in the archive                                |
-| `PORT`           | no       | `8787`      | Port on `127.0.0.1`                                                      |
-| `AUTH_MODE`      | no       | `tailscale` | `none` turns off the owner check. Only for local development.            |
+| Variable                | Required | Default     | What it does                                                             |
+| ----------------------- | -------- | ----------- | ------------------------------------------------------------------------ |
+| `OWNER_LOGIN`           | yes      |             | The Tailscale login allowed to open the page                             |
+| `BOT_TOKEN`             | yes      |             | Secret the bots send with every call                                     |
+| `TZ`                    | no       | system zone | Time zone for "today", the agenda and to-do dates                        |
+| `TODOIST_TOKEN`         | no       |             | Read and complete to-dos in Todoist directly                             |
+| `TODOIST_FILTER`        | no       |             | Show only tasks matching a Todoist filter, like `today \| overdue \| p1` |
+| `UNDO_SECONDS`          | no       | `5`         | How long a tap waits before it goes to the bot                           |
+| `ARCHIVE_DAYS`          | no       | `30`        | How long closed cards stay in the archive                                |
+| `PORT`                  | no       | `8787`      | Port on `127.0.0.1`                                                      |
+| `BACKUP_DAYS`           | no       | `7`         | Daily backups kept in `data/backups`; `0` turns them off                 |
+| `WEBHOOK_ALLOW_PRIVATE` | no       | `0`         | `1` lets bots register webhooks on your LAN or tailnet                   |
+| `AUTH_MODE`             | no       | `tailscale` | `none` turns off the owner check. Only for local development.            |
 
 ## Your data
 
-Everything lives in one SQLite file, `data/dashboard.db`. Back it up by copying the `data` folder. These are the only things the server sends off the machine:
+Everything lives in one SQLite file, `data/dashboard.db`, readable by your user only. These are the only things the server sends off the machine:
 
 - **Webhook calls.** When you tap or press refresh, the server calls the webhook URL each bot registered, with no card content in it.
 - **Todoist.** With `TODOIST_TOKEN` set, it reads your active tasks and completes or reopens the ones you tick.
 
 The bots read your chats and mail inside Grok Bot, as they already do, and post only the summaries you see.
+
+### Backups
+
+The server writes a consistent copy of the database to `data/backups/` once a day and keeps the last 7. Don't copy `dashboard.db` by hand while it runs: SQLite keeps recent changes in a side file, and a plain copy can come out broken. For a backup right now:
+
+```bash
+docker compose exec dashboard node server/backup.ts
+```
+
+It prints where it wrote the file and checks that the copy opens. To restore one, stop the container, put the backup in place of `data/dashboard.db`, delete `data/dashboard.db-wal` and `data/dashboard.db-shm`, and start it again.
 
 ## Development
 

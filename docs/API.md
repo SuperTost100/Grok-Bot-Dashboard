@@ -75,36 +75,43 @@ When the user taps a button that reaches the outside world (an answer, a draft, 
       "instruction": "Vote Tuesday in the Lab group poll",
       "text": "",
       "todoId": null,
-      "item": {
+      "card": {
         "id": 12,
         "key": "wa:GROUP_ID:poll-1",
+        "rev": 3,
         "title": "...",
-        "source": "...",
+        "body": "...",
+        "context": "",
+        "source": "WhatsApp · Lab group",
+        "app": "whatsapp",
         "link": "",
         "draft": null
       }
     }
   ],
-  "refreshRequested": false
+  "refreshRequested": false,
+  "lastScanAt": "2026-10-12T16:44:10",
+  "now": "2026-10-12T17:02:31",
+  "timeZone": "Europe/Rome"
 }
 ```
 
 | `type`          | Meaning                                                                                                 |
 | --------------- | ------------------------------------------------------------------------------------------------------- |
 | `choose`        | The user picked an option. Do `instruction`, or `label` if there's no instruction.                      |
-| `send`          | Send `text` exactly as written to `item.draft.to` on `item.draft.channel`. The user may have edited it. |
+| `send`          | Send `text` exactly as written to `card.draft.to` on `card.draft.channel`. The user may have edited it. |
 | `write`         | `text` is a free-form instruction from the user about the card.                                         |
 | `complete_todo` | Mark to-do `todoId` done. Only used when to-dos come from a bot.                                        |
 
-An action that isn't reported within 20 minutes is handed out again. `refreshRequested` is `true` after the user presses refresh; do a full scan, then call `/api/bot/scan`.
+`card` is the card exactly as the user saw it when they tapped, even if you updated it since. Act on that. Each action is handed out once. If it isn't reported within 20 minutes, it isn't handed out again, because it may already have happened: the card comes back to the user with a note to check. `refreshRequested` is `true` after the user presses refresh; do a full scan, then call `/api/bot/scan`. `lastScanAt` is the end of your last complete scan: look for new messages since then.
 
 ### Report an action
 
-`POST /api/bot/actions/:id` with `{"ok": true, "result": "Voted Tuesday"}` or `{"ok": false, "result": "WhatsApp is disconnected"}`. Success closes the card and shows the result on it. Failure puts the card back with the reason.
+`POST /api/bot/actions/:id` with `{"ok": true, "result": "Voted Tuesday"}` or `{"ok": false, "result": "WhatsApp is disconnected"}`. Success closes the card and shows the result on it. Failure puts the card back with the reason. Only the bot that took the action can report it, only after taking it (409 otherwise), and a second report changes nothing.
 
 ## Agenda
 
-`PUT /api/bot/agenda` replaces this bot's events between `from` and `to` (dates, default today and the next 2 days):
+`PUT /api/bot/agenda` replaces every event of this bot that overlaps `from` to `to` (dates; `to` is exclusive and defaults to `from` plus 2 days). Send the complete list for that window each time. Every event must overlap the window, or the call fails with 400.
 
 ```json
 {
@@ -120,11 +127,11 @@ An action that isn't reported within 20 minutes is handed out again. `refreshReq
 }
 ```
 
-Add `"app": "googlecalendar"` (or another app) at the top level or per event to show its logo. `start` and `end` take a date (`2026-10-13`, an all-day event) or a datetime with or without an offset. The dashboard stores them in its own time zone (`TZ`).
+Add `"app": "googlecalendar"` (or another app) at the top level or per event to show its logo. `start` and `end` take a date (`2026-10-13`, an all-day event) or a datetime with or without an offset. Impossible dates like `2026-02-30` or `25:00` are refused. The dashboard stores times in its own time zone (`TZ`). An event spanning several days shows on each of them.
 
 ## To-dos
 
-Only used when the server has no `TODOIST_TOKEN`. `PUT /api/bot/todos` replaces this bot's list:
+Only used when the server has no `TODOIST_TOKEN`. `PUT /api/bot/todos` replaces this bot's whole list, so send every open to-do. Ids must be unique:
 
 ```json
 {
@@ -151,7 +158,15 @@ Add `"app": "todoist"` to show its logo. The page shows what's overdue, due or w
 | `POST /api/bot/register` | `{"name": "Dashboard", "color": "#d9822b", "webhookUrl": "https://...", "webhookToken": "..."}`, all optional | Sets how the bot appears, and the webhook the dashboard calls when actions are waiting or the user presses refresh, with `webhookToken` sent as `Authorization: Bearer`. `""` clears either. |
 | `POST /api/bot/scan`     | `{}`                                                                                                          | Marks a finished scan. The page shows "Updated N min ago".                                                                                                                                   |
 
-The webhook receives a `POST` with `{"source": "grok-bot-dashboard", "reason": "actions" or "refresh", "message": "..."}`, at most once every 20 seconds per bot.
+The webhook receives a `POST` with `{"source": "grok-bot-dashboard", "reason": "actions" or "refresh", "message": "..."}`, at most once every 20 seconds per bot. While actions wait unclaimed, the ping repeats every 3 minutes. Webhook URLs must be public `https` addresses: the server refuses this machine, private networks and tailnet addresses (set `WEBHOOK_ALLOW_PRIVATE=1` to allow them) and never follows redirects. Changing the URL without sending a new `webhookToken` clears the old key.
+
+`GET /api/bot/help` (or `grokdash guide`) returns this reference in short form, with field limits, the server's time zone and an example card.
+
+## Rules for keys and sections
+
+- A key names one decision, not a whole chat: a new question in the same chat needs a new key. Reusing the key of a card the user closed does nothing (`"ignored": true`), even after the card has left the archive.
+- `section: "catchup"` takes only `digest` cards, and `digest` only goes in `catchup`. `options` only work on `choice`.
+- Reposting a card with identical content changes nothing. Changed content bumps the card's revision, and a tap the user made on the old version is refused.
 
 ## Errors
 

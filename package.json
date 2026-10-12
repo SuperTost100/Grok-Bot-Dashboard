@@ -10,9 +10,10 @@
   },
   "scripts": {
     "start": "node --env-file-if-exists=.env server/main.ts",
-    "dev": "AUTH_MODE=none BOT_TOKEN=dev-token node --env-file-if-exists=.env --watch server/main.ts",
+    "dev": "AUTH_MODE=none BOT_TOKEN=dev-token DATA_DIR=data-dev PORT=8788 node --env-file-if-exists=.env --watch server/main.ts",
     "test": "node --test test/*.test.ts",
-    "check": "tsc --noEmit"
+    "check": "tsc --noEmit",
+    "backup": "node --env-file-if-exists=.env server/backup.ts"
   },
   "devDependencies": {
     "@types/node": "^24.19.2",

@@ -1,4 +1,6 @@
 node_modules/
 data/
+data-dev/
 .env
 .design-shots/
+.playwright-mcp/

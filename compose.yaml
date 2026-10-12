@@ -5,6 +5,8 @@ services:
     build: .
     image: grok-bot-dashboard
     restart: unless-stopped
+    # Runs as your user so it can write ./data. Set DASHBOARD_UID/DASHBOARD_GID in .env if yours isn't 1000 (check with: id -u).
+    user: "${DASHBOARD_UID:-1000}:${DASHBOARD_GID:-1000}"
     env_file: .env
     environment:
       HOST: 0.0.0.0

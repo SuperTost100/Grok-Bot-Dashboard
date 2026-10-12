@@ -1,4 +1,4 @@
-import { DatabaseSync } from "node:sqlite";
+import { DatabaseSync, backup } from "node:sqlite";
 
 // Everything the dashboard remembers lives in one SQLite file.
 // Times are Unix milliseconds.
@@ -6,7 +6,11 @@ import { DatabaseSync } from "node:sqlite";
 export type Section = "needs" | "catchup";
 export type Kind = "choice" | "draft" | "reminder" | "digest";
 export type ItemStatus = "open" | "pending" | "snoozed" | "closed";
-export type ActionStatus = "queued" | "ready" | "claimed" | "done" | "failed" | "cancelled";
+/**
+ * queued: inside the undo window. ready: waiting for the bot. claimed: the bot took it.
+ * unknown: the bot took it but never reported back, so nobody knows if it happened.
+ */
+export type ActionStatus = "queued" | "ready" | "claimed" | "unknown" | "done" | "failed" | "cancelled";
 export type ActionType = "choose" | "send" | "write" | "complete_todo";
 
 export interface Option { label: string; instruction?: string }
@@ -29,14 +33,31 @@ export interface Item {
   options: Option[];
   draft: Draft | null;
   status: ItemStatus;
+  /** Goes up whenever the card's content changes, so a tap always matches the card that was on screen. */
+  rev: number;
   snoozedUntil: number | null;
   closedReason: string;
   resolution: string;
   error: string;
   createdAt: number;
+  /** Last time the content changed. Reposting the same card doesn't move it. */
   updatedAt: number;
   closedAt: number | null;
   ackedAt: number | null;
+}
+
+/** What the user approved, frozen at tap time. The bot acts on this, never on a newer version of the card. */
+export interface Snapshot {
+  id: number;
+  key: string | null;
+  rev: number;
+  title: string;
+  body: string;
+  context: string;
+  source: string;
+  app: string;
+  link: string;
+  draft: Draft | null;
 }
 
 export interface Action {
@@ -48,6 +69,7 @@ export interface Action {
   label: string;
   instruction: string;
   text: string;
+  snapshot: Snapshot | null;
   status: ActionStatus;
   runAfter: number;
   createdAt: number;
@@ -113,12 +135,14 @@ CREATE TABLE IF NOT EXISTS items (
   body TEXT NOT NULL DEFAULT '',
   context TEXT NOT NULL DEFAULT '',
   source TEXT NOT NULL DEFAULT '',
+  app TEXT NOT NULL DEFAULT '',
   link TEXT NOT NULL DEFAULT '',
   urgent TEXT NOT NULL DEFAULT '',
   count_label TEXT NOT NULL DEFAULT '',
   options TEXT NOT NULL DEFAULT '[]',
   draft TEXT,
   status TEXT NOT NULL DEFAULT 'open',
+  rev INTEGER NOT NULL DEFAULT 1,
   snoozed_until INTEGER,
   closed_reason TEXT NOT NULL DEFAULT '',
   resolution TEXT NOT NULL DEFAULT '',
@@ -139,6 +163,7 @@ CREATE TABLE IF NOT EXISTS actions (
   label TEXT NOT NULL DEFAULT '',
   instruction TEXT NOT NULL DEFAULT '',
   text TEXT NOT NULL DEFAULT '',
+  snapshot TEXT,
   status TEXT NOT NULL,
   run_after INTEGER NOT NULL,
   created_at INTEGER NOT NULL,
@@ -154,7 +179,8 @@ CREATE TABLE IF NOT EXISTS events (
   start TEXT NOT NULL,
   end TEXT NOT NULL DEFAULT '',
   location TEXT NOT NULL DEFAULT '',
-  all_day INTEGER NOT NULL DEFAULT 0
+  all_day INTEGER NOT NULL DEFAULT 0,
+  app TEXT NOT NULL DEFAULT ''
 );
 CREATE TABLE IF NOT EXISTS todos (
   id TEXT NOT NULL,
@@ -166,10 +192,23 @@ CREATE TABLE IF NOT EXISTS todos (
   deadline TEXT NOT NULL DEFAULT '',
   project TEXT NOT NULL DEFAULT '',
   url TEXT NOT NULL DEFAULT '',
+  app TEXT NOT NULL DEFAULT '',
   completed_at INTEGER,
+  completed_due TEXT,
   PRIMARY KEY (bot, id)
 );
 `;
+
+// Columns added after the first release, as [table, column, definition].
+const MIGRATIONS: [string, string, string][] = [
+  ["bots", "webhook_token", "TEXT NOT NULL DEFAULT ''"],
+  ["items", "app", "TEXT NOT NULL DEFAULT ''"],
+  ["items", "rev", "INTEGER NOT NULL DEFAULT 1"],
+  ["events", "app", "TEXT NOT NULL DEFAULT ''"],
+  ["todos", "app", "TEXT NOT NULL DEFAULT ''"],
+  ["todos", "completed_due", "TEXT"],
+  ["actions", "snapshot", "TEXT"],
+];
 
 // Colors for bots that don't pick one. Muted enough to sit next to the ink UI.
 const PALETTE = ["#c2412d", "#2f7d5b", "#3b6fb6", "#8a5cc2", "#b7791f", "#2b8a8a", "#a23b72", "#5b5a55"];
@@ -197,6 +236,7 @@ function toItem(r: Row): Item {
     options: JSON.parse(str(r.options) || "[]"),
     draft: r.draft ? JSON.parse(str(r.draft)) : null,
     status: r.status as ItemStatus,
+    rev: Number(r.rev ?? 1),
     snoozedUntil: num(r.snoozed_until),
     closedReason: str(r.closed_reason),
     resolution: str(r.resolution),
@@ -218,6 +258,7 @@ function toAction(r: Row): Action {
     label: str(r.label),
     instruction: str(r.instruction),
     text: str(r.text),
+    snapshot: r.snapshot ? JSON.parse(str(r.snapshot)) : null,
     status: r.status as ActionStatus,
     runAfter: Number(r.run_after),
     createdAt: Number(r.created_at),
@@ -237,6 +278,22 @@ function toBot(r: Row): Bot {
     lastSeenAt: num(r.last_seen_at),
     lastScanAt: num(r.last_scan_at),
     refreshRequestedAt: num(r.refresh_requested_at),
+  };
+}
+
+function toTodo(row: Row): BotTodo {
+  return {
+    id: str(row.id),
+    bot: str(row.bot),
+    content: str(row.content),
+    priority: Number(row.priority),
+    due: str(row.due),
+    dueString: str(row.due_string),
+    deadline: str(row.deadline),
+    project: str(row.project),
+    url: str(row.url),
+    app: str(row.app),
+    completedAt: num(row.completed_at),
   };
 }
 
@@ -267,17 +324,19 @@ export class Store {
     this.now = now;
     this.db.exec("PRAGMA journal_mode = WAL; PRAGMA foreign_keys = ON; PRAGMA busy_timeout = 3000;");
     this.db.exec(SCHEMA);
-    // Columns added after the first release.
-    const botCols = (this.db.prepare("PRAGMA table_info(bots)").all() as Row[]).map((r) => String(r.name));
-    if (!botCols.includes("webhook_token")) this.db.exec("ALTER TABLE bots ADD COLUMN webhook_token TEXT NOT NULL DEFAULT ''");
-    for (const table of ["items", "events", "todos"]) {
+    for (const [table, column, def] of MIGRATIONS) {
       const cols = (this.db.prepare(`PRAGMA table_info(${table})`).all() as Row[]).map((r) => String(r.name));
-      if (!cols.includes("app")) this.db.exec(`ALTER TABLE ${table} ADD COLUMN app TEXT NOT NULL DEFAULT ''`);
+      if (!cols.includes(column)) this.db.exec(`ALTER TABLE ${table} ADD COLUMN ${column} ${def}`);
     }
   }
 
   close() {
     this.db.close();
+  }
+
+  /** A consistent copy of the database, safe to take while the server runs. */
+  async backupTo(file: string) {
+    await backup(this.db, file);
   }
 
   tx<T>(fn: () => T): T {
@@ -319,11 +378,15 @@ export class Store {
   }
 
   updateBot(slug: string, patch: { name?: string; color?: string; webhookUrl?: string; webhookToken?: string }) {
-    this.touchBot(slug);
+    const before = this.touchBot(slug);
     if (patch.name !== undefined) this.db.prepare("UPDATE bots SET name = ? WHERE slug = ?").run(patch.name, slug);
     if (patch.color !== undefined) this.db.prepare("UPDATE bots SET color = ? WHERE slug = ?").run(patch.color, slug);
     if (patch.webhookUrl !== undefined) {
       this.db.prepare("UPDATE bots SET webhook_url = ? WHERE slug = ?").run(patch.webhookUrl, slug);
+      // A key belongs to one destination: never send the old key to a new URL.
+      if (patch.webhookUrl !== before.webhookUrl && patch.webhookToken === undefined) {
+        this.db.prepare("UPDATE bots SET webhook_token = '' WHERE slug = ?").run(slug);
+      }
     }
     if (patch.webhookToken !== undefined) {
       this.db.prepare("UPDATE bots SET webhook_token = ? WHERE slug = ?").run(patch.webhookToken, slug);
@@ -389,28 +452,35 @@ export class Store {
           );
         return { item: this.getItem(Number(res.lastInsertRowid))!, created: true, reopened: false, ignored: false };
       }
+      const changed =
+        existing.section !== fields.section || existing.kind !== fields.kind || existing.title !== fields.title ||
+        existing.body !== fields.body || existing.context !== fields.context || existing.source !== fields.source ||
+        existing.app !== fields.app || existing.link !== fields.link || existing.urgent !== fields.urgent ||
+        existing.countLabel !== fields.count_label || JSON.stringify(existing.options) !== fields.options ||
+        JSON.stringify(existing.draft) !== (fields.draft ?? "null");
       let reopen = false;
       if (existing.status === "closed") {
-        const changed = existing.body !== fields.body || existing.countLabel !== fields.count_label || existing.title !== fields.title;
         reopen = input.reopen === true || (existing.section === "catchup" && changed);
         if (!reopen) return { item: existing, created: false, reopened: false, ignored: true };
       }
-      this.db
-        .prepare(
-          `UPDATE items SET section = ?, kind = ?, title = ?, body = ?, context = ?, source = ?, app = ?, link = ?, urgent = ?,
-             count_label = ?, options = ?, draft = ?, updated_at = ?
-           WHERE id = ?`,
-        )
-        .run(
-          fields.section, fields.kind, fields.title, fields.body, fields.context, fields.source, fields.app, fields.link,
-          fields.urgent, fields.count_label, fields.options, fields.draft, now, existing.id,
-        );
+      if (changed) {
+        this.db
+          .prepare(
+            `UPDATE items SET section = ?, kind = ?, title = ?, body = ?, context = ?, source = ?, app = ?, link = ?, urgent = ?,
+               count_label = ?, options = ?, draft = ?, rev = rev + 1, updated_at = ?
+             WHERE id = ?`,
+          )
+          .run(
+            fields.section, fields.kind, fields.title, fields.body, fields.context, fields.source, fields.app, fields.link,
+            fields.urgent, fields.count_label, fields.options, fields.draft, now, existing.id,
+          );
+      }
       if (reopen) {
         this.db
           .prepare(
-            "UPDATE items SET status = 'open', closed_at = NULL, closed_reason = '', resolution = '', error = '', acked_at = NULL, snoozed_until = NULL WHERE id = ?",
+            "UPDATE items SET status = 'open', closed_at = NULL, closed_reason = '', resolution = '', error = '', acked_at = NULL, snoozed_until = NULL, updated_at = ? WHERE id = ?",
           )
-          .run(existing.id);
+          .run(now, existing.id);
       }
       return { item: this.getItem(existing.id)!, created: false, reopened: reopen, ignored: false };
     });
@@ -420,29 +490,32 @@ export class Store {
     const now = this.now();
     this.db
       .prepare(
-        "UPDATE items SET status = 'closed', closed_reason = ?, resolution = ?, closed_at = ?, updated_at = ?, snoozed_until = NULL WHERE id = ?",
+        "UPDATE items SET status = 'closed', closed_reason = ?, resolution = ?, closed_at = ?, snoozed_until = NULL WHERE id = ?",
       )
-      .run(reason, resolution, now, now, id);
-    // Anything still waiting in the undo window for this item no longer applies.
-    this.db
-      .prepare("UPDATE actions SET status = 'cancelled', finished_at = ? WHERE item_id = ? AND status IN ('queued', 'ready')")
-      .run(now, id);
+      .run(reason, resolution, now, id);
+    this.cancelOpenActions(id);
     return this.getItem(id);
   }
 
   snoozeItem(id: number, until: number) {
-    this.db
-      .prepare("UPDATE items SET status = 'snoozed', snoozed_until = ?, updated_at = ? WHERE id = ?")
-      .run(until, this.now(), id);
+    this.db.prepare("UPDATE items SET status = 'snoozed', snoozed_until = ? WHERE id = ?").run(until, id);
+    this.cancelOpenActions(id);
     return this.getItem(id);
+  }
+
+  /** Cancel actions still inside the undo window or not yet taken by the bot. */
+  cancelOpenActions(itemId: number) {
+    this.db
+      .prepare("UPDATE actions SET status = 'cancelled', finished_at = ? WHERE item_id = ? AND status IN ('queued', 'ready')")
+      .run(this.now(), itemId);
   }
 
   reopenItem(id: number, error = "") {
     this.db
       .prepare(
-        "UPDATE items SET status = 'open', snoozed_until = NULL, closed_at = NULL, closed_reason = '', resolution = '', error = ?, acked_at = NULL, updated_at = ? WHERE id = ?",
+        "UPDATE items SET status = 'open', snoozed_until = NULL, closed_at = NULL, closed_reason = '', resolution = '', error = ?, acked_at = NULL WHERE id = ?",
       )
-      .run(error, this.now(), id);
+      .run(error, id);
     return this.getItem(id);
   }
 
@@ -453,19 +526,19 @@ export class Store {
   /** Bring snoozed items back once their time has come. */
   wakeSnoozed(): number {
     const res = this.db
-      .prepare("UPDATE items SET status = 'open', snoozed_until = NULL, updated_at = ? WHERE status = 'snoozed' AND snoozed_until <= ?")
-      .run(this.now(), this.now());
+      .prepare("UPDATE items SET status = 'open', snoozed_until = NULL WHERE status = 'snoozed' AND snoozed_until <= ?")
+      .run(this.now());
     return Number(res.changes);
   }
 
   listItems(filter: { bot?: string; section?: Section; status?: ItemStatus | "all"; since?: number } = {}): Item[] {
-    const where: string[] = [];
+    const where: string[] = ["NOT (status = 'closed' AND title = '')"];
     const args: (string | number)[] = [];
     if (filter.bot) { where.push("bot = ?"); args.push(filter.bot); }
     if (filter.section) { where.push("section = ?"); args.push(filter.section); }
     if (filter.status && filter.status !== "all") { where.push("status = ?"); args.push(filter.status); }
     if (filter.since) { where.push("updated_at >= ?"); args.push(filter.since); }
-    const sql = `SELECT * FROM items ${where.length ? "WHERE " + where.join(" AND ") : ""} ORDER BY created_at DESC LIMIT 500`;
+    const sql = `SELECT * FROM items WHERE ${where.join(" AND ")} ORDER BY created_at DESC LIMIT 500`;
     return this.db.prepare(sql).all(...args).map((r) => toItem(r as Row));
   }
 
@@ -478,45 +551,68 @@ export class Store {
          WHERE status IN ('open', 'pending')
             OR (status = 'closed' AND closed_reason = 'action' AND closed_at >= ? AND acked_at IS NULL)
             OR (section = 'catchup' AND status = 'closed' AND closed_reason = 'read' AND closed_at >= ?)
-         ORDER BY (urgent != '') DESC, created_at DESC`,
+         ORDER BY (urgent != '') DESC, updated_at DESC`,
       )
       .all(since, since)
       .map((r) => toItem(r as Row));
   }
 
-  archive(q: string, days: number): Item[] {
+  archive(q: string, days: number, limit = 50, offset = 0): { items: Item[]; more: boolean } {
     const since = this.now() - days * 86_400_000;
     const like = `%${q.replace(/[%_\\]/g, (c) => "\\" + c)}%`;
-    return this.db
+    const rows = this.db
       .prepare(
         `SELECT * FROM items
          WHERE ((status = 'closed' AND closed_at >= ?) OR status = 'snoozed')
-           AND (? = '' OR title LIKE ? ESCAPE '\\' OR body LIKE ? ESCAPE '\\' OR resolution LIKE ? ESCAPE '\\' OR source LIKE ? ESCAPE '\\')
-         ORDER BY COALESCE(closed_at, updated_at) DESC LIMIT 200`,
+           AND (? = '' OR title LIKE ? ESCAPE '\\' OR body LIKE ? ESCAPE '\\' OR context LIKE ? ESCAPE '\\'
+                OR resolution LIKE ? ESCAPE '\\' OR source LIKE ? ESCAPE '\\' OR draft LIKE ? ESCAPE '\\')
+         ORDER BY COALESCE(closed_at, updated_at) DESC LIMIT ? OFFSET ?`,
       )
-      .all(since, q, like, like, like, like)
+      .all(since, q, like, like, like, like, like, like, limit + 1, offset)
       .map((r) => toItem(r as Row));
+    return { items: rows.slice(0, limit), more: rows.length > limit };
   }
 
+  /**
+   * Drop archived content after `days`. Cards with a key keep an empty row for a year,
+   * so a bot reposting an old key doesn't bring back something you dismissed.
+   */
   purge(days: number): number {
     const before = this.now() - days * 86_400_000;
-    const res = this.db.prepare("DELETE FROM items WHERE status = 'closed' AND closed_at < ?").run(before);
+    const res = this.db.prepare("DELETE FROM items WHERE status = 'closed' AND closed_at < ? AND key IS NULL").run(before);
+    this.db
+      .prepare(
+        `UPDATE items SET title = '', body = '', context = '', options = '[]', draft = NULL, resolution = '', link = ''
+         WHERE status = 'closed' AND closed_at < ? AND key IS NOT NULL AND title != ''`,
+      )
+      .run(before);
+    this.db.prepare("DELETE FROM items WHERE status = 'closed' AND closed_at < ?").run(this.now() - 365 * 86_400_000);
     this.db.prepare("DELETE FROM actions WHERE finished_at IS NOT NULL AND finished_at < ?").run(before);
     return Number(res.changes);
   }
 
   // Actions
 
-  addAction(a: { itemId?: number | null; todoId?: string | null; bot: string; type: ActionType; label?: string; instruction?: string; text?: string; delayMs: number }): Action {
+  addAction(a: {
+    item?: Item | null; todoId?: string | null; bot: string; type: ActionType;
+    label?: string; instruction?: string; text?: string; delayMs: number;
+  }): Action {
     return this.tx(() => {
       const now = this.now();
+      const i = a.item;
+      const snapshot: Snapshot | null = i
+        ? { id: i.id, key: i.key, rev: i.rev, title: i.title, body: i.body, context: i.context, source: i.source, app: i.app, link: i.link, draft: i.draft }
+        : null;
       const res = this.db
         .prepare(
-          `INSERT INTO actions (item_id, todo_id, bot, type, label, instruction, text, status, run_after, created_at)
-           VALUES (?, ?, ?, ?, ?, ?, ?, 'queued', ?, ?)`,
+          `INSERT INTO actions (item_id, todo_id, bot, type, label, instruction, text, snapshot, status, run_after, created_at)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'queued', ?, ?)`,
         )
-        .run(a.itemId ?? null, a.todoId ?? null, a.bot, a.type, a.label ?? "", a.instruction ?? "", a.text ?? "", now + a.delayMs, now);
-      if (a.itemId) this.db.prepare("UPDATE items SET status = 'pending', error = '', updated_at = ? WHERE id = ?").run(now, a.itemId);
+        .run(
+          i?.id ?? null, a.todoId ?? null, a.bot, a.type, a.label ?? "", a.instruction ?? "", a.text ?? "",
+          snapshot ? JSON.stringify(snapshot) : null, now + a.delayMs, now,
+        );
+      if (i) this.db.prepare("UPDATE items SET status = 'pending', error = '' WHERE id = ?").run(i.id);
       return this.getAction(Number(res.lastInsertRowid))!;
     });
   }
@@ -533,38 +629,46 @@ export class Store {
     return r ? toAction(r as Row) : null;
   }
 
+  pendingTodoAction(bot: string, todoId: string): Action | null {
+    const r = this.db
+      .prepare("SELECT * FROM actions WHERE bot = ? AND todo_id = ? AND type = 'complete_todo' AND status IN ('queued', 'ready', 'claimed') ORDER BY id DESC LIMIT 1")
+      .get(bot, todoId);
+    return r ? toAction(r as Row) : null;
+  }
+
   /** Undo works only while the action is still inside its undo window. */
   cancelAction(id: number): Action | null {
     return this.tx(() => {
       const a = this.getAction(id);
       if (!a || a.status !== "queued") return null;
       this.db.prepare("UPDATE actions SET status = 'cancelled', finished_at = ? WHERE id = ?").run(this.now(), id);
-      if (a.itemId) this.db.prepare("UPDATE items SET status = 'open', updated_at = ? WHERE id = ? AND status = 'pending'").run(this.now(), a.itemId);
+      if (a.itemId) this.db.prepare("UPDATE items SET status = 'open' WHERE id = ? AND status = 'pending'").run(a.itemId);
+      if (a.todoId) this.db.prepare("UPDATE todos SET completed_at = NULL, completed_due = NULL WHERE bot = ? AND id = ?").run(a.bot, a.todoId);
       return this.getAction(id);
     });
   }
 
   /** Move actions whose undo window has passed to ready. Returns the bots that now have work. */
-  promoteDue(): string[] {
-    const rows = this.db
-      .prepare("SELECT DISTINCT bot FROM actions WHERE status = 'queued' AND run_after <= ?")
-      .all(this.now()) as Row[];
-    if (rows.length) this.db.prepare("UPDATE actions SET status = 'ready' WHERE status = 'queued' AND run_after <= ?").run(this.now());
+  promoteDue(bot?: string): string[] {
+    const filter = bot ? " AND bot = ?" : "";
+    const args = bot ? [this.now(), bot] : [this.now()];
+    const rows = this.db.prepare(`SELECT DISTINCT bot FROM actions WHERE status = 'queued' AND run_after <= ?${filter}`).all(...args) as Row[];
+    if (rows.length) this.db.prepare(`UPDATE actions SET status = 'ready' WHERE status = 'queued' AND run_after <= ?${filter}`).run(...args);
     return rows.map((r) => String(r.bot));
   }
 
-  /**
-   * Hand ready actions to a bot. Actions claimed more than staleMs ago and never
-   * reported back are handed out again, so a crashed run doesn't lose them.
-   */
-  claimActions(bot: string, staleMs: number): Action[] {
+  /** Bots with actions that are ready but nobody has taken. */
+  botsWithReadyWork(): string[] {
+    return (this.db.prepare("SELECT DISTINCT bot FROM actions WHERE status = 'ready'").all() as Row[]).map((r) => String(r.bot));
+  }
+
+  /** Hand this bot its ready actions. */
+  claimActions(bot: string): Action[] {
     return this.tx(() => {
       const now = this.now();
       const rows = this.db
-        .prepare(
-          `SELECT * FROM actions WHERE bot = ? AND (status = 'ready' OR (status = 'claimed' AND claimed_at < ?)) ORDER BY id LIMIT 50`,
-        )
-        .all(bot, now - staleMs)
+        .prepare("SELECT * FROM actions WHERE bot = ? AND status = 'ready' ORDER BY id LIMIT 50")
+        .all(bot)
         .map((r) => toAction(r as Row));
       const claim = this.db.prepare("UPDATE actions SET status = 'claimed', claimed_at = ? WHERE id = ?");
       for (const a of rows) claim.run(now, a.id);
@@ -572,49 +676,81 @@ export class Store {
     });
   }
 
-  finishAction(id: number, ok: boolean, result: string): Action | null {
+  /**
+   * A claimed action the bot never reported is not handed out again: it may already have
+   * happened, and sending a message twice is worse than asking. The card comes back with a note.
+   */
+  expireClaims(staleMs: number): number {
+    return this.tx(() => {
+      const stale = this.db
+        .prepare("SELECT * FROM actions WHERE status = 'claimed' AND claimed_at < ?")
+        .all(this.now() - staleMs)
+        .map((r) => toAction(r as Row));
+      for (const a of stale) {
+        this.db.prepare("UPDATE actions SET status = 'unknown' WHERE id = ?").run(a.id);
+        if (a.itemId) {
+          this.db
+            .prepare("UPDATE items SET status = 'open', error = ? WHERE id = ? AND status = 'pending'")
+            .run(`The bot took "${a.label}" but never confirmed it. Check whether it happened before you try again.`, a.itemId);
+        }
+        if (a.todoId) this.db.prepare("UPDATE todos SET completed_at = NULL, completed_due = NULL WHERE bot = ? AND id = ?").run(a.bot, a.todoId);
+      }
+      return stale.length;
+    });
+  }
+
+  /**
+   * Record what the bot did. Only the bot that holds the action can report, and only once.
+   * A late report on an action that went stale still counts, unless the card has moved on.
+   */
+  finishAction(id: number, bot: string, ok: boolean, result: string): { action: Action | null; error?: string } {
     return this.tx(() => {
       const a = this.getAction(id);
-      if (!a || a.status === "cancelled" || a.status === "done") return a;
+      if (!a || a.bot !== bot) return { action: null };
+      if (a.status === "done" || a.status === "failed") return { action: a };
+      if (a.status !== "claimed" && a.status !== "unknown") {
+        return { action: a, error: `Action ${id} is ${a.status}. Only actions you took with grokdash actions can be reported.` };
+      }
       const now = this.now();
-      this.db
-        .prepare("UPDATE actions SET status = ?, finished_at = ?, result = ? WHERE id = ?")
-        .run(ok ? "done" : "failed", now, result, id);
-      if (a.itemId) {
+      this.db.prepare("UPDATE actions SET status = ?, finished_at = ?, result = ? WHERE id = ?").run(ok ? "done" : "failed", now, result, id);
+      const newer = a.itemId
+        ? this.db.prepare("SELECT 1 FROM actions WHERE item_id = ? AND id > ? AND status NOT IN ('cancelled', 'failed')").get(a.itemId, id)
+        : null;
+      if (a.itemId && !newer) {
         if (ok) {
           this.db
-            .prepare(
-              "UPDATE items SET status = 'closed', closed_reason = 'action', resolution = ?, closed_at = ?, updated_at = ?, error = '' WHERE id = ?",
-            )
-            .run(result || a.label || "Done", now, now, a.itemId);
+            .prepare("UPDATE items SET status = 'closed', closed_reason = 'action', resolution = ?, closed_at = ?, error = '', acked_at = NULL WHERE id = ?")
+            .run(result || a.label || "Done", now, a.itemId);
         } else {
-          this.db
-            .prepare("UPDATE items SET status = 'open', error = ?, updated_at = ? WHERE id = ?")
-            .run(result || "The bot couldn't do it.", now, a.itemId);
+          this.db.prepare("UPDATE items SET status = 'open', error = ? WHERE id = ?").run(result || "The bot couldn't do it.", a.itemId);
         }
       }
       if (a.todoId && !ok) {
-        this.db.prepare("UPDATE todos SET completed_at = NULL WHERE bot = ? AND id = ?").run(a.bot, a.todoId);
+        this.db.prepare("UPDATE todos SET completed_at = NULL, completed_due = NULL WHERE bot = ? AND id = ?").run(a.bot, a.todoId);
       }
-      return this.getAction(id);
+      return { action: this.getAction(id) };
     });
   }
 
   // Agenda
 
+  /** Replace this bot's events that overlap [from, to). */
   replaceEvents(bot: string, from: string, to: string, events: Omit<CalEvent, "id" | "bot">[]) {
     this.tx(() => {
       this.touchBot(bot);
-      this.db.prepare("DELETE FROM events WHERE bot = ? AND start >= ? AND start < ?").run(bot, from, to);
+      this.db
+        .prepare("DELETE FROM events WHERE bot = ? AND start < ? AND (CASE WHEN end != '' THEN end ELSE start END) >= ?")
+        .run(bot, to, from);
       const ins = this.db.prepare("INSERT INTO events (bot, title, start, end, location, all_day, app) VALUES (?, ?, ?, ?, ?, ?, ?)");
       for (const e of events) ins.run(bot, e.title, e.start, e.end, e.location, e.allDay ? 1 : 0, e.app);
     });
   }
 
+  /** Events that overlap [from, to), including ones that started earlier and are still going. */
   listEvents(from: string, to: string): CalEvent[] {
     return this.db
-      .prepare("SELECT * FROM events WHERE start >= ? AND start < ? ORDER BY start")
-      .all(from, to)
+      .prepare("SELECT * FROM events WHERE start < ? AND (CASE WHEN end != '' THEN end ELSE start END) >= ? ORDER BY start")
+      .all(to, from)
       .map((r) => {
         const row = r as Row;
         return {
@@ -635,47 +771,36 @@ export class Store {
   replaceTodos(bot: string, todos: Omit<BotTodo, "bot" | "completedAt">[]) {
     this.tx(() => {
       this.touchBot(bot);
-      // Keep local completions that the bot hasn't caught up with yet.
-      const done = new Set(
-        (this.db.prepare("SELECT id FROM todos WHERE bot = ? AND completed_at IS NOT NULL").all(bot) as Row[]).map((r) => String(r.id)),
+      // A local completion survives the bot's next snapshot only for the same occurrence.
+      // A recurring task that moved on to its next date shows up again.
+      const done = new Map(
+        (this.db.prepare("SELECT id, completed_at, completed_due FROM todos WHERE bot = ? AND completed_at IS NOT NULL").all(bot) as Row[])
+          .map((r) => [String(r.id), { at: Number(r.completed_at), due: str(r.completed_due) }]),
       );
       this.db.prepare("DELETE FROM todos WHERE bot = ?").run(bot);
       const ins = this.db.prepare(
-        "INSERT INTO todos (id, bot, content, priority, due, due_string, deadline, project, url, app, completed_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+        "INSERT INTO todos (id, bot, content, priority, due, due_string, deadline, project, url, app, completed_at, completed_due) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
       );
       for (const t of todos) {
-        ins.run(t.id, bot, t.content, t.priority, t.due, t.dueString, t.deadline, t.project, t.url, t.app, done.has(t.id) ? this.now() : null);
+        const d = done.get(t.id);
+        const keep = d && d.due === t.due;
+        ins.run(t.id, bot, t.content, t.priority, t.due, t.dueString, t.deadline, t.project, t.url, t.app, keep ? d.at : null, keep ? d.due : null);
       }
     });
   }
 
   listTodos(): BotTodo[] {
-    return this.db
-      .prepare("SELECT * FROM todos ORDER BY bot, id")
-      .all()
-      .map((r) => {
-        const row = r as Row;
-        return {
-          id: str(row.id),
-          bot: str(row.bot),
-          content: str(row.content),
-          priority: Number(row.priority),
-          due: str(row.due),
-          dueString: str(row.due_string),
-          deadline: str(row.deadline),
-          project: str(row.project),
-          url: str(row.url),
-          app: str(row.app),
-          completedAt: num(row.completed_at),
-        };
-      });
+    return this.db.prepare("SELECT * FROM todos ORDER BY bot, id").all().map((r) => toTodo(r as Row));
+  }
+
+  findTodo(bot: string, id: string): BotTodo | null {
+    const r = this.db.prepare("SELECT * FROM todos WHERE bot = ? AND id = ?").get(bot, id);
+    return r ? toTodo(r as Row) : null;
   }
 
   setTodoCompleted(bot: string, id: string, completed: boolean) {
-    this.db.prepare("UPDATE todos SET completed_at = ? WHERE bot = ? AND id = ?").run(completed ? this.now() : null, bot, id);
-  }
-
-  findTodo(id: string): BotTodo | null {
-    return this.listTodos().find((t) => t.id === id) ?? null;
+    this.db
+      .prepare("UPDATE todos SET completed_at = ?, completed_due = CASE WHEN ? THEN due ELSE NULL END WHERE bot = ? AND id = ?")
+      .run(completed ? this.now() : null, completed ? 1 : 0, bot, id);
   }
 }

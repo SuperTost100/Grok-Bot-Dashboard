@@ -13,7 +13,21 @@ export interface Config {
   todoistFilter: string;
   undoSeconds: number;
   archiveDays: number;
+  tz: string;
+  /** Allow webhooks to private or tailnet addresses. Off by default so a bot can't make the server call itself. */
+  webhookAllowPrivate: boolean;
+  backupDays: number;
   publicDir: string;
+}
+
+function int(env: NodeJS.ProcessEnv, name: string, fallback: number, min: number, max: number): number {
+  const raw = env[name];
+  if (raw == null || raw === "") return fallback;
+  const n = Number(raw);
+  if (!Number.isInteger(n) || n < min || n > max) {
+    throw new Error(`${name} must be a whole number from ${min} to ${max}, got "${raw}"`);
+  }
+  return n;
 }
 
 export function loadConfig(env: NodeJS.ProcessEnv = process.env): Config {
@@ -29,17 +43,26 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): Config {
   if (botToken.length < 8) {
     throw new Error("BOT_TOKEN is required (at least 8 characters). Generate one with: openssl rand -hex 24");
   }
+  const tz = (env.TZ ?? "").trim() || Intl.DateTimeFormat().resolvedOptions().timeZone;
+  try {
+    new Intl.DateTimeFormat("en", { timeZone: tz });
+  } catch {
+    throw new Error(`TZ must be a time zone like Europe/Rome, got "${tz}"`);
+  }
   return {
     host: env.HOST ?? "127.0.0.1",
-    port: Number(env.PORT ?? 8787),
+    port: int(env, "PORT", 8787, 1, 65535),
     dataDir: path.resolve(env.DATA_DIR ?? "data"),
     authMode,
     ownerLogin,
     botToken,
     todoistToken: (env.TODOIST_TOKEN ?? "").trim(),
     todoistFilter: (env.TODOIST_FILTER ?? "").trim(),
-    undoSeconds: Number(env.UNDO_SECONDS ?? 5),
-    archiveDays: Number(env.ARCHIVE_DAYS ?? 30),
+    undoSeconds: int(env, "UNDO_SECONDS", 5, 0, 60),
+    archiveDays: int(env, "ARCHIVE_DAYS", 30, 1, 365),
+    tz,
+    webhookAllowPrivate: env.WEBHOOK_ALLOW_PRIVATE === "1",
+    backupDays: int(env, "BACKUP_DAYS", 7, 0, 90),
     publicDir: path.resolve(import.meta.dirname, "../public"),
   };
 }
