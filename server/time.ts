@@ -68,3 +68,13 @@ export function snoozeChoices(now: number, tz: string): { label: string; until: 
   if (toMonday > 1) list.push({ label: "Monday 9:00", until: at(addDays(today, toMonday), 9) });
   return list;
 }
+
+/**
+ * Whether an event touches the window [from, to) of dates. A datetime end is exclusive
+ * (ending at 00:00 doesn't touch that day); a date-only end includes that day. Same rule as the SQL in store.ts.
+ */
+export function overlaps(start: string, end: string, from: string, to: string): boolean {
+  if (!(start < to)) return false;
+  if (!end) return start >= from;
+  return end.length === 10 ? end >= from : end > `${from}T00:00:00`;
+}

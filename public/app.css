@@ -390,3 +390,5 @@ details.arch + details.arch { border-top: 1px solid var(--border); }
 .answers { margin: 8px 0 0; font-size: 14px; display: grid; grid-template-columns: auto 1fr; gap: 2px 10px; }
 .answers dt { font-weight: 600; }
 .answers dd { margin: 0; color: var(--muted); }
+.draft-label { overflow-wrap: anywhere; }
+.card .answers { margin-top: 10px; }

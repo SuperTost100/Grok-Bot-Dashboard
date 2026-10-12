@@ -420,7 +420,7 @@ export class Store {
   }
 
   requestRefresh(): Bot[] {
-    this.db.prepare("UPDATE bots SET refresh_requested_at = ? WHERE refresh_requested_at IS NULL").run(this.now());
+    this.db.prepare("UPDATE bots SET refresh_requested_at = ?").run(this.now());
     return this.listBots();
   }
 
@@ -676,7 +676,9 @@ export class Store {
       if (!a || a.status !== "queued") return null;
       this.db.prepare("UPDATE actions SET status = 'cancelled', finished_at = ? WHERE id = ?").run(this.now(), id);
       if (a.itemId) {
-        const back = a.snapshot?.status === "closed" ? "closed" : "open";
+        // A read summary goes back to read, unless it got new content in the meantime.
+        const item = this.getItem(a.itemId);
+        const back = a.snapshot?.status === "closed" && item?.rev === a.snapshot.rev ? "closed" : "open";
         this.db.prepare("UPDATE items SET status = ? WHERE id = ? AND status = 'pending'").run(back, a.itemId);
       }
       this.clearTodoFor(a);
@@ -753,8 +755,11 @@ export class Store {
       const newer = a.itemId
         ? this.db.prepare("SELECT 1 FROM actions WHERE item_id = ? AND id > ? AND status NOT IN ('cancelled', 'failed')").get(a.itemId, id)
         : null;
-      if (a.itemId && !newer) {
-        const item = this.getItem(a.itemId);
+      const current = a.itemId ? this.getItem(a.itemId) : null;
+      // A card the user dismissed, finished or snoozed after the action went quiet stays that way.
+      const userMovedOn = current && (current.status === "snoozed" || (current.status === "closed" && current.closedReason !== "action"));
+      if (a.itemId && !newer && !userMovedOn) {
+        const item = current;
         const changed = item && a.snapshot && item.rev !== a.snapshot.rev;
         if (ok && changed) {
           // The bot did what was asked, but the card has new content since: keep it open so it isn't lost.
