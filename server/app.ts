@@ -3,9 +3,9 @@ import fs from "node:fs";
 import path from "node:path";
 import crypto from "node:crypto";
 import type { Config } from "./config.ts";
-import type { Store, Item, ItemInput, Kind, Section, Option, Draft, Action } from "./store.ts";
+import type { Store, Item, ItemInput, Kind, Section, Option, Draft, Action, Bot } from "./store.ts";
 import { Todoist, pickTodos } from "./todoist.ts";
-import { addDays, localStamp, overlaps, parseWhen, snoozeChoices, zonedToEpoch } from "./time.ts";
+import { addDays, lastSlot, localStamp, overlaps, parseWhen, snoozeChoices, zonedToEpoch } from "./time.ts";
 import { checkWebhookUrl } from "./webhook.ts";
 
 // Errors with a status code become JSON error responses; anything else is a 500.
@@ -137,11 +137,15 @@ export interface AppDeps {
   store: Store;
   todoist?: Todoist | null;
   notify?: (bot: string, reason: "actions" | "refresh") => void;
+  /** The last webhook ping to a bot and whether its routine accepted it. */
+  lastPing?: (bot: string) => { at: number; ok: boolean } | undefined;
   log?: (msg: string) => void;
 }
 
 const RECENT_MS = 10 * 60_000;
 export const STALE_CLAIM_MS = 20 * 60_000;
+// A scheduled run or an accepted ping that hasn't reached the dashboard after this long means the bot can't get here.
+export const OFFLINE_AFTER_MS = 20 * 60_000;
 
 export function createApp(deps: AppDeps) {
   const { config, store } = deps;
@@ -151,6 +155,15 @@ export function createApp(deps: AppDeps) {
   const log = deps.log ?? ((m: string) => console.log(m));
   const undoMs = config.undoSeconds * 1000;
   const today = () => localStamp(new Date(store.now()), tz).slice(0, 10);
+
+  /** The scheduled run and the accepted ping a bot missed since it last showed up (empty while it's on time). */
+  function missed(b: Bot): number[] {
+    const now = store.now();
+    const slot = lastSlot(now - OFFLINE_AFTER_MS, b.schedule, tz);
+    const ping = deps.lastPing?.(b.slug);
+    return [slot, ping?.ok && now - ping.at > OFFLINE_AFTER_MS ? ping.at : null].filter((t): t is number => t !== null && t > (b.lastSeenAt ?? 0));
+  }
+  const offlineSince = (b: Bot) => (missed(b).length ? Math.min(...missed(b)) : null);
 
   function uiItem(i: Item) {
     const a = i.status === "pending" ? store.pendingActionFor(i.id) : null;
@@ -190,7 +203,10 @@ export function createApp(deps: AppDeps) {
       tz,
       undoSeconds: config.undoSeconds,
       snoozeChoices: snoozeChoices(store.now(), tz),
-      bots: bots.map((b) => ({ slug: b.slug, name: b.name, color: b.color, lastScanAt: b.lastScanAt, refreshRequestedAt: b.refreshRequestedAt, hasWebhook: Boolean(b.webhookUrl) })),
+      bots: bots.map((b) => ({
+        slug: b.slug, name: b.name, color: b.color, lastScanAt: b.lastScanAt, lastSeenAt: b.lastSeenAt,
+        refreshRequestedAt: b.refreshRequestedAt, hasWebhook: Boolean(b.webhookUrl), offlineSince: offlineSince(b),
+      })),
       lastScanAt: bots.reduce<number | null>((m, b) => (b.lastScanAt && (!m || b.lastScanAt > m) ? b.lastScanAt : m), null),
       needs: items.filter((i) => i.section === "needs"),
       catchup: items.filter((i) => i.section === "catchup"),
@@ -354,7 +370,8 @@ export function createApp(deps: AppDeps) {
       },
       agenda: "PUT /api/bot/agenda {from: 'YYYY-MM-DD', to: 'YYYY-MM-DD' (default from + 2 days), app, events: [{title, start, end, location, allDay}]}. It REPLACES all your events overlapping from..to, so always send the complete list for that window.",
       todos: "PUT /api/bot/todos {app, todos: [{id, content, priority: 'p1'..'p4', due, dueString, deadline, project, url}]}. It REPLACES your whole list. Ignored when the dashboard reads Todoist directly.",
-      scan: "POST /api/bot/scan {startedAt: 'YYYY-MM-DDTHH:MM:SS'} after a full scan where every source was read, with the time the scan began (the 'now' from grokdash actions). GET /api/bot/actions returns lastScanAt: scan for messages since then.",
+      scan: "POST /api/bot/scan {startedAt: 'YYYY-MM-DDTHH:MM:SS', schedule?: ['08:00', ...]} after a full scan where every source was read, with the time the scan began (the 'now' from grokdash actions). GET /api/bot/actions returns lastScanAt: scan for messages since then. schedule is your daily run times: when one passes without you, the page says you're offline.",
+      status: "GET /api/bot/status: {offline, offlineSince, lastMissedAt, lastSeenAt, schedule}. For a watchdog; it doesn't count as the bot checking in.",
       register: "POST /api/bot/register {name, color, webhookUrl, webhookToken}",
     };
   }
@@ -499,8 +516,26 @@ export function createApp(deps: AppDeps) {
 
   route("POST", "/api/bot/scan", "bot", (_r, _p, _q, b) => {
     const started = when(b.startedAt, "startedAt", tz, false);
-    store.markScan(slug(b.bot), started ? zonedToEpoch(started.length === 10 ? started + "T00:00:00" : started, tz) : undefined);
+    let schedule: string[] | undefined;
+    if (b.schedule !== undefined) {
+      if (!Array.isArray(b.schedule) || b.schedule.length > 48 || !b.schedule.every((s) => typeof s === "string" && /^([01]\d|2[0-3]):[0-5]\d$/.test(s))) {
+        throw bad(`"schedule" must be a list of daily run times like ["08:00", "14:00"].`);
+      }
+      schedule = [...new Set(b.schedule as string[])].sort();
+    }
+    store.markScan(slug(b.bot), started ? zonedToEpoch(started.length === 10 ? started + "T00:00:00" : started, tz) : undefined, schedule);
     return { ok: true };
+  });
+
+  // For a watchdog on the bot's computer. Reading it doesn't count as the bot showing up.
+  route("GET", "/api/bot/status", "bot", (_r, _p, q) => {
+    const b = store.getBot(slug(q.get("bot")));
+    if (!b) throw new HttpError(404, "No bot with that name has posted yet.");
+    const m = missed(b);
+    return {
+      offline: m.length > 0, offlineSince: m.length ? Math.min(...m) : null, lastMissedAt: m.length ? Math.max(...m) : null,
+      lastSeenAt: b.lastSeenAt, schedule: b.schedule,
+    };
   });
 
   // UI API

@@ -89,7 +89,7 @@ function post(url: string, token: string, body: unknown): Promise<number> {
   });
 }
 
-const handle = createApp({ config, store, todoist, notify, log });
+const handle = createApp({ config, store, todoist, notify, lastPing: (bot) => lastPing.get(bot), log });
 const server = http.createServer((req, res) => {
   handle(req, res).catch((err) => {
     log(`unhandled error on ${req.method} ${req.url}: ${(err as Error).stack}`);

@@ -31,7 +31,10 @@ Create `~/.config/grokdash/config` with your dashboard's Tailscale address and t
 URL=https://your-machine.your-tailnet.ts.net:8443
 TOKEN=paste-the-bot-token-here
 BOT=dashboard
+SCHEDULE=08:00 10:00 12:00 14:00 16:00 18:00 20:00 22:00
 ```
+
+`SCHEDULE` lists the times of the bot's scheduled runs (step 2). When one of them never reaches the dashboard, the page says the bot is offline and turns off the refresh button.
 
 ```bash
 chmod 600 ~/.config/grokdash/config
@@ -56,7 +59,7 @@ Close it again:
 3. Send the new bot this message:
 
    ```text
-   Set yourself up: 1) Run ~/.local/bin/grokdash help on my computer to check you can reach the dashboard. 2) Create a routine that does a full run every 30 minutes from 7:00 to 23:00 in my time zone. 3) Create a routine triggered by a webhook that runs step 1 of your instructions, and a full run when grokdash actions says refreshRequested is true. 4) Do a first full run now.
+   Set yourself up: 1) Run ~/.local/bin/grokdash help on my computer to check you can reach the dashboard. 2) Create a routine that does a full run every 2 hours from 8:00 to 22:00 in my time zone. 3) Create a routine triggered by a webhook that runs step 1 of your instructions, and a full run when grokdash actions says refreshRequested is true. 4) Do a first full run now.
    ```
 
 4. Open the webhook routine's panel in Grok Bot. It shows a "POST to" URL and a key. Click each field to select it, copy it, and send both to the bot:
@@ -67,9 +70,21 @@ Close it again:
 
    The bot can't read these values itself. The dashboard sends the key as `Authorization: Bearer` when it calls the routine.
 
-Without the webhook routine, taps on the dashboard wait for the next 30-minute run. The page footer says whether a webhook is set.
+Without the webhook routine, taps on the dashboard wait for the next scheduled run. The page footer says whether a webhook is set.
 
-## 3. Turn your secretary into the notifier
+Every run uses your Grok Bot allowance, so the schedule is the main cost. With 8 runs a day, a quiet run reads the sources, finds nothing new and stops. Taps still reach the bot within a minute through the webhook. If a tap goes unanswered, the dashboard pings the bot once more after 10 minutes and then leaves it to the next scheduled run.
+
+## 3. Restart the app when its link drops
+
+The Grok Bot desktop app sometimes stays open but stops taking commands from the bots. On a Linux computer where a systemd service runs the app, a watchdog can restart it when the dashboard reports a missed run. It checks every 5 minutes and restarts the app once per missed run, not in a loop. Run as root, with the app's user and service name:
+
+```bash
+bash bot/watchdog/install.sh grok grok-bot
+```
+
+Its log: `journalctl -u grokdash-watchdog`.
+
+## 4. Turn your secretary into the notifier
 
 Add the text from [`secretary.md`](secretary.md) to your secretary bot's instructions, and remove its digest routines. From then on it stays quiet unless the Dashboard bot flags something urgent.
 

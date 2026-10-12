@@ -312,6 +312,49 @@ test("snoozed cards disappear and come back on time", async () => {
   await act(body.id, { type: "dismiss" });
 });
 
+test("a bot that misses a scheduled run or an accepted ping shows as offline", async () => {
+  const at = (stamp: string) => Date.parse(stamp + "+02:00"); // Rome in October
+  const status = async () => (await bot("GET", "/api/bot/status", undefined, "sched")).body;
+  const offline = async () => (await state()).bots.find((b: { slug: string }) => b.slug === "sched").offlineSince;
+  clock = at("2026-10-13T13:00:00");
+  assert.equal((await bot("POST", "/api/bot/scan", { schedule: ["8:00"] }, "sched")).status, 400);
+  assert.equal((await bot("POST", "/api/bot/scan", { schedule: ["14:00", "12:00"] }, "sched")).status, 200);
+  assert.deepEqual(await status(), { offline: false, offlineSince: null, lastMissedAt: null, lastSeenAt: clock, schedule: ["12:00", "14:00"] });
+  clock = at("2026-10-13T14:15:00");
+  assert.equal(await offline(), null, "a run gets 20 minutes to show up");
+  clock = at("2026-10-13T14:25:00");
+  assert.equal(await offline(), at("2026-10-13T14:00:00"));
+  assert.equal((await status()).offline, true);
+  assert.equal((await status()).offline, true, "asking for the status doesn't count as showing up");
+  await bot("GET", "/api/bot/actions", undefined, "sched");
+  assert.equal(await offline(), null);
+  clock = at("2026-10-14T08:00:00");
+  assert.equal(await offline(), null, "overnight there's no run to miss");
+
+  const store = new Store(":memory:", () => clock);
+  let ping: { at: number; ok: boolean } | undefined;
+  const app = createApp({ config, store, log: () => {}, lastPing: () => ping });
+  const server = http.createServer(app);
+  await new Promise<void>((r) => server.listen(0, "127.0.0.1", r));
+  try {
+    const base = `http://127.0.0.1:${(server.address() as AddressInfo).port}`;
+    const get = async () => (await (await fetch(base + "/api/bot/status", { headers: { Authorization: `Bearer ${TOKEN}`, "X-Bot": "dashboard" } })).json());
+    store.touchBot("dashboard");
+    ping = { at: clock + 1000, ok: false };
+    clock += 30 * 60_000;
+    assert.equal((await get()).offline, false, "a refused ping says nothing about the computer");
+    ping = { ...ping, ok: true };
+    assert.equal((await get()).offlineSince, ping.at, "an accepted ping nobody answered in 20 minutes");
+    assert.equal((await get()).lastMissedAt, ping.at);
+    store.touchBot("dashboard");
+    assert.equal((await get()).offline, false);
+  } finally {
+    server.closeAllConnections();
+    server.close();
+    store.close();
+  }
+});
+
 test("an unanswered ping is retried once, and never after the routine refused it", () => {
   const now = 10 * RETRY_GAP;
   assert.equal(retryDue(undefined, now), false, "no ping since start: the next scheduled run picks the work up");

@@ -5,6 +5,8 @@
 # Config, first match wins:
 #   GROKDASH_URL, GROKDASH_TOKEN, GROKDASH_BOT environment variables
 #   ~/.config/grokdash/config with lines URL=..., TOKEN=..., BOT=...
+# Optional SCHEDULE= (or GROKDASH_SCHEDULE): the bot's daily run times, like "08:00 14:00 20:00".
+#   grokdash scanned sends it, and the page then says when a run never showed up.
 set -euo pipefail
 
 CONFIG="${GROKDASH_CONFIG:-$HOME/.config/grokdash/config}"
@@ -14,6 +16,7 @@ if [[ -f "$CONFIG" ]]; then
       URL) : "${GROKDASH_URL:=$v}" ;;
       TOKEN) : "${GROKDASH_TOKEN:=$v}" ;;
       BOT) : "${GROKDASH_BOT:=$v}" ;;
+      SCHEDULE) : "${GROKDASH_SCHEDULE:=$v}" ;;
     esac
   done < "$CONFIG"
 fi
@@ -33,6 +36,7 @@ grokdash: post to and read from the Grok Bot Dashboard.
   grokdash fail ID REASON         Report an action you couldn't do
   grokdash scanned [STARTED_AT]   Say you finished a full scan; pass the "now" that grokdash actions printed when it began
   grokdash register [JSON]        Set your name, color, webhookUrl or webhookToken
+  grokdash status                 Whether you missed a scheduled run (for a watchdog; doesn't count as checking in)
   grokdash guide                  Full reference: fields, limits, the server's time zone, examples
   grokdash raw METHOD PATH [JSON] Call any API path
 
@@ -88,7 +92,15 @@ case "$cmd" in
     [[ $# -ge 2 ]] || die "usage: grokdash fail ID REASON"
     call POST "/api/bot/actions/$1" "{\"ok\":false,\"result\":$(json_str "$2")}" ;;
   scanned)
-    if [[ $# -ge 1 ]]; then call POST /api/bot/scan "{\"startedAt\":$(json_str "$1")}"; else call POST /api/bot/scan '{}'; fi ;;
+    fields=()
+    [[ $# -ge 1 ]] && fields+=("\"startedAt\":$(json_str "$1")")
+    if [[ -n "${GROKDASH_SCHEDULE:-}" ]]; then
+      times=()
+      for t in $GROKDASH_SCHEDULE; do times+=("$(json_str "$t")"); done
+      fields+=("\"schedule\":[$(IFS=,; echo "${times[*]}")]")
+    fi
+    call POST /api/bot/scan "{$(IFS=,; echo "${fields[*]:-}")}" ;;
+  status) call GET /api/bot/status ;;
   guide) call GET /api/bot/help ;;
   register) call POST /api/bot/register "$(body_arg "$@")" ;;
   raw)

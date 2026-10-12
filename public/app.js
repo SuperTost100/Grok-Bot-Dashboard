@@ -218,10 +218,19 @@ function renderHeader() {
   const next = s.agenda.find((e) => e.start.length > 10 && e.start.slice(0, 10) === s.today && e.start >= stamp);
   const short = now.toLocaleDateString("en-GB", { weekday: "short", day: "numeric", month: "short", timeZone: tz() });
   $("#glance").innerHTML = next ? `${esc(short)} · Next <strong>${esc(next.start.slice(11, 16))}</strong> ${esc(next.title)}` : esc(short);
-  const asked = s.bots.some((b) => b.refreshRequestedAt);
-  const label = asked ? "Scan requested" : ago(s.lastScanAt);
+  // A bot that missed its run can't answer a refresh either, and each try costs a bot run.
+  const down = s.bots.filter((b) => b.offlineSince);
+  const hooked = s.bots.filter((b) => b.hasWebhook);
+  const allDown = hooked.length > 0 && hooked.every((b) => b.offlineSince);
+  $("#offline").hidden = !down.length;
+  $("#offline").textContent = down
+    .map((b) => `${b.name} hasn't checked in since ${b.lastSeenAt ? whenFull(b.lastSeenAt) : "it was set up"}, so its computer may be offline. Taps wait until it's back.`)
+    .join(" ");
+  const asked = !allDown && s.bots.some((b) => b.refreshRequestedAt);
+  const label = allDown ? "Bot offline" : asked ? "Scan requested" : ago(s.lastScanAt);
   $("#refresh-label").textContent = label;
   $("#fresh").textContent = label;
+  $("#refresh").disabled = allDown;
   $("#refresh").classList.toggle("busy", asked);
   const hooks = s.bots.filter((b) => b.hasWebhook).length;
   $("#foot").textContent = s.bots.length
