@@ -78,3 +78,16 @@ export function overlaps(start: string, end: string, from: string, to: string): 
   if (!end) return start >= from;
   return end.length === 10 ? end >= from : end > `${from}T00:00:00`;
 }
+
+/** The latest of the daily run times `slots` ("HH:MM" in `tz`) at or before `now`, in Unix ms. */
+export function lastSlot(now: number, slots: string[], tz: string): number | null {
+  const today = localStamp(new Date(now), tz).slice(0, 10);
+  let best: number | null = null;
+  for (const day of [today, addDays(today, -1)]) {
+    for (const s of slots) {
+      const t = zonedToEpoch(`${day}T${s}:00`, tz);
+      if (t <= now && (best === null || t > best)) best = t;
+    }
+  }
+  return best;
+}

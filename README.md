@@ -22,7 +22,7 @@ On a phone, add it to your home screen and it opens full screen like an app.
 
 ## How it fits with Grok Bot
 
-A Grok Bot named "Dashboard" scans your WhatsApp, mail and calendar every 30 minutes and posts cards with the `grokdash` command. When you tap something, the dashboard calls the bot's webhook routine and the bot acts within seconds. Your existing secretary bot stops sending digests and only notifies you when a card is urgent. Any other bot can post cards too, and gets its own filter on the page.
+A Grok Bot named "Dashboard" scans your WhatsApp, mail and calendar on a schedule (every 2 hours by default) and posts cards with the `grokdash` command. When you tap something, the dashboard calls the bot's webhook routine and the bot acts within seconds. Your existing secretary bot stops sending digests and only notifies you when a card is urgent. Any other bot can post cards too, and gets its own filter on the page.
 
 [Set up the bots](bot/README.md) after the dashboard runs.
 

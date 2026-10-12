@@ -91,6 +91,8 @@ export interface Bot {
   lastSeenAt: number | null;
   lastScanAt: number | null;
   refreshRequestedAt: number | null;
+  /** Daily scheduled run times ("HH:MM"), so the page can tell when a run never showed up. */
+  schedule: string[];
 }
 
 export interface CalEvent {
@@ -212,6 +214,7 @@ const MIGRATIONS: [string, string, string][] = [
   ["todos", "app", "TEXT NOT NULL DEFAULT ''"],
   ["todos", "completed_due", "TEXT"],
   ["actions", "snapshot", "TEXT"],
+  ["bots", "schedule", "TEXT NOT NULL DEFAULT ''"],
 ];
 
 // An event overlaps [from, to) when it starts before `to` and is still going at `from`.
@@ -286,6 +289,7 @@ function toBot(r: Row): Bot {
     lastSeenAt: num(r.last_seen_at),
     lastScanAt: num(r.last_scan_at),
     refreshRequestedAt: num(r.refresh_requested_at),
+    schedule: str(r.schedule).split(" ").filter(Boolean),
   };
 }
 
@@ -407,10 +411,11 @@ export class Store {
   }
 
   /** Record a complete scan. `startedAt` is when the scan began, so the next one looks back to there. */
-  markScan(slug: string, startedAt?: number) {
+  markScan(slug: string, startedAt?: number, schedule?: string[]) {
     this.touchBot(slug);
     const at = startedAt && startedAt <= this.now() ? startedAt : this.now();
     this.db.prepare("UPDATE bots SET last_scan_at = ?, refresh_requested_at = NULL WHERE slug = ?").run(at, slug);
+    if (schedule) this.db.prepare("UPDATE bots SET schedule = ? WHERE slug = ?").run(schedule.join(" "), slug);
   }
 
   /** Bots with a webhook and a refresh request from the last `withinMs` that they haven't answered with a scan. */

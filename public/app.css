@@ -80,6 +80,7 @@ svg.i { width: 18px; height: 18px; flex: none; stroke: currentColor; fill: none;
 }
 .refresh:hover { border-color: var(--border-strong); color: var(--text); }
 .refresh.busy svg { animation: spin 0.9s linear infinite; }
+.refresh:disabled { cursor: not-allowed; border-color: var(--border); color: var(--muted); background: var(--surface-2); }
 @keyframes spin { to { transform: rotate(360deg); } }
 .desk-tabs { display: none; gap: 4px; }
 .desk-tabs button {
@@ -316,7 +317,7 @@ textarea.draft-edit {
   color: var(--urgent); background: var(--urgent-bg);
 }
 .banner {
-  max-width: 1200px; margin: 12px auto 0; padding: 10px 14px; border-radius: 10px;
+  margin: 12px max(16px, calc((100% - 1200px) / 2)) 0; padding: 10px 14px; border-radius: 10px;
   background: var(--urgent-bg); color: var(--urgent); font-size: 14px;
 }
 .banner[hidden] { display: none; }

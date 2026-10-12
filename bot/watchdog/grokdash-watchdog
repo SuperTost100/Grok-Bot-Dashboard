@@ -1,0 +1,27 @@
+#!/usr/bin/env bash
+# Restart the Grok Bot desktop app when its link to the bots has dropped.
+# The dashboard notices first: a scheduled bot run or an accepted webhook ping never reached it.
+# Restarts once per missed run or ping, so a bot that's down for another reason doesn't cause a restart loop.
+# Usage (as root): grokdash-watchdog APP_USER APP_SERVICE
+set -uo pipefail
+APP_USER=${1:?usage: grokdash-watchdog APP_USER APP_SERVICE}
+APP_SERVICE=${2:?usage: grokdash-watchdog APP_USER APP_SERVICE}
+STAMP=/var/lib/grokdash-watchdog/last-restart
+
+home=$(getent passwd "$APP_USER" | cut -d: -f6)
+if ! out=$(/usr/sbin/runuser -u "$APP_USER" -- "$home/.local/bin/grokdash" status 2>&1); then
+  echo "can't read the dashboard status: $out"
+  exit 0
+fi
+[[ "$out" == *'"offline":true'* ]] || exit 0
+
+missed=$(grep -o '"lastMissedAt":[0-9]*' <<<"$out" | cut -d: -f2)
+last=$(cat "$STAMP" 2>/dev/null || echo 0)
+if [[ -z "$missed" ]] || (( missed / 1000 <= last )); then
+  echo "bot still offline, already restarted $APP_SERVICE for this"
+  exit 0
+fi
+mkdir -p "$(dirname "$STAMP")"
+date +%s > "$STAMP"
+echo "bot offline ($out), restarting $APP_SERVICE"
+systemctl restart "$APP_SERVICE"
