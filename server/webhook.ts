@@ -81,3 +81,15 @@ export async function assertPublicDestination(raw: string, allowPrivate: boolean
   const addrs = net.isIP(host) ? [{ address: host }] : await dns.lookup(host, { all: true });
   if (addrs.some((a) => isPrivateAddress(a.address))) throw new Error(`${host} resolves to a private address`);
 }
+
+/**
+ * Each webhook ping starts a paid bot run, and the bot's scheduled runs pick up waiting work anyway.
+ * So a ping is retried once, 10 minutes after one the routine accepted, and never after it refused one
+ * (a paused routine or an offline computer would only burn runs).
+ */
+export const RETRY_GAP = 10 * 60_000;
+export const RETRY_WINDOW = 15 * 60_000;
+
+export function retryDue(last: { at: number; ok: boolean } | undefined, now: number): boolean {
+  return Boolean(last?.ok) && now - last!.at > RETRY_GAP;
+}

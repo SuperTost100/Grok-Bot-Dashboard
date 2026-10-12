@@ -6,7 +6,7 @@ import { loadConfig } from "./config.ts";
 import { Store } from "./store.ts";
 import { Todoist } from "./todoist.ts";
 import { createApp, STALE_CLAIM_MS } from "./app.ts";
-import { checkWebhookUrl, guardedLookup } from "./webhook.ts";
+import { checkWebhookUrl, guardedLookup, retryDue, RETRY_WINDOW } from "./webhook.ts";
 import { localStamp } from "./time.ts";
 
 const log = (msg: string) => console.log(`${new Date().toISOString()} ${msg}`);
@@ -25,15 +25,13 @@ const todoist = config.todoistToken ? new Todoist(config.todoistToken, config.to
 
 // Ping a bot's webhook routine so it picks up work now instead of at its next scheduled run.
 // At most one ping per bot every 20 seconds; a ping that comes sooner is sent when the gap is up.
-// While actions stay ready and unclaimed, the ping repeats every 3 minutes (for up to 2 hours), also after a
-// restart. An unanswered refresh is retried the same way for 15 minutes. Each ping starts a bot run, so both stop.
+// Unclaimed actions and unanswered refreshes get one retry (see retryDue); after that the bot's scheduled run does it.
 const PING_GAP = 20_000;
-const RETRY_GAP = 3 * 60_000;
-const lastPing = new Map<string, number>();
+const lastPing = new Map<string, { at: number; ok: boolean }>();
 const deferred = new Map<string, NodeJS.Timeout>();
 
 function notify(slug: string, reason: "actions" | "refresh") {
-  const wait = (lastPing.get(slug) ?? 0) + PING_GAP - Date.now();
+  const wait = (lastPing.get(slug)?.at ?? 0) + PING_GAP - Date.now();
   if (wait <= 0) return void ping(slug, reason);
   if (deferred.has(slug)) return;
   deferred.set(slug, setTimeout(() => { deferred.delete(slug); void ping(slug, reason); }, wait));
@@ -42,7 +40,8 @@ function notify(slug: string, reason: "actions" | "refresh") {
 async function ping(slug: string, reason: "actions" | "refresh") {
   const bot = store.getBot(slug);
   if (!bot?.webhookUrl) return;
-  lastPing.set(slug, Date.now());
+  const sent = { at: Date.now(), ok: false };
+  lastPing.set(slug, sent);
   try {
     const status = await post(bot.webhookUrl, bot.webhookToken, {
       source: "grok-bot-dashboard",
@@ -52,6 +51,7 @@ async function ping(slug: string, reason: "actions" | "refresh") {
           ? "You have dashboard actions waiting. Run: grokdash actions"
           : "Someone pressed refresh on the dashboard. Scan your sources and update it.",
     });
+    sent.ok = status >= 200 && status < 300;
     log(`webhook ${slug} (${reason}): ${status}`);
   } catch (err) {
     log(`webhook ${slug} (${reason}) failed: ${(err as Error).message}`);
@@ -104,11 +104,11 @@ const tick = setInterval(() => {
     store.wakeSnoozed();
     store.expireClaims(STALE_CLAIM_MS);
     for (const bot of store.promoteDue()) notify(bot, "actions");
-    for (const bot of store.botsWithReadyWork(2 * 3600_000)) {
-      if (Date.now() - (lastPing.get(bot) ?? 0) > RETRY_GAP) notify(bot, "actions");
+    for (const bot of store.botsWithReadyWork(RETRY_WINDOW)) {
+      if (retryDue(lastPing.get(bot), Date.now())) notify(bot, "actions");
     }
-    for (const bot of store.botsWithPendingRefresh(15 * 60_000)) {
-      if (Date.now() - (lastPing.get(bot) ?? 0) > RETRY_GAP) notify(bot, "refresh");
+    for (const bot of store.botsWithPendingRefresh(RETRY_WINDOW)) {
+      if (retryDue(lastPing.get(bot), Date.now())) notify(bot, "refresh");
     }
   } catch (err) {
     log(`tick failed: ${(err as Error).message}`);
