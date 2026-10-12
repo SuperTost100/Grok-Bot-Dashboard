@@ -8,7 +8,7 @@ import { createApp } from "../server/app.ts";
 import { Todoist, pickTodos } from "../server/todoist.ts";
 import { loadConfig, type Config } from "../server/config.ts";
 import { parseWhen, snoozeChoices, localStamp } from "../server/time.ts";
-import { checkWebhookUrl, isPrivateAddress } from "../server/webhook.ts";
+import { checkWebhookUrl, isPrivateAddress, retryDue, RETRY_GAP } from "../server/webhook.ts";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
@@ -310,6 +310,14 @@ test("snoozed cards disappear and come back on time", async () => {
   clock += 3601_000;
   assert.equal((await card(body.id)).status, "open");
   await act(body.id, { type: "dismiss" });
+});
+
+test("an unanswered ping is retried once, and never after the routine refused it", () => {
+  const now = 10 * RETRY_GAP;
+  assert.equal(retryDue(undefined, now), false, "no ping since start: the next scheduled run picks the work up");
+  assert.equal(retryDue({ at: now - RETRY_GAP / 2, ok: true }, now), false);
+  assert.equal(retryDue({ at: now - RETRY_GAP - 1, ok: true }, now), true);
+  assert.equal(retryDue({ at: now - 5 * RETRY_GAP, ok: false }, now), false, "a paused or offline routine is not pinged again");
 });
 
 test("webhooks: public https only, and a new URL drops the old key", async () => {
