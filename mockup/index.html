@@ -194,6 +194,35 @@ textarea.draft-edit {
 }
 .menu .label { width: 100%; font-size: 13px; color: var(--muted); }
 
+.title-btn { all: unset; cursor: default; }
+.title-btn .more { display: none; }
+.glance { display: none; }
+.sec-head .fresh { display: none; margin-left: auto; color: var(--muted); font-size: 13px; }
+@media (max-width: 999px) {
+  .full-date { display: none; }
+  .glance strong { color: var(--text); font-weight: 600; }
+  .card { padding: 12px 12px 10px; }
+  .card h3 { margin: 6px 0 0; }
+  .title-btn { cursor: pointer; display: flex; gap: 6px; align-items: flex-start; justify-content: space-between; width: 100%; }
+  .title-btn:focus-visible { outline: 2px solid var(--focus); outline-offset: 2px; }
+  .title-btn .more { display: block; color: var(--muted); margin-top: 2px; transition: transform 150ms ease-out; }
+  .card.open .title-btn .more { transform: rotate(90deg); }
+  .card:not(.open) .detail, .card:not(.open) .draft-label { display: none; }
+  .card .detail { margin-top: 4px; }
+  .card:not(.open) .draft { display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden; margin-top: 8px; }
+  .card .actions { margin-top: 10px; }
+  .card .actions .end { margin-left: auto; }
+  .card:not(.open) .actions .end, .card:not(.open) .write, .card:not(.open) .menu { display: none; }
+  .card:not(.open) .draft { padding: 0 12px; border-block: 10px solid var(--surface-2); }
+  .top-row > div:first-child { flex: 1; min-width: 0; }
+  .top-row .spacer { display: none; }
+  .glance { display: block; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .refresh { width: 44px; height: 44px; padding: 0; justify-content: center; }
+  .refresh #refresh-label { display: none; }
+  .sec-head .fresh { display: inline; }
+  .card .notified { margin-top: 6px; }
+}
+
 /* Resolved state */
 .resolved {
   display: flex; align-items: center; gap: 10px; padding: 12px 14px;
@@ -319,14 +348,14 @@ textarea.draft-edit {
     <div class="top-row">
       <div>
         <h1 id="view-title">Today</h1>
-        <div class="date num">Monday 12 October</div>
+        <div class="date num"><span class="full-date">Monday 12 October</span><span class="glance">Mon 12 Oct · Next <strong>14:30</strong> Io Sono Cultura</span></div>
       </div>
       <div class="spacer"></div>
       <div class="desk-tabs" role="tablist" aria-label="Views">
         <button role="tab" aria-selected="true" data-tab="today">Today</button>
         <button role="tab" aria-selected="false" data-tab="archive">Archive</button>
       </div>
-      <button class="refresh" id="refresh" type="button" aria-live="polite">
+      <button class="refresh" id="refresh" type="button" aria-live="polite" aria-label="Refresh now">
         <svg class="i"><use href="#i-refresh"/></svg><span id="refresh-label">Updated 4 min ago</span>
       </button>
     </div>
@@ -345,7 +374,7 @@ textarea.draft-edit {
     <div class="grid">
       <div class="col-main">
         <section class="s-needs" aria-labelledby="h-needs">
-          <div class="sec-head"><h2 id="h-needs">Needs you</h2><span class="count num" id="needs-count"></span></div>
+          <div class="sec-head"><h2 id="h-needs">Needs you</h2><span class="count num" id="needs-count"></span><span class="fresh" id="fresh">Updated 4 min ago</span></div>
           <div class="stack" id="needs"></div>
         </section>
 
@@ -496,8 +525,8 @@ const avatar = b => `<span class="avatar" style="background:${BOTS[b].color}" ti
 const visible = item => state.filter === "all" || item.bot === state.filter;
 
 function cardActions(c) {
-  const write = `<button class="btn ghost" data-act="write" data-id="${c.id}">${icon("msg")}Write</button>`;
-  const snooze = `<button class="btn ghost" data-act="snooze" data-id="${c.id}">${icon("clock")}Snooze</button>`;
+  const write = `<button class="btn ghost" data-act="write" data-id="${c.id}" aria-label="Write to the bot">${icon("msg")}<span class="lbl">Write</span></button>`;
+  const snooze = `<button class="btn ghost" data-act="snooze" data-id="${c.id}" aria-label="Snooze">${icon("clock")}<span class="lbl">Snooze</span></button>`;
   const dismiss = `<button class="btn ghost" data-act="dismiss" data-id="${c.id}" aria-label="Dismiss">${icon("x")}</button>`;
   if (c.kind === "decision") {
     return c.suggestions.map((s, i) =>
@@ -544,12 +573,12 @@ function renderNeeds() {
       : cardActions(c);
     const write = c.writing ? `<form class="write" data-form="${c.id}"><label class="sr-only" for="w-${c.id}">Tell the bot what to do</label><input id="w-${c.id}" placeholder="Tell ${BOTS[c.bot].name} what to do" autocomplete="off"><button class="btn primary" aria-label="Send">${icon("send")}</button></form>` : "";
     const snooze = c.snoozing ? `<div class="menu"><span class="label">Snooze until</span>${["In 1 hour", "Tonight 19:00", "Tomorrow 9:00", "Monday 9:00"].map(s => `<button class="btn suggest" data-act="snooze-to" data-id="${c.id}" data-to="${s}">${s}</button>`).join("")}</div>` : "";
-    return `<article class="card${c.urgent ? " urgent" : ""}" aria-labelledby="t-${c.id}">
+    return `<article class="card${c.urgent ? " urgent" : ""}${c.open || c.urgent ? " open" : ""}" aria-labelledby="t-${c.id}">
       <div class="meta">${avatar(c.bot)}<span class="src">${esc(c.source)}</span><time class="num">${c.time}</time></div>
       ${c.urgent ? `<div style="margin-top:8px"><span class="flag">Urgent · ${esc(c.urgent)}</span></div>` : ""}
-      <h3 id="t-${c.id}">${esc(c.title)}</h3>
-      <p>${esc(c.body)}</p>
-      ${c.context ? `<p class="context">${esc(c.context)}</p>` : ""}
+      <h3 id="t-${c.id}"><button class="title-btn" data-act="expand" data-id="${c.id}" aria-expanded="${!!c.open}">${esc(c.title)}<svg class="i more" aria-hidden="true"><use href="#i-chev"/></svg></button></h3>
+      <div class="detail"><p>${esc(c.body)}</p>
+      ${c.context ? `<p class="context">${esc(c.context)}</p>` : ""}</div>
       ${draft}
       ${c.notified ? `<div class="notified">${icon("bell")}${esc(c.notified)}</div>` : ""}
       <div class="actions">${actions}</div>
@@ -652,6 +681,7 @@ document.addEventListener("click", e => {
     case "send": startAction(c, `Sending your reply to ${c.to}`, `Sent to ${c.to}`); break;
     case "send-edited": c.draft = $(`#d-${id}`).value; startAction(c, `Sending your edited reply to ${c.to}`, `Sent to ${c.to}`); break;
     case "edit": c.editing = true; render(); $(`#d-${id}`).focus(); break;
+    case "expand": c.open = !c.open; render(); break;
     case "cancel-edit": c.editing = false; render(); break;
     case "done": startAction(c, "Marked done", "Marked done"); break;
     case "dismiss": state.resolved[id] = { phase: "done", text: "Dismissed", note: "Moved to the archive" }; render(); break;
@@ -680,8 +710,8 @@ $("#arch-q").addEventListener("input", renderArchive);
 $("#refresh").addEventListener("click", () => {
   const r = $("#refresh");
   if (r.classList.contains("busy")) return;
-  r.classList.add("busy"); $("#refresh-label").textContent = "Scanning…";
-  setTimeout(() => { r.classList.remove("busy"); $("#refresh-label").textContent = "Updated just now"; }, 2200);
+  r.classList.add("busy"); $("#refresh-label").textContent = $("#fresh").textContent = "Scanning…";
+  setTimeout(() => { r.classList.remove("busy"); $("#refresh-label").textContent = $("#fresh").textContent = "Updated just now"; }, 2200);
 });
 
 render();
