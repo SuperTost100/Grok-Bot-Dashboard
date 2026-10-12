@@ -145,10 +145,10 @@ The page shows what's overdue, due or with a deadline in the next 7 days, plus a
 
 ## Bot settings and scans
 
-| Call                     | Body                                                                                   | Effect                                                                                                                                       |
-| ------------------------ | -------------------------------------------------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------- |
-| `POST /api/bot/register` | `{"name": "Dashboard", "color": "#d9822b", "webhookUrl": "https://..."}`, all optional | Sets how the bot appears, and the webhook the dashboard calls when actions are waiting or the user presses refresh. `""` clears the webhook. |
-| `POST /api/bot/scan`     | `{}`                                                                                   | Marks a finished scan. The page shows "Updated N min ago".                                                                                   |
+| Call                     | Body                                                                                                          | Effect                                                                                                                                                                                       |
+| ------------------------ | ------------------------------------------------------------------------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `POST /api/bot/register` | `{"name": "Dashboard", "color": "#d9822b", "webhookUrl": "https://...", "webhookToken": "..."}`, all optional | Sets how the bot appears, and the webhook the dashboard calls when actions are waiting or the user presses refresh, with `webhookToken` sent as `Authorization: Bearer`. `""` clears either. |
+| `POST /api/bot/scan`     | `{}`                                                                                                          | Marks a finished scan. The page shows "Updated N min ago".                                                                                                                                   |
 
 The webhook receives a `POST` with `{"source": "grok-bot-dashboard", "reason": "actions" or "refresh", "message": "..."}`, at most once every 20 seconds per bot.
 

@@ -56,8 +56,16 @@ Close it again:
 3. Send the new bot this message:
 
    ```text
-   Set yourself up: 1) Run ~/.local/bin/grokdash help on my computer to check you can reach the dashboard. 2) Create a routine that does a full run every 30 minutes from 7:00 to 23:00 in my time zone. 3) Create a routine triggered by a webhook that runs step 1 of your instructions, and a full run when grokdash actions says refreshRequested is true. Register its URL with: grokdash register '{"name":"Dashboard","webhookUrl":"THE_URL"}' 4) Do a first full run now.
+   Set yourself up: 1) Run ~/.local/bin/grokdash help on my computer to check you can reach the dashboard. 2) Create a routine that does a full run every 30 minutes from 7:00 to 23:00 in my time zone. 3) Create a routine triggered by a webhook that runs step 1 of your instructions, and a full run when grokdash actions says refreshRequested is true. 4) Do a first full run now.
    ```
+
+4. Open the webhook routine's panel in Grok Bot. It shows a "POST to" URL and a key. Click each field to select it, copy it, and send both to the bot:
+
+   ```text
+   Register your webhook with grokdash register, using webhookUrl = PASTE_URL and webhookToken = PASTE_KEY (the key only, without Bearer).
+   ```
+
+   The bot can't read these values itself. The dashboard sends the key as `Authorization: Bearer` when it calls the routine.
 
 Without the webhook routine, taps on the dashboard wait for the next 30-minute run. The page footer says whether a webhook is set.
 
