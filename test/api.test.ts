@@ -45,7 +45,7 @@ async function startServer() {
 
 let s: Awaited<ReturnType<typeof startServer>>;
 before(async () => { s = await startServer(); });
-after(() => { s.server.close(); s.store.close(); });
+after(() => { s.server.closeAllConnections(); s.server.close(); s.store.close(); });
 
 type Who = "owner" | "stranger" | "nobody" | { bot: string };
 
@@ -564,6 +564,9 @@ test("direct Todoist: a double tap closes the task once", async () => {
   const fake = (async (input: URL | RequestInfo) => {
     const u = new URL(String(input));
     if (u.pathname.endsWith("/close")) closes++;
+    if (u.pathname.endsWith("/tasks") || u.pathname.endsWith("/projects")) {
+      return new Response(JSON.stringify({ results: [], next_cursor: null }), { headers: { "content-type": "application/json" } });
+    }
     return new Response(null, { status: 204 });
   }) as typeof fetch;
   const store = new Store(":memory:", () => clock);
@@ -571,9 +574,81 @@ test("direct Todoist: a double tap closes the task once", async () => {
   await new Promise<void>((r) => server.listen(0, "127.0.0.1", r));
   const base = `http://127.0.0.1:${(server.address() as AddressInfo).port}`;
   const post = (body: unknown) => fetch(base + "/api/ui/todos/complete", { method: "POST", headers: { "Content-Type": "application/json", "Tailscale-User-Login": OWNER }, body: JSON.stringify(body) });
-  const [a, b] = await Promise.all([post({ bot: "todoist", id: "42" }), post({ bot: "todoist", id: "42" })]);
-  assert.deepEqual([a.status, b.status].sort(), [200, 409]);
-  assert.equal(closes, 1);
-  server.close();
-  store.close();
+  try {
+    const [a, b] = await Promise.all([post({ bot: "todoist", id: "42" }), post({ bot: "todoist", id: "42" })]);
+    assert.deepEqual([a.status, b.status].sort(), [200, 409]);
+    assert.equal(closes, 1);
+  } finally {
+    server.closeAllConnections();
+    server.close();
+    store.close();
+  }
+});
+
+// ---------- Round 3 review ----------
+
+test("a late success doesn't reopen a card the user dismissed after the action went quiet", async () => {
+  const { body } = await bot("POST", "/api/bot/items", { key: "late-dismiss", kind: "reminder", title: "Late" });
+  await act(body.id, { type: "write", text: "go" });
+  clock += 6000;
+  const [a] = (await bot("GET", "/api/bot/actions")).body.actions;
+  clock += 21 * 60_000;
+  s.store.expireClaims(20 * 60_000);
+  await act(body.id, { type: "dismiss" });
+  await bot("POST", `/api/bot/actions/${a.id}`, { ok: true, result: "Done late" });
+  assert.equal(s.store.getItem(body.id)!.status, "closed");
+  assert.equal(s.store.getItem(body.id)!.closedReason, "dismissed");
+});
+
+test("undo on a question about a read summary that got news in the meantime shows it as unread", async () => {
+  const { body } = await bot("POST", "/api/bot/items", { key: "wa:news-undo", section: "catchup", title: "Group", body: "old" });
+  await act(body.id, { type: "read" });
+  const tap = await act(body.id, { type: "write", text: "what happened?" });
+  await bot("POST", "/api/bot/items", { key: "wa:news-undo", section: "catchup", title: "Group", body: "new stuff" });
+  await call("POST", `/api/ui/actions/${tap.body.action.id}/undo`, {});
+  assert.equal(s.store.getItem(body.id)!.status, "open");
+});
+
+test("an event ending exactly at the window's first midnight is refused, not duplicated", async () => {
+  const r = await bot("PUT", "/api/bot/agenda", { from: "2030-02-02", events: [{ title: "Ends at midnight", start: "2030-02-01T22:00", end: "2030-02-02T00:00" }] }, "edge");
+  assert.equal(r.status, 400);
+});
+
+test("pressing refresh again renews the retry window", async () => {
+  await bot("POST", "/api/bot/register", { webhookUrl: "https://example.com/r" }, "refresher");
+  await call("POST", "/api/ui/refresh", {});
+  clock += 20 * 60_000;
+  assert.ok(!s.store.botsWithPendingRefresh(15 * 60_000).includes("refresher"));
+  await call("POST", "/api/ui/refresh", {});
+  assert.ok(s.store.botsWithPendingRefresh(15 * 60_000).includes("refresher"));
+});
+
+test("direct Todoist: the next occurrence of a recurring task can be completed", async () => {
+  let due = "2026-10-12";
+  let closes = 0;
+  const fake = (async (input: URL | RequestInfo) => {
+    const u = new URL(String(input));
+    const json = (v: unknown) => new Response(JSON.stringify(v), { headers: { "content-type": "application/json" } });
+    if (u.pathname.endsWith("/close")) { closes++; return new Response(null, { status: 204 }); }
+    if (u.pathname.endsWith("/projects")) return json({ results: [], next_cursor: null });
+    return json({ results: [{ id: "77", content: "Daily", priority: 1, project_id: "p", due: { date: due, is_recurring: true }, deadline: null }], next_cursor: null });
+  }) as typeof fetch;
+  const store = new Store(":memory:", () => clock);
+  const todoist = new Todoist("tok", "", "Europe/Rome", fake);
+  const server = http.createServer(createApp({ config, store, todoist, log: () => {} }));
+  await new Promise<void>((r) => server.listen(0, "127.0.0.1", r));
+  const base = `http://127.0.0.1:${(server.address() as AddressInfo).port}`;
+  const post = (body: unknown) => fetch(base + "/api/ui/todos/complete", { method: "POST", headers: { "Content-Type": "application/json", "Tailscale-User-Login": OWNER }, body: JSON.stringify(body) });
+  try {
+    assert.equal((await post({ bot: "todoist", id: "77" })).status, 200);
+    assert.equal((await post({ bot: "todoist", id: "77" })).status, 409, "same occurrence");
+    due = "2026-10-13";
+    todoist.cache = null;
+    assert.equal((await post({ bot: "todoist", id: "77" })).status, 200, "next occurrence");
+    assert.equal(closes, 2);
+  } finally {
+    server.closeAllConnections();
+    server.close();
+    store.close();
+  }
 });

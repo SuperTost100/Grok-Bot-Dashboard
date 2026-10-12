@@ -28,6 +28,7 @@ const ui = {
 let seq = 0;
 let shown = 0;
 let mutating = 0;
+let lastMutation = 0;
 
 async function api(method, path, body) {
   const res = await fetch(path, {
@@ -60,10 +61,12 @@ async function load() {
 
 async function run(method, path, body) {
   mutating++;
+  const mine = ++lastMutation;
   let failed = false;
   try {
     const data = await api(method, path, body);
-    if (data.state) applyState(++seq, data.state);
+    // Only the newest tap's answer is shown; an older tap finishing late would show stale state.
+    if (data.state && mine === lastMutation) applyState(++seq, data.state);
     return data;
   } catch (err) {
     failed = true;
@@ -71,8 +74,8 @@ async function run(method, path, body) {
     return null;
   } finally {
     mutating--;
-    // After a refused tap, fetch the real state so the page shows what the server has.
-    if (failed && !mutating) load();
+    // After a refused tap, or when taps overlapped, fetch the real state once they've all settled.
+    if (!mutating && (failed || mine !== lastMutation)) load();
   }
 }
 
@@ -245,7 +248,7 @@ function cardActions(c) {
   const dismiss = `<button class="btn ghost" data-act="dismiss" data-id="${id}" aria-label="Dismiss" title="Dismiss">${icon("x")}</button>`;
   const end = `<span class="end">${write}${snooze}${dismiss}</span>`;
   if (ui.editing.has(id)) {
-    return `<button class="btn primary" data-act="send-edited" data-id="${id}">${icon("send")}Send to ${esc(c.draft.to)}</button>
+    return `<button class="btn primary" data-act="send-edited" data-id="${id}">${icon("send")}Send to ${esc(short(c.draft.to))}</button>
       <button class="btn" data-act="cancel-edit" data-id="${id}">Cancel</button>`;
   }
   if (c.kind === "choice") {
@@ -254,7 +257,7 @@ function cardActions(c) {
     ).join("") + end;
   }
   if (c.kind === "draft") {
-    return `<button class="btn primary" data-act="send" data-id="${id}">${icon("send")}Send to ${esc(c.draft.to)}</button>
+    return `<button class="btn primary" data-act="send" data-id="${id}">${icon("send")}Send to ${esc(short(c.draft.to))}</button>
       <button class="btn" data-act="edit" data-id="${id}">${icon("pencil")}Edit</button>${end}`;
   }
   return `<button class="btn primary" data-act="done" data-id="${id}">${icon("check")}Mark done</button>${end}`;
@@ -262,14 +265,23 @@ function cardActions(c) {
 
 /**
  * What an answer will make the bot do, shown when the instruction isn't just the button's words
- * with more detail. That's the case worth a second look before tapping.
+ * with a little more detail. That's the case worth a second look before tapping, so it shows on collapsed cards too.
  */
 function answersList(c) {
   if (c.kind !== "choice") return "";
-  const rows = c.options.filter((o) => o.instruction && !o.instruction.toLowerCase().includes(o.label.trim().toLowerCase()));
+  const rows = c.options.filter((o) => {
+    if (!o.instruction) return false;
+    const i = o.instruction.trim().toLowerCase();
+    const l = o.label.trim().toLowerCase();
+    // "Vote Tuesday" doing "Vote Tuesday in the Lab group poll" needs no explanation; anything else does.
+    return !i.startsWith(l) || i.length > l.length + 40;
+  });
   if (!rows.length) return "";
   return `<dl class="answers">${rows.map((o) => `<dt>${esc(o.label)}</dt><dd>${esc(o.instruction)}</dd>`).join("")}</dl>`;
 }
+
+/** Names in buttons are cut to fit a phone; the card shows the full one. */
+const short = (name, max = 22) => (name.length > max ? name.slice(0, max - 1).trimEnd() + "…" : name);
 
 /** The row that replaces a card while the bot works on it, with Undo during the undo window. */
 function pendingRow(c) {
@@ -300,7 +312,7 @@ function renderCard(c) {
   const draft = c.kind === "draft" && c.draft
     ? ui.editing.has(c.id)
       ? `<label class="sr-only" for="${did}">Edit the reply</label><textarea class="draft-edit" id="${did}" maxlength="4000">${esc(ui.text.get(did) ?? c.draft.text)}</textarea>`
-      : `<div class="draft-label">Draft reply${c.draft.channel ? ` on ${esc(c.draft.channel)}` : ""}</div><div class="draft">${esc(c.draft.text)}</div>`
+      : `<div class="draft-label">Draft reply to ${esc(c.draft.to)}${c.draft.channel ? ` on ${esc(c.draft.channel)}` : ""}</div><div class="draft">${esc(c.draft.text)}</div>`
     : "";
   const snooze = ui.snoozing.has(c.id)
     ? `<div class="menu"><span class="label">Snooze until</span>${ui.state.snoozeChoices.map((s) => `<button class="btn suggest" data-act="snooze-to" data-id="${c.id}" data-until="${s.until}">${esc(s.label)}</button>`).join("")}</div>`
@@ -310,7 +322,8 @@ function renderCard(c) {
     <div class="meta">${logo(c)}${source}<time class="num" title="${esc(whenFull(c.updatedAt))}">${when(c.updatedAt)}</time></div>
     ${c.urgent ? `<div class="flag-row"><span class="flag">Urgent · ${esc(c.urgent)}</span></div>` : ""}
     <h3 id="t-${c.id}"><button class="title-btn" data-act="expand" data-id="${c.id}" aria-expanded="${open}">${esc(c.title)}${icon("chev", "i more")}</button></h3>
-    <div class="detail">${c.body ? `<p>${esc(c.body)}</p>` : ""}${c.context ? `<p class="context">${esc(c.context)}</p>` : ""}${answersList(c)}</div>
+    <div class="detail">${c.body ? `<p>${esc(c.body)}</p>` : ""}${c.context ? `<p class="context">${esc(c.context)}</p>` : ""}</div>
+    ${answersList(c)}
     ${draft}
     ${c.error ? `<div class="error">${esc(c.error)}</div>` : ""}
     <div class="actions">${cardActions(c)}</div>
@@ -437,7 +450,11 @@ function renderCatch() {
 }
 
 let archiveSeq = 0;
+let archiveLoading = false;
 async function loadArchive(append = false) {
+  if (append && archiveLoading) return;
+  if (!append) ui.archive = { items: [], more: false, q: ui.archive.q };
+  archiveLoading = true;
   const seqId = ++archiveSeq;
   const q = $("#arch-q").value.trim();
   const offset = append ? ui.archive.items.length : 0;
@@ -445,8 +462,10 @@ async function loadArchive(append = false) {
     const res = await api("GET", `/api/ui/archive?q=${encodeURIComponent(q)}&offset=${offset}&bot=${encodeURIComponent(ui.filter)}`);
     if (seqId !== archiveSeq) return;
     ui.archive = { items: append ? [...ui.archive.items, ...res.items] : res.items, more: res.more, q };
+    archiveLoading = false;
     renderArchive();
   } catch (err) {
+    if (seqId === archiveSeq) archiveLoading = false;
     $("#archive").innerHTML = `<div class="empty-row"><strong>Couldn't load the archive.</strong> ${esc(err.message)}</div>`;
   }
 }

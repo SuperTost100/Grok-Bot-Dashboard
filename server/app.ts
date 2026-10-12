@@ -5,7 +5,7 @@ import crypto from "node:crypto";
 import type { Config } from "./config.ts";
 import type { Store, Item, ItemInput, Kind, Section, Option, Draft, Action } from "./store.ts";
 import { Todoist, pickTodos } from "./todoist.ts";
-import { addDays, localStamp, parseWhen, snoozeChoices, zonedToEpoch } from "./time.ts";
+import { addDays, localStamp, overlaps, parseWhen, snoozeChoices, zonedToEpoch } from "./time.ts";
 import { checkWebhookUrl } from "./webhook.ts";
 
 // Errors with a status code become JSON error responses; anything else is a 500.
@@ -266,9 +266,10 @@ export function createApp(deps: AppDeps) {
   }
 
   // Todoist calls for the same task run one after another, so a fast Undo can't overtake its completion.
-  // closedHere remembers what this dashboard closed, so a double tap doesn't send two closes.
+  // closedHere remembers which occurrence (task id and due date) this dashboard closed, so a double tap
+  // doesn't send two closes, while the next occurrence of a recurring task can still be completed.
   const todoLocks = new Map<string, Promise<unknown>>();
-  const closedHere = new Set<string>();
+  const closedHere = new Map<string, string>();
   function serial<T>(key: string, fn: () => Promise<T>): Promise<T> {
     const prev = todoLocks.get(key) ?? Promise.resolve();
     const next = prev.catch(() => {}).then(fn);
@@ -285,9 +286,11 @@ export function createApp(deps: AppDeps) {
           await todoist.reopen(id);
           closedHere.delete(id);
         } else {
-          if (closedHere.has(id)) throw conflict("This to-do is already completed.");
+          // The due date tells occurrences of a recurring task apart. If Todoist can't list right now, still close.
+          const due = await todoist.list().then((all) => all.find((t) => t.id === id)?.due ?? "", () => "");
+          if (closedHere.get(id) === due) throw conflict("This to-do is already completed.");
           await todoist.close(id);
-          closedHere.add(id);
+          closedHere.set(id, due);
         }
       });
       return { ok: true };
@@ -430,7 +433,7 @@ export function createApp(deps: AppDeps) {
       const start = when(e.start, `events[${i}].start`, tz, true);
       const end = when(e.end, `events[${i}].end`, tz, false);
       if (end && end < start) throw bad(`events[${i}] ends before it starts`);
-      if (!(start < to && (end || start) >= from)) {
+      if (!overlaps(start, end, from, to)) {
         throw bad(`events[${i}] (${start}) is outside ${from} to ${to}. Send only events in that window, or widen "from" and "to".`);
       }
       return {
