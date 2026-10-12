@@ -1,0 +1,21 @@
+{
+  "name": "grok-bot-dashboard",
+  "version": "0.1.0",
+  "private": true,
+  "description": "A self-hosted dashboard for your Grok Bots: what needs you, to-dos, agenda and catch-up in one page.",
+  "license": "MIT",
+  "type": "module",
+  "engines": {
+    "node": ">=24"
+  },
+  "scripts": {
+    "start": "node --env-file-if-exists=.env server/main.ts",
+    "dev": "AUTH_MODE=none BOT_TOKEN=dev-token node --env-file-if-exists=.env --watch server/main.ts",
+    "test": "node --test test/*.test.ts",
+    "check": "tsc --noEmit"
+  },
+  "devDependencies": {
+    "@types/node": "^24.19.2",
+    "typescript": "^7.0.2"
+  }
+}
