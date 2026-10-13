@@ -11,7 +11,7 @@ const OWNER = "owner@example.com";
 const clock = Date.parse("2026-10-13T09:00:00Z");
 const config: Config = {
   host: "127.0.0.1", port: 0, dataDir: "", authMode: "tailscale", ownerLogin: OWNER, botToken: "test-token-123",
-  todoistToken: "", todoistFilter: "", areadidatticaUrl: "http://areadidattica:8788", areadidatticaToken: "secret",
+  todoistToken: "", todoistFilter: "", areadidatticaUrl: "http://areadidattica:8789", areadidatticaToken: "secret",
   undoSeconds: 5, archiveDays: 30, tz: "Europe/Rome", webhookAllowPrivate: false, backupDays: 0,
   publicDir: new URL("../public", import.meta.url).pathname.replace(/\/$/, ""),
 };
@@ -279,19 +279,20 @@ test("PoliTO: overlapping checks share one run", async () => {
   }
 });
 
-test("PoliTO: a table in an avviso flows as one paragraph, a short list keeps its lines", () => {
-  const cells = Array.from({ length: 20 }, (_, i) => `30${i}\n\nLunedì`).join("\n\n");
-  const table = politoCard(avviso(1, `Calendario degli orali.\n\nMATRICOLA\n\nGiorno\n\n${cells}\n\nChi non può presentarsi mi scriva entro venerdì.`), "Europe/Rome");
-  assert.match(table.body!, /^MATRICOLA Giorno 300 Lunedì 301 Lunedì/);
-  assert.match(table.body!, /3019 Lunedì\n\nChi non può presentarsi mi scriva entro venerdì\.$/);
-  const list = politoCard(avviso(2, "Materiale:\n- slide\n- esercizi"), "Europe/Rome");
-  assert.equal(list.body, "- slide\n- esercizi");
+test("PoliTO: a table keeps one row per line and never becomes the title", () => {
+  const rows = ["MATRICOLA\tGiorno\tOra", ...Array.from({ length: 80 }, (_, i) => `${300000 + i}\tLunedì 14\t16:30`)].join("\n");
+  const c = politoCard(avviso(1, `${rows}\n\nChi non può presentarsi mi scriva.`), "Europe/Rome");
+  assert.equal(c.title, "Chi non può presentarsi mi scriva.");
+  const intro = politoCard(avviso(2, `Buongiorno,\n\necco il calendario degli orali.\n\n${rows}`), "Europe/Rome");
+  assert.equal(intro.title, "ecco il calendario degli orali.");
+  assert.ok(intro.body!.startsWith("MATRICOLA\tGiorno\tOra\n300000\tLunedì 14\t16:30"));
+  assert.ok(intro.body!.endsWith("300079\tLunedì 14\t16:30"), "all 80 rows, past a bot's 2000 characters");
 });
 
 test("PoliTO: long avvisi fit a card", () => {
-  const c = politoCard(avviso(1, "x".repeat(150) + " fine\n" + "y".repeat(3000)), "Europe/Rome");
+  const c = politoCard(avviso(1, "x".repeat(150) + " fine\n" + "y".repeat(12_000)), "Europe/Rome");
   assert.ok(c.title.length <= 141 && c.title.endsWith("…"));
-  assert.equal(c.body!.length, 2000);
+  assert.equal(c.body!.length, 10_000);
 });
 
 test("PoliTO turned off: Refresh doesn't wait on it forever", async () => {
@@ -314,7 +315,7 @@ test("PoliTO turned off: Refresh doesn't wait on it forever", async () => {
 
 test("config: AREADIDATTICA_URL needs a token and a real address", () => {
   const base = { OWNER_LOGIN: OWNER, BOT_TOKEN: "12345678", TZ: "Europe/Rome" };
-  assert.throws(() => loadConfig({ ...base, AREADIDATTICA_URL: "http://areadidattica:8788" }), /AREADIDATTICA_TOKEN/);
-  assert.throws(() => loadConfig({ ...base, AREADIDATTICA_URL: "areadidattica:8788", AREADIDATTICA_TOKEN: "x" }), /http/);
+  assert.throws(() => loadConfig({ ...base, AREADIDATTICA_URL: "http://areadidattica:8789" }), /AREADIDATTICA_TOKEN/);
+  assert.throws(() => loadConfig({ ...base, AREADIDATTICA_URL: "areadidattica:8789", AREADIDATTICA_TOKEN: "x" }), /http/);
   assert.equal(loadConfig(base).areadidatticaUrl, "");
 });

@@ -77,34 +77,19 @@ const GREETING = /^(buongiorno|buonasera|salve|ciao|gentil[ei]|car[eio]|egregi|d
  * The body is what follows that line, or the whole text when the title had to be cut.
  */
 function split(text: string): { title: string; body: string } {
-  const line = text.split("\n").map((l) => l.trim()).find((l) => l && !(l.length < 40 && GREETING.test(l))) ?? "";
+  // Table rows (tab-separated cells) never make a title.
+  const line = text.split("\n").map((l) => l.trim()).find((l) => l && !l.includes("\t") && !(l.length < 40 && GREETING.test(l))) ?? "";
   if (!line) return { title: "", body: text.trim() };
   if (line.length <= 140) return { title: line, body: text.slice(text.indexOf(line) + line.length).trim() };
   const cut = line.slice(0, 140);
   return { title: cut.slice(0, cut.lastIndexOf(" ") > 80 ? cut.lastIndexOf(" ") : 139).trimEnd() + "…", body: text.trim() };
 }
 
-/** Tables come through one cell per line. In a long avviso, runs of short lines become one paragraph. */
-function flattenTables(text: string): string {
-  const lines = text.split("\n").map((l) => l.trim()).filter(Boolean);
-  if (lines.length <= 15) return text;
-  const out: string[] = [];
-  let run: string[] = [];
-  for (const l of lines) {
-    if (l.length < 40) { run.push(l); continue; }
-    if (run.length) out.push(run.join(" "));
-    run = [];
-    out.push(l);
-  }
-  if (run.length) out.push(run.join(" "));
-  return out.join("\n\n");
-}
-
 export function politoCard(p: PolitoItem, tz: string): ItemInput {
   const sent = new Date(p.sentAt);
-  const { title, body: full } = split(p.text);
-  const rest = flattenTables(full);
-  const body = rest.length > 2000 ? rest.slice(0, 1999).trimEnd() + "…" : rest;
+  const { title, body: rest } = split(p.text);
+  // Longer than a bot's 2000 characters: an exam timetable shouldn't lose its last rows.
+  const body = rest.length > 10_000 ? rest.slice(0, 9999).trimEnd() + "…" : rest;
   return {
     bot: POLITO_BOT,
     key: p.id,
@@ -133,7 +118,7 @@ export interface PolitoSync {
 }
 
 export function createPolitoSync(polito: Polito, store: Store, tz: string, log: (msg: string) => void): PolitoSync {
-  store.updateBot(POLITO_BOT, { name: "PoliTO", color: "#1f4e8c" });
+  store.updateBot(POLITO_BOT, { name: "PoliTO", color: "#014271" });
   let running: Promise<void> | null = null;
   let lastError = "";
 
