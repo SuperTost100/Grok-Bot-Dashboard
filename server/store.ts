@@ -424,6 +424,10 @@ export class Store {
       .map((r) => String(r.slug));
   }
 
+  clearRefresh(slug: string) {
+    this.db.prepare("UPDATE bots SET refresh_requested_at = NULL WHERE slug = ?").run(slug);
+  }
+
   requestRefresh(slug?: string): Bot[] {
     if (slug) this.db.prepare("UPDATE bots SET refresh_requested_at = ? WHERE slug = ?").run(this.now(), slug);
     else this.db.prepare("UPDATE bots SET refresh_requested_at = ?").run(this.now());
@@ -577,7 +581,7 @@ export class Store {
          WHERE status IN ('open', 'pending')
             OR (status = 'closed' AND closed_reason = 'action' AND closed_at >= ? AND acked_at IS NULL)
             OR (section = 'catchup' AND status = 'closed' AND closed_reason = 'read' AND closed_at >= ?)
-         ORDER BY (urgent != '') DESC, updated_at DESC`,
+         ORDER BY (urgent != '') DESC, updated_at DESC, id DESC`,
       )
       .all(since, since)
       .map((r) => toItem(r as Row));

@@ -26,6 +26,8 @@ const config: Config = {
   botToken: TOKEN,
   todoistToken: "",
   todoistFilter: "",
+  areadidatticaUrl: "",
+  areadidatticaToken: "",
   undoSeconds: 5,
   archiveDays: 30,
   tz: "Europe/Rome",

@@ -16,7 +16,8 @@ It runs on your own computer and opens only on your Tailscale network, for your 
 1. **Collects what needs you.** Your bots post cards: a question with suggested answers, a reply they drafted, a yes/no approval, a reminder. Urgent ones sort first with their deadline.
 2. **Lets you answer in one tap.** Pick an answer, send or edit a draft, snooze, or write the bot an instruction. Anything that reaches other people waits 5 seconds with Undo, then goes to the bot that posted the card.
 3. **Shows your day.** To-dos straight from Todoist (tick them off on the page), today's and tomorrow's agenda, and one-paragraph summaries of busy group chats and mailboxes.
-4. **Keeps a 30-day archive.** Everything you answered, dismissed or snoozed, searchable, with what the bot did about it.
+4. **Brings in PoliTO avvisi.** Optional: unread course avvisi and school messages from the Politecnico di Torino become cards, and marking one read here marks it read in the PoliTO app too.
+5. **Keeps a 30-day archive.** Everything you answered, dismissed or snoozed, searchable, with what the bot did about it.
 
 On a phone, add it to your home screen and it opens full screen like an app.
 
@@ -32,6 +33,7 @@ A Grok Bot named "Dashboard" scans your WhatsApp, mail and calendar on a schedul
 - [Tailscale](https://tailscale.com) on the machine that runs the dashboard and on the devices you open it from.
 - The Grok Bot desktop app on a computer in the same tailnet. Your bots run their commands there.
 - Optional: a Todoist API token. Without one, a bot sends your to-dos instead.
+- Optional: [areadidattica](https://github.com/SuperTost100/areadidattica-cli) running on the same machine, for PoliTO avvisi.
 
 ## Start
 
@@ -95,6 +97,8 @@ Set these in `.env`. The full list with comments is in [`.env.example`](.env.exa
 | `TZ`                    | no       | system zone | Time zone for "today", the agenda and to-do dates                        |
 | `TODOIST_TOKEN`         | no       |             | Read and complete to-dos in Todoist directly                             |
 | `TODOIST_FILTER`        | no       |             | Show only tasks matching a Todoist filter, like `today \| overdue \| p1` |
+| `AREADIDATTICA_URL`     | no       |             | Where areadidattica answers; turns on PoliTO avvisi                      |
+| `AREADIDATTICA_TOKEN`   | with URL |             | The `API_TOKEN` from areadidattica's `.env`                              |
 | `UNDO_SECONDS`          | no       | `5`         | How long a tap waits before it goes to the bot                           |
 | `ARCHIVE_DAYS`          | no       | `30`        | How long closed cards stay in the archive                                |
 | `PORT`                  | no       | `8787`      | Port on `127.0.0.1`                                                      |
@@ -102,12 +106,34 @@ Set these in `.env`. The full list with comments is in [`.env.example`](.env.exa
 | `WEBHOOK_ALLOW_PRIVATE` | no       | `0`         | `1` lets bots register webhooks on your LAN or tailnet                   |
 | `AUTH_MODE`             | no       | `tailscale` | `none` turns off the owner check. Only for local development.            |
 
+## PoliTO avvisi
+
+Course avvisi from the Politecnico di Torino don't arrive by email, so the dashboard reads them from [areadidattica](https://github.com/SuperTost100/areadidattica-cli), a small local service over the API behind the official PoliTO Students app. No Grok Bot is involved, so it costs nothing from your Grok allowance.
+
+- **When it checks.** At the Dashboard bot's scheduled run times (every 2 hours when no bot has sent its schedule), when you press Refresh, and once when the server starts.
+- **What becomes a card.** Every unread avviso and school message, under its course name, with the avviso's first real line as the title. Emergency messages are marked urgent. PoliTO's deadlines for the next 30 days go on the agenda.
+- **Marking read.** "Mark as read" or dismiss marks it read on PoliTO, so the phone app stops counting it. If PoliTO can't be reached, the next check tries again. Avvisi you read in the phone app close here at the next check. Snooze changes nothing on PoliTO.
+- **No answers.** PoliTO cards have no Write button, because no bot would receive the message.
+
+When a check fails, the page says why in the banner under the header. The cards already on the page stay.
+
+To set it up, run areadidattica with Docker on the same machine (see its README), then add this to the dashboard's `.env` and run `docker compose up -d` again:
+
+```bash
+AREADIDATTICA_URL=http://areadidattica:8788
+AREADIDATTICA_TOKEN=<API_TOKEN from areadidattica's .env>
+COMPOSE_FILE=compose.yaml:compose.polito.yaml
+```
+
+`compose.polito.yaml` puts the dashboard on areadidattica's Compose network, which is named after the folder areadidattica runs from. The default, `areadidattica_default`, fits a folder called `areadidattica`; for another folder, set `AREADIDATTICA_NETWORK=<folder>_default`. Without Docker, use `AREADIDATTICA_URL=http://127.0.0.1:8788` and skip `COMPOSE_FILE`.
+
 ## Your data
 
 Everything lives in one SQLite file, `data/dashboard.db`, readable by your user only. These are the only things the server sends off the machine:
 
 - **Webhook calls.** When you tap or press refresh, the server calls the webhook URL each bot registered, with no card content in it.
 - **Todoist.** With `TODOIST_TOKEN` set, it reads your active tasks and completes or reopens the ones you tick.
+- **areadidattica.** With `AREADIDATTICA_URL` set, it asks that local service for unread avvisi and deadlines, and tells it which ones you marked read. areadidattica is the one that talks to PoliTO.
 
 The bots read your chats and mail inside Grok Bot, as they already do, and post only the summaries you see.
 

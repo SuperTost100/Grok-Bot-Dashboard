@@ -7,6 +7,7 @@ import type { Store, Item, ItemInput, Kind, Section, Option, Draft, Action, Bot 
 import { Todoist, pickTodos } from "./todoist.ts";
 import { addDays, lastSlot, localStamp, overlaps, parseWhen, snoozeChoices, zonedToEpoch } from "./time.ts";
 import { checkWebhookUrl } from "./webhook.ts";
+import { POLITO_BOT, type PolitoSync } from "./polito.ts";
 
 // Errors with a status code become JSON error responses; anything else is a 500.
 export class HttpError extends Error {
@@ -136,6 +137,7 @@ export interface AppDeps {
   config: Config;
   store: Store;
   todoist?: Todoist | null;
+  polito?: PolitoSync | null;
   notify?: (bot: string, reason: "actions" | "refresh") => void;
   /** The last webhook ping to a bot and whether its routine accepted it. */
   lastPing?: (bot: string) => { at: number; ok: boolean } | undefined;
@@ -150,6 +152,7 @@ export const OFFLINE_AFTER_MS = 20 * 60_000;
 export function createApp(deps: AppDeps) {
   const { config, store } = deps;
   const todoist = deps.todoist ?? null;
+  const polito = deps.polito ?? null;
   const tz = config.tz;
   const notify = deps.notify ?? (() => {});
   const log = deps.log ?? ((m: string) => console.log(m));
@@ -212,6 +215,7 @@ export function createApp(deps: AppDeps) {
       catchup: items.filter((i) => i.section === "catchup"),
       todos: await todosState(),
       agenda: store.listEvents(day, addDays(day, 2)),
+      polito: polito ? { error: polito.error() } : null,
     };
   }
 
@@ -227,9 +231,16 @@ export function createApp(deps: AppDeps) {
     if (a?.status === "claimed") throw conflict(`${item.bot} is already doing "${a.label}". Wait for it to finish.`);
   }
 
+  /** Closing a PoliTO card here marks it read there too, so the phone app stops counting it. */
+  function readOnPolito(item: Item) {
+    if (polito && item.bot === POLITO_BOT && item.key) void polito.markRead(item.key);
+  }
+
   async function act(item: Item, b: Record<string, unknown>) {
     const type = text(b.type, "type", 20, true);
     const outward = (fields: { type: "choose" | "send" | "write"; label: string; instruction?: string; text?: string }) => {
+      // No bot stands behind PoliTO cards, so there's nobody to send an answer to.
+      if (item.bot === POLITO_BOT) throw bad("PoliTO cards can only be marked as read, snoozed or dismissed.");
       if (Number(b.rev) !== item.rev) {
         throw conflict("This card changed since you opened it. Check it again before answering.");
       }
@@ -259,9 +270,11 @@ export function createApp(deps: AppDeps) {
       }
       case "done":
         freeFromBot(item);
-        return { item: store.closeItem(item.id, "done", "Marked done") };
+        readOnPolito(item);
+        return { item: store.closeItem(item.id, "done", item.bot === POLITO_BOT ? "Read" : "Marked done") };
       case "dismiss":
         freeFromBot(item);
+        readOnPolito(item);
         return { item: store.closeItem(item.id, "dismissed", "Dismissed") };
       case "read":
         if (item.section !== "catchup") throw bad("Only catch-up summaries can be marked as read.");
@@ -571,6 +584,7 @@ export function createApp(deps: AppDeps) {
   route("POST", "/api/ui/refresh", "ui", async () => {
     const bots = store.requestRefresh();
     for (const bot of bots) if (bot.webhookUrl) notify(bot.slug, "refresh");
+    void polito?.sync();
     return { ok: true, webhooks: bots.filter((x) => x.webhookUrl).length, state: await state() };
   });
 
