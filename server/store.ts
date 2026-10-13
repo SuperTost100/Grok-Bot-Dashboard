@@ -424,8 +424,9 @@ export class Store {
       .map((r) => String(r.slug));
   }
 
-  requestRefresh(): Bot[] {
-    this.db.prepare("UPDATE bots SET refresh_requested_at = ?").run(this.now());
+  requestRefresh(slug?: string): Bot[] {
+    if (slug) this.db.prepare("UPDATE bots SET refresh_requested_at = ? WHERE slug = ?").run(this.now(), slug);
+    else this.db.prepare("UPDATE bots SET refresh_requested_at = ?").run(this.now());
     return this.listBots();
   }
 

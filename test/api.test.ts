@@ -8,7 +8,7 @@ import { createApp } from "../server/app.ts";
 import { Todoist, pickTodos } from "../server/todoist.ts";
 import { loadConfig, type Config } from "../server/config.ts";
 import { parseWhen, snoozeChoices, localStamp } from "../server/time.ts";
-import { checkWebhookUrl, isPrivateAddress, retryDue, RETRY_GAP } from "../server/webhook.ts";
+import { checkWebhookUrl, isPrivateAddress, missedRun, retryDue, RETRY_GAP } from "../server/webhook.ts";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
@@ -361,6 +361,18 @@ test("an unanswered ping is retried once, and never after the routine refused it
   assert.equal(retryDue({ at: now - RETRY_GAP / 2, ok: true }, now), false);
   assert.equal(retryDue({ at: now - RETRY_GAP - 1, ok: true }, now), true);
   assert.equal(retryDue({ at: now - 5 * RETRY_GAP, ok: false }, now), false, "a paused or offline routine is not pinged again");
+});
+
+test("a scheduled run that doesn't show up is replaced by one webhook ping", () => {
+  const at = (stamp: string) => Date.parse(stamp + "+02:00"); // Rome in October
+  const bot = { schedule: ["10:00", "12:00"], lastSeenAt: at("2026-10-13T08:07:00") };
+  const tz = "Europe/Rome";
+  assert.equal(missedRun(bot, at("2026-10-13T10:05:00"), tz), null, "a run gets 10 minutes to show up");
+  assert.equal(missedRun(bot, at("2026-10-13T10:11:00"), tz), at("2026-10-13T10:00:00"));
+  assert.equal(missedRun(bot, at("2026-10-13T12:11:00"), tz), at("2026-10-13T12:00:00"), "each missed run gets its own ping");
+  assert.equal(missedRun({ ...bot, lastSeenAt: at("2026-10-13T10:03:00") }, at("2026-10-13T10:30:00"), tz), null, "the run showed up");
+  assert.equal(missedRun(bot, at("2026-10-13T11:30:00"), tz), null, "too late to stand in for the 10:00 run");
+  assert.equal(missedRun({ ...bot, schedule: [] }, at("2026-10-13T10:30:00"), tz), null, "no schedule, nothing to miss");
 });
 
 test("webhooks: public https only, and a new URL drops the old key", async () => {

@@ -1,6 +1,7 @@
 import dns from "node:dns/promises";
 import nodeDns from "node:dns";
 import net from "node:net";
+import { lastSlot } from "./time.ts";
 
 // Bots choose their webhook URL, so the server must not let one point it at itself,
 // the local network or the tailnet. Only public https destinations are allowed by default.
@@ -92,4 +93,17 @@ export const RETRY_WINDOW = 15 * 60_000;
 
 export function retryDue(last: { at: number; ok: boolean } | undefined, now: number): boolean {
   return Boolean(last?.ok) && now - last!.at > RETRY_GAP;
+}
+
+/**
+ * A scheduled run that hasn't shown up 10 minutes after its time gets one webhook ping in its place,
+ * so a run lost to a hiccup doesn't leave the page stale until the next one. It costs what the missed run would have.
+ * Returns that run's time, or null. Only within an hour of the run, so a restarted server doesn't wake the bot for last night's.
+ */
+export const WAKE_AFTER = 10 * 60_000;
+const WAKE_WINDOW = 60 * 60_000;
+
+export function missedRun(bot: { schedule: string[]; lastSeenAt: number | null }, now: number, tz: string): number | null {
+  const slot = lastSlot(now - WAKE_AFTER, bot.schedule, tz);
+  return slot !== null && slot > (bot.lastSeenAt ?? 0) && now - slot < WAKE_WINDOW ? slot : null;
 }
