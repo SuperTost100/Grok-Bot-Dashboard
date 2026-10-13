@@ -152,15 +152,20 @@ function dayLabel(day, today) {
 const botOf = (slug) => ui.state.bots.find((b) => b.slug === slug) || { slug, name: slug, color: "#5b5a55" };
 const avatar = (slug) => {
   const b = botOf(slug);
+  // A bot that is a known app with its own icon, like PoliTO, shows that icon.
+  const icon = Object.hasOwn(BRANDS, slug) ? BRANDS[slug].img : "";
+  if (icon) return `<span class="avatar" title="${esc(b.name)}"><img src="${esc(icon)}" alt=""></span>`;
   return `<span class="avatar" data-color="${esc(b.color)}" title="${esc(b.name)} bot">${esc((b.name || "?").charAt(0).toUpperCase())}</span>`;
 };
 const visible = (item) => ui.filter === "all" || item.bot === ui.filter;
 
 /** Brand tile for where a card comes from, with the posting bot as a small badge when there are several bots. */
 function brandTile(b, extra = "") {
-  const mark = b.path
-    ? `<svg viewBox="0 0 24 24" aria-hidden="true"><path d="${b.path}"/></svg>`
-    : `<span class="letter" aria-hidden="true">${esc(b.letter)}</span>`;
+  const mark = b.img
+    ? `<img src="${esc(b.img)}" alt="">`
+    : b.path
+      ? `<svg viewBox="0 0 24 24" aria-hidden="true"><path d="${b.path}"/></svg>`
+      : `<span class="letter" aria-hidden="true">${esc(b.letter)}</span>`;
   return `<span class="logo" data-color="${esc(b.color)}" title="${esc(b.name)}">${mark}${extra}</span>`;
 }
 
@@ -168,7 +173,8 @@ function logo(item) {
   const b = brandFor(item.app, item.source) || brandFor("", item.title);
   if (!b) return avatar(item.bot);
   const bot = botOf(item.bot);
-  const badge = ui.state.bots.length > 1
+  // A source that is its own bot, like PoliTO, needs no badge saying so.
+  const badge = ui.state.bots.length > 1 && bot.name.toLowerCase() !== b.name.toLowerCase()
     ? `<span class="bot-badge" data-color="${esc(bot.color)}" title="${esc(bot.name)} bot">${esc((bot.name || "?").charAt(0).toUpperCase())}</span>`
     : "";
   return brandTile(b, badge);
@@ -315,6 +321,37 @@ function writeForm(c, placeholder) {
   return `<form class="write" data-form="${c.id}"><label class="sr-only" for="${fid}">${esc(placeholder)}</label><input id="${fid}" placeholder="${esc(placeholder)}" autocomplete="off" maxlength="2000" value="${esc(ui.text.get(fid) ?? "")}"><button class="btn primary" aria-label="Send">${icon("send")}</button></form>`;
 }
 
+/**
+ * A card body as paragraphs, with runs of tab-separated lines as a table.
+ * PoliTO avvisi carry their tables that way (one row per line, cells split by tabs).
+ */
+function richBody(text) {
+  const out = [];
+  let para = [];
+  let rows = [];
+  const flushPara = () => { if (para.length) out.push(`<p>${esc(para.join("\n").trim())}</p>`); para = []; };
+  const flushRows = () => {
+    if (rows.length >= 2) {
+      const cells = rows.map((r) => r.split("\t"));
+      // A first row with no numbers in it is a header, like "Matricola · Giorno · Ora".
+      const head = cells[0].every((c) => !/\d/.test(c)) ? cells.shift() : null;
+      const tr = (r, tag) => `<tr>${r.map((c) => `<${tag}>${esc(c)}</${tag}>`).join("")}</tr>`;
+      out.push(`<div class="table-wrap" tabindex="0"><table>${head ? `<thead>${tr(head, "th")}</thead>` : ""}<tbody>${cells.map((r) => tr(r, "td")).join("")}</tbody></table></div>`);
+    } else {
+      para.push(...rows.map((r) => r.replace(/\t/g, " ")));
+    }
+    rows = [];
+  };
+  for (const line of text.split("\n")) {
+    if (line.includes("\t")) { if (!rows.length) flushPara(); rows.push(line); continue; }
+    if (rows.length) { flushRows(); flushPara(); }
+    para.push(line);
+  }
+  flushRows();
+  flushPara();
+  return out.join("");
+}
+
 function renderCard(c) {
   const bot = botOf(c.bot).name;
   if (c.status === "closed") {
@@ -336,7 +373,7 @@ function renderCard(c) {
     <div class="meta">${logo(c)}${source}<time class="num" title="${esc(whenFull(c.updatedAt))}">${when(c.updatedAt)}</time></div>
     ${c.urgent ? `<div class="flag-row"><span class="flag">Urgent · ${esc(c.urgent)}</span></div>` : ""}
     <h3 id="t-${c.id}"><button class="title-btn" data-act="expand" data-id="${c.id}" aria-expanded="${open}">${esc(c.title)}${icon("chev", "i more")}</button></h3>
-    <div class="detail">${c.body ? `<p>${esc(c.body)}</p>` : ""}${c.context ? `<p class="context">${esc(c.context)}</p>` : ""}</div>
+    <div class="detail">${c.body ? richBody(c.body) : ""}${c.context ? `<p class="context">${esc(c.context)}</p>` : ""}</div>
     ${answersList(c)}
     ${draft}
     ${c.error ? `<div class="error">${esc(c.error)}</div>` : ""}
@@ -498,7 +535,7 @@ function renderArchive() {
         return `<details class="arch">
           <summary>${logo(a)}<div class="body"><div class="t">${esc(a.title)}</div><div class="why">${esc(why)}</div></div>${icon("chev", "i chev")}</summary>
           <div class="arch-detail">
-            ${a.source ? `<p class="context">${esc(a.source)}</p>` : ""}${a.body ? `<p>${esc(a.body)}</p>` : ""}${a.context ? `<p class="context">${esc(a.context)}</p>` : ""}${draft}
+            ${a.source ? `<p class="context">${esc(a.source)}</p>` : ""}${a.body ? richBody(a.body) : ""}${a.context ? `<p class="context">${esc(a.context)}</p>` : ""}${draft}
             <div class="actions">${restore}${link}</div>
           </div>
         </details>`;

@@ -120,12 +120,12 @@ When a check fails, the page says why in the banner under the header. The cards 
 To set it up, run areadidattica with Docker on the same machine (see its README), then add this to the dashboard's `.env` and run `docker compose up -d` again:
 
 ```bash
-AREADIDATTICA_URL=http://areadidattica:8788
+AREADIDATTICA_URL=http://areadidattica:8789
 AREADIDATTICA_TOKEN=<API_TOKEN from areadidattica's .env>
 COMPOSE_FILE=compose.yaml:compose.polito.yaml
 ```
 
-`compose.polito.yaml` puts the dashboard on areadidattica's Compose network, which is named after the folder areadidattica runs from. The default, `areadidattica_default`, fits a folder called `areadidattica`; for another folder, set `AREADIDATTICA_NETWORK=<folder>_default`. Without Docker, use `AREADIDATTICA_URL=http://127.0.0.1:8788` and skip `COMPOSE_FILE`.
+`compose.polito.yaml` puts the dashboard on areadidattica's Compose network, which is named after the folder areadidattica runs from. The default, `areadidattica_default`, fits a folder called `areadidattica`; for another folder, set `AREADIDATTICA_NETWORK=<folder>_default`. Without Docker, use `AREADIDATTICA_URL=http://127.0.0.1:8789` and skip `COMPOSE_FILE`.
 
 ## Your data
 
