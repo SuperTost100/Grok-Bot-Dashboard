@@ -6,7 +6,7 @@ import { loadConfig } from "./config.ts";
 import { Store } from "./store.ts";
 import { Todoist } from "./todoist.ts";
 import { createApp, STALE_CLAIM_MS } from "./app.ts";
-import { checkWebhookUrl, guardedLookup, retryDue, RETRY_WINDOW } from "./webhook.ts";
+import { checkWebhookUrl, guardedLookup, missedRun, retryDue, RETRY_WINDOW } from "./webhook.ts";
 import { localStamp } from "./time.ts";
 
 const log = (msg: string) => console.log(`${new Date().toISOString()} ${msg}`);
@@ -28,6 +28,7 @@ const todoist = config.todoistToken ? new Todoist(config.todoistToken, config.to
 // Unclaimed actions and unanswered refreshes get one retry (see retryDue); after that the bot's scheduled run does it.
 const PING_GAP = 20_000;
 const lastPing = new Map<string, { at: number; ok: boolean }>();
+const woken = new Map<string, number>(); // the missed scheduled run each bot was last woken for
 const deferred = new Map<string, NodeJS.Timeout>();
 
 function notify(slug: string, reason: "actions" | "refresh") {
@@ -109,6 +110,14 @@ const tick = setInterval(() => {
     }
     for (const bot of store.botsWithPendingRefresh(RETRY_WINDOW)) {
       if (retryDue(lastPing.get(bot), Date.now())) notify(bot, "refresh");
+    }
+    for (const b of store.listBots()) {
+      const run = b.webhookUrl ? missedRun(b, Date.now(), config.tz) : null;
+      if (run === null || woken.get(b.slug) === run) continue;
+      woken.set(b.slug, run);
+      log(`${b.slug} missed its ${localStamp(new Date(run), config.tz).slice(11, 16)} run, waking it`);
+      store.requestRefresh(b.slug);
+      notify(b.slug, "refresh");
     }
   } catch (err) {
     log(`tick failed: ${(err as Error).message}`);

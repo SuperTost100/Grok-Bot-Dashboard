@@ -34,7 +34,7 @@ BOT=dashboard
 SCHEDULE=08:00 10:00 12:00 14:00 16:00 18:00 20:00 22:00
 ```
 
-`SCHEDULE` lists the times of the bot's scheduled runs (step 2). When one of them never reaches the dashboard, the page says the bot is offline and turns off the refresh button.
+`SCHEDULE` lists the times of the bot's scheduled runs (step 2). When one of them hasn't reached the dashboard 10 minutes after its time, the dashboard wakes the bot once through its webhook. If the bot still hasn't shown up after 20 minutes, the page says so, and Refresh wakes it again.
 
 ```bash
 chmod 600 ~/.config/grokdash/config
@@ -72,7 +72,7 @@ Close it again:
 
 Without the webhook routine, taps on the dashboard wait for the next scheduled run. The page footer says whether a webhook is set.
 
-Every run uses your Grok Bot allowance, so the schedule is the main cost. With 8 runs a day, a quiet run reads the sources, finds nothing new and stops. Taps still reach the bot within a minute through the webhook. If a tap goes unanswered, the dashboard pings the bot once more after 10 minutes and then leaves it to the next scheduled run.
+Every run uses your Grok Bot allowance, so the schedule is the main cost. With 8 runs a day, a quiet run reads the sources, finds nothing new and stops. Taps still reach the bot within a minute through the webhook. If a tap goes unanswered, the dashboard pings the bot once more after 10 minutes and then leaves it to the next scheduled run. A scheduled run that never shows up gets one ping in its place, which costs what the missed run would have.
 
 ## 3. Restart the app when its link drops
 

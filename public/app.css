@@ -80,7 +80,6 @@ svg.i { width: 18px; height: 18px; flex: none; stroke: currentColor; fill: none;
 }
 .refresh:hover { border-color: var(--border-strong); color: var(--text); }
 .refresh.busy svg { animation: spin 0.9s linear infinite; }
-.refresh:disabled { cursor: not-allowed; border-color: var(--border); color: var(--muted); background: var(--surface-2); }
 @keyframes spin { to { transform: rotate(360deg); } }
 .desk-tabs { display: none; gap: 4px; }
 .desk-tabs button {
