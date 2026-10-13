@@ -572,6 +572,11 @@ export class Store {
     return this.db.prepare(sql).all(...args).map((r) => toItem(r as Row));
   }
 
+  /** Open and snoozed cards of one bot, without the 500 cap of listItems. */
+  liveItemsOf(bot: string): Item[] {
+    return this.db.prepare("SELECT * FROM items WHERE bot = ? AND status IN ('open', 'snoozed')").all(bot).map((r) => toItem(r as Row));
+  }
+
   /** What the Today page shows. */
   activeItems(recentMs: number): Item[] {
     const since = this.now() - recentMs;

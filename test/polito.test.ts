@@ -29,7 +29,8 @@ function fakeAreadidattica() {
     reads: [] as string[],
     down: false,
     auth: [] as string[],
-    fetch: (async (input: URL | RequestInfo, init?: RequestInit) => {
+    fetch: null as unknown as typeof fetch,
+    handle: (async (input: URL | RequestInfo, init?: RequestInit) => {
       const u = new URL(String(input));
       fake.auth.push(String(new Headers(init?.headers).get("authorization")));
       const json = (v: unknown, status = 200) => new Response(JSON.stringify(v), { status, headers: { "content-type": "application/json" } });
@@ -46,6 +47,7 @@ function fakeAreadidattica() {
       return json({ error: "not found" }, 404);
     }) as typeof fetch,
   };
+  fake.fetch = fake.handle;
   return fake;
 }
 
@@ -53,7 +55,8 @@ async function setup() {
   const fake = fakeAreadidattica();
   const store = new Store(":memory:", () => clock);
   const logs: string[] = [];
-  const polito = createPolitoSync(new Polito(config.areadidatticaUrl + "/", "secret", fake.fetch), store, config.tz, (m) => logs.push(m));
+  // Through fake.fetch at call time, so a test can swap it.
+  const polito = createPolitoSync(new Polito(config.areadidatticaUrl + "/", "secret", ((i, o) => fake.fetch(i, o)) as typeof fetch), store, config.tz, (m) => logs.push(m));
   const server = http.createServer(createApp({ config, store, polito, log: () => {} }));
   await new Promise<void>((r) => server.listen(0, "127.0.0.1", r));
   const base = `http://127.0.0.1:${(server.address() as AddressInfo).port}`;
@@ -160,6 +163,77 @@ test("PoliTO: avvisi read in the phone app close here, snoozed ones too", async 
   }
 });
 
+test("PoliTO: an avviso missing from one check comes back unread, and is never marked read for you", async () => {
+  const t = await setup();
+  try {
+    t.fake.unread = [avviso(1, "Uno")];
+    await t.polito.sync();
+    t.fake.unread = [];
+    await t.polito.sync();
+    const card = t.store.getItemByKey(POLITO_BOT, "notification:1")!;
+    assert.equal(card.status, "closed");
+    t.fake.unread = [avviso(1, "Uno")];
+    await t.polito.sync();
+    assert.equal(t.store.getItem(card.id)!.status, "open");
+    assert.deepEqual(t.fake.reads, []);
+  } finally {
+    t.close();
+  }
+});
+
+test("PoliTO: hundreds of cards read elsewhere all close", async () => {
+  const t = await setup();
+  try {
+    t.fake.unread = Array.from({ length: 510 }, (_, i) => avviso(i + 1, `Avviso ${i + 1}`));
+    await t.polito.sync();
+    t.fake.unread = [];
+    await t.polito.sync();
+    assert.equal(t.store.liveItemsOf(POLITO_BOT).length, 0);
+  } finally {
+    t.close();
+  }
+});
+
+test("PoliTO: a snoozed avviso still unread stays snoozed", async () => {
+  const t = await setup();
+  try {
+    t.fake.unread = [avviso(1, "Uno")];
+    await t.polito.sync();
+    const card = t.store.getItemByKey(POLITO_BOT, "notification:1")!;
+    t.store.snoozeItem(card.id, clock + 3600_000);
+    await t.polito.sync();
+    assert.equal(t.store.getItem(card.id)!.status, "snoozed");
+  } finally {
+    t.close();
+  }
+});
+
+test("PoliTO: a slow mark-read retry doesn't hold up new avvisi", async () => {
+  const t = await setup();
+  try {
+    t.fake.unread = [avviso(1, "Uno")];
+    await t.polito.sync();
+    const card = t.store.getItemByKey(POLITO_BOT, "notification:1")!;
+    t.store.closeItem(card.id, "done", "Read");
+    let release!: () => void;
+    const held = new Promise<void>((r) => { release = r; });
+    const fetchBefore = t.fake.fetch;
+    t.fake.fetch = (async (input: URL | RequestInfo, init?: RequestInit) => {
+      if (init?.method === "POST") await held;
+      return fetchBefore(input, init);
+    }) as typeof fetch;
+    t.fake.unread = [avviso(1, "Uno"), avviso(2, "Due")];
+    const run = t.polito.sync();
+    await flush();
+    assert.equal(t.store.getItemByKey(POLITO_BOT, "notification:2")?.status, "open", "new card is in before the retry ends");
+    release();
+    await run;
+    assert.deepEqual(t.fake.reads, ["notification:1"]);
+  } finally {
+    t.close();
+  }
+});
+
 test("PoliTO: when areadidattica fails, cards stay, the page says why, and Refresh doesn't hang", async () => {
   const t = await setup();
   try {
@@ -218,6 +292,24 @@ test("PoliTO: long avvisi fit a card", () => {
   const c = politoCard(avviso(1, "x".repeat(150) + " fine\n" + "y".repeat(3000)), "Europe/Rome");
   assert.ok(c.title.length <= 141 && c.title.endsWith("…"));
   assert.equal(c.body!.length, 2000);
+});
+
+test("PoliTO turned off: Refresh doesn't wait on it forever", async () => {
+  const store = new Store(":memory:", () => clock);
+  store.updateBot(POLITO_BOT, { name: "PoliTO" });
+  const server = http.createServer(createApp({ config: { ...config, areadidatticaUrl: "" }, store, log: () => {} }));
+  await new Promise<void>((r) => server.listen(0, "127.0.0.1", r));
+  try {
+    const res = await fetch(`http://127.0.0.1:${(server.address() as AddressInfo).port}/api/ui/refresh`, {
+      method: "POST", headers: { "Content-Type": "application/json", "Tailscale-User-Login": OWNER }, body: "{}",
+    });
+    assert.equal(res.status, 200);
+    assert.equal(store.getBot(POLITO_BOT)!.refreshRequestedAt, null);
+  } finally {
+    server.closeAllConnections();
+    server.close();
+    store.close();
+  }
 });
 
 test("config: AREADIDATTICA_URL needs a token and a real address", () => {

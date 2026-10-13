@@ -584,7 +584,9 @@ export function createApp(deps: AppDeps) {
   route("POST", "/api/ui/refresh", "ui", async () => {
     const bots = store.requestRefresh();
     for (const bot of bots) if (bot.webhookUrl) notify(bot.slug, "refresh");
-    void polito?.sync();
+    if (polito) void polito.sync();
+    // PoliTO turned off after it ran: nothing would ever answer this refresh.
+    else store.clearRefresh(POLITO_BOT);
     return { ok: true, webhooks: bots.filter((x) => x.webhookUrl).length, state: await state() };
   });
 

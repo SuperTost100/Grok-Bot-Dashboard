@@ -42,12 +42,12 @@ export class Polito {
     this.fetch = fetchImpl;
   }
 
-  async call(method: string, path: string) {
+  // A cold /items call fetches every course's notices one at a time, so reads get a minute.
+  async call(method: string, path: string, timeoutMs = 60_000) {
     const res = await this.fetch(this.base + path, {
       method,
       headers: { Authorization: `Bearer ${this.token}` },
-      // A cold run fetches every course's notices, one call at a time.
-      signal: AbortSignal.timeout(60_000),
+      signal: AbortSignal.timeout(timeoutMs),
     });
     if (!res.ok) {
       const detail = await res.json().then((b: { error?: string }) => b.error ?? "", () => "");
@@ -66,7 +66,7 @@ export class Polito {
   }
 
   async markRead(id: string) {
-    await this.call("POST", `/items/${encodeURIComponent(id)}/read`);
+    await this.call("POST", `/items/${encodeURIComponent(id)}/read`, 15_000);
   }
 }
 
@@ -148,18 +148,19 @@ export function createPolitoSync(polito: Polito, store: Store, tz: string, log: 
   async function run() {
     const unread = await polito.unread();
     const keys = new Set(unread.map((p) => p.id));
+    const retry: string[] = [];
     // Oldest first, so the newest avviso gets the newest card and sorts on top.
     for (const p of unread.toReversed()) {
       const card = store.getItemByKey(POLITO_BOT, p.id);
-      // Finished or dismissed here but still unread there: the mark-read call failed earlier.
-      if (card?.status === "closed") await markRead(p.id);
-      else store.upsertItem(politoCard(p, tz));
+      // You finished or dismissed it here, but it's still unread there: the mark-read call failed earlier.
+      // Only your own taps are retried. A card the sync closed comes back instead, so a feed that
+      // briefly left something out can never get it marked read.
+      if (card?.status === "closed" && card.closedReason !== "bot") retry.push(p.id);
+      else store.upsertItem({ ...politoCard(p, tz), reopen: card?.status === "closed" });
     }
     // Read in the PoliTO app (or on the Portale) since the last check.
-    for (const status of ["open", "snoozed"] as const) {
-      for (const card of store.listItems({ bot: POLITO_BOT, status })) {
-        if (card.key && !keys.has(card.key)) store.closeItem(card.id, "bot", "Read on PoliTO");
-      }
+    for (const card of store.liveItemsOf(POLITO_BOT)) {
+      if (card.key && !keys.has(card.key)) store.closeItem(card.id, "bot", "Read on PoliTO");
     }
     const from = localStamp(new Date(store.now()), tz).slice(0, 10);
     const to = addDays(from, 30);
@@ -170,6 +171,8 @@ export function createPolitoSync(polito: Polito, store: Store, tz: string, log: 
         .filter((d) => /^\d{4}-\d{2}-\d{2}/.test(d.date))
         .map((d) => ({ title: d.title.slice(0, 200), start: d.date.slice(0, 10), end: "", location: "", allDay: true, app: "polito" })),
     );
+    // Last, a few at a time, so a PoliTO outage can't hold up new avvisi.
+    for (const key of retry.slice(0, 10)) await markRead(key);
   }
 
   return {
