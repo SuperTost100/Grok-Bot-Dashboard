@@ -33,6 +33,7 @@ const BRANDS = {
   outlook: { name: "Outlook", color: "#0078D4", letter: "O" },
   amazon: { name: "Amazon", color: "#232F3E", letter: "a" },
   facebookmarketplace: { name: "Facebook Marketplace", color: "#0866FF", letter: "M" },
+  polito: { name: "PoliTO", color: "#1f4e8c", letter: "P" },
   mail: { name: "Email", color: "#5B6B7F", path: "M4 5h16a2 2 0 0 1 2 2v10a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V7a2 2 0 0 1 2-2zm0 2v.4l8 5.1 8-5.1V7H4zm16 2.8-7.5 4.8a1 1 0 0 1-1 0L4 9.8V17h16V9.8z" },
   calendar: { name: "Calendar", color: "#5B6B7F", path: "M7 2a1 1 0 0 1 1 1v1h8V3a1 1 0 1 1 2 0v1h1a3 3 0 0 1 3 3v12a3 3 0 0 1-3 3H5a3 3 0 0 1-3-3V7a3 3 0 0 1 3-3h1V3a1 1 0 0 1 1-1zm13 8H4v9a1 1 0 0 0 1 1h14a1 1 0 0 0 1-1v-9zM5 6a1 1 0 0 0-1 1v1h16V7a1 1 0 0 0-1-1H5z" },
   chat: { name: "Chat", color: "#5B6B7F", path: "M4 4h16a2 2 0 0 1 2 2v10a2 2 0 0 1-2 2H8.4L4.7 21.2A1 1 0 0 1 3 20.5V6a2 2 0 0 1 1-2zm1 2v12.3L7.6 16H20V6H5z" },

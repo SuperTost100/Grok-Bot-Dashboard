@@ -424,6 +424,10 @@ export class Store {
       .map((r) => String(r.slug));
   }
 
+  clearRefresh(slug: string) {
+    this.db.prepare("UPDATE bots SET refresh_requested_at = NULL WHERE slug = ?").run(slug);
+  }
+
   requestRefresh(slug?: string): Bot[] {
     if (slug) this.db.prepare("UPDATE bots SET refresh_requested_at = ? WHERE slug = ?").run(this.now(), slug);
     else this.db.prepare("UPDATE bots SET refresh_requested_at = ?").run(this.now());
@@ -568,6 +572,11 @@ export class Store {
     return this.db.prepare(sql).all(...args).map((r) => toItem(r as Row));
   }
 
+  /** Open and snoozed cards of one bot, without the 500 cap of listItems. */
+  liveItemsOf(bot: string): Item[] {
+    return this.db.prepare("SELECT * FROM items WHERE bot = ? AND status IN ('open', 'snoozed')").all(bot).map((r) => toItem(r as Row));
+  }
+
   /** What the Today page shows. */
   activeItems(recentMs: number): Item[] {
     const since = this.now() - recentMs;
@@ -577,7 +586,7 @@ export class Store {
          WHERE status IN ('open', 'pending')
             OR (status = 'closed' AND closed_reason = 'action' AND closed_at >= ? AND acked_at IS NULL)
             OR (section = 'catchup' AND status = 'closed' AND closed_reason = 'read' AND closed_at >= ?)
-         ORDER BY (urgent != '') DESC, updated_at DESC`,
+         ORDER BY (urgent != '') DESC, updated_at DESC, id DESC`,
       )
       .all(since, since)
       .map((r) => toItem(r as Row));

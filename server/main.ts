@@ -5,9 +5,10 @@ import path from "node:path";
 import { loadConfig } from "./config.ts";
 import { Store } from "./store.ts";
 import { Todoist } from "./todoist.ts";
+import { Polito, POLITO_BOT, createPolitoSync } from "./polito.ts";
 import { createApp, STALE_CLAIM_MS } from "./app.ts";
 import { checkWebhookUrl, guardedLookup, missedRun, retryDue, RETRY_WINDOW } from "./webhook.ts";
-import { localStamp } from "./time.ts";
+import { lastSlot, localStamp } from "./time.ts";
 
 const log = (msg: string) => console.log(`${new Date().toISOString()} ${msg}`);
 const config = loadConfig();
@@ -22,6 +23,20 @@ try {
 }
 const store = new Store(path.join(config.dataDir, "dashboard.db"));
 const todoist = config.todoistToken ? new Todoist(config.todoistToken, config.todoistFilter, config.tz) : null;
+const polito = config.areadidatticaUrl
+  ? createPolitoSync(new Polito(config.areadidatticaUrl, config.areadidatticaToken), store, config.tz, log)
+  : null;
+
+// PoliTO is checked whenever the bots are scheduled to check their sources (every 2 hours when no bot
+// has told its schedule yet), plus on Refresh. The first tick checks once at startup.
+let politoSlot: number | null = null;
+function politoDue(now: number): boolean {
+  const slots = [...new Set(store.listBots().filter((b) => b.slug !== POLITO_BOT).flatMap((b) => b.schedule))];
+  const slot = lastSlot(now, slots, config.tz) ?? Math.floor(now / 7_200_000) * 7_200_000;
+  if (slot === politoSlot) return false;
+  politoSlot = slot;
+  return true;
+}
 
 // Ping a bot's webhook routine so it picks up work now instead of at its next scheduled run.
 // At most one ping per bot every 20 seconds; a ping that comes sooner is sent when the gap is up.
@@ -90,7 +105,7 @@ function post(url: string, token: string, body: unknown): Promise<number> {
   });
 }
 
-const handle = createApp({ config, store, todoist, notify, lastPing: (bot) => lastPing.get(bot), log });
+const handle = createApp({ config, store, todoist, polito, notify, lastPing: (bot) => lastPing.get(bot), log });
 const server = http.createServer((req, res) => {
   handle(req, res).catch((err) => {
     log(`unhandled error on ${req.method} ${req.url}: ${(err as Error).stack}`);
@@ -119,6 +134,7 @@ const tick = setInterval(() => {
       store.requestRefresh(b.slug);
       notify(b.slug, "refresh");
     }
+    if (polito && politoDue(Date.now())) void polito.sync();
   } catch (err) {
     log(`tick failed: ${(err as Error).message}`);
   }
@@ -150,7 +166,7 @@ store.purge(config.archiveDays);
 void dailyBackup();
 
 server.listen(config.port, config.host, () => {
-  log(`Grok Bot Dashboard on http://${config.host}:${config.port} (auth: ${config.authMode}, to-dos: ${todoist ? "Todoist" : "from bots"}, time zone: ${config.tz})`);
+  log(`Grok Bot Dashboard on http://${config.host}:${config.port} (auth: ${config.authMode}, to-dos: ${todoist ? "Todoist" : "from bots"}, PoliTO: ${polito ? "on" : "off"}, time zone: ${config.tz})`);
 });
 
 function shutdown() {

@@ -222,9 +222,11 @@ function renderHeader() {
   const down = s.bots.filter((b) => b.offlineSince);
   const hooked = s.bots.filter((b) => b.hasWebhook);
   const allDown = hooked.length > 0 && hooked.every((b) => b.offlineSince);
-  $("#offline").hidden = !down.length;
+  const politoError = s.polito?.error ? `PoliTO avvisi couldn't be checked: ${s.polito.error}` : "";
+  $("#offline").hidden = !down.length && !politoError;
   $("#offline").textContent = down
     .map((b) => `${b.name} hasn't checked in since ${b.lastSeenAt ? whenFull(b.lastSeenAt) : "it was set up"}. ${b.hasWebhook ? "Tap Refresh to wake it." : "Taps wait for its next run."}`)
+    .concat(politoError || [])
     .join(" ");
   const asked = s.bots.some((b) => b.refreshRequestedAt);
   const label = asked ? "Scan requested" : allDown ? "Bot offline" : ago(s.lastScanAt);
@@ -232,8 +234,10 @@ function renderHeader() {
   $("#fresh").textContent = label;
   $("#refresh").classList.toggle("busy", asked);
   const hooks = s.bots.filter((b) => b.hasWebhook).length;
-  $("#foot").textContent = s.bots.length
-    ? `${s.bots.length} bot${s.bots.length > 1 ? "s" : ""} connected. ${hooks ? "Taps reach the bots within seconds." : "No bot has a webhook yet, so taps wait for the next scheduled scan."}`
+  // PoliTO has a filter chip like a bot, but no bot behind it.
+  const real = s.bots.filter((b) => b.slug !== "polito").length;
+  $("#foot").textContent = real
+    ? `${real} bot${real > 1 ? "s" : ""} connected. ${hooks ? "Taps reach the bots within seconds." : "No bot has a webhook yet, so taps wait for the next scheduled scan."}`
     : "No bot has posted yet. Set up the Dashboard bot from bot/README.md in the repo.";
 }
 
@@ -268,6 +272,8 @@ function cardActions(c) {
     return `<button class="btn primary" data-act="send" data-id="${id}">${icon("send")}Send to ${esc(short(c.draft.to))}</button>
       <button class="btn" data-act="edit" data-id="${id}">${icon("pencil")}Edit</button>${end}`;
   }
+  // PoliTO cards come straight from PoliTO, with no bot to read a Write. Marking read reaches the phone app too.
+  if (c.bot === "polito") return `<button class="btn primary" data-act="done" data-id="${id}">${icon("check")}Mark as read</button><span class="end">${snooze}${dismiss}</span>`;
   return `<button class="btn primary" data-act="done" data-id="${id}">${icon("check")}Mark done</button>${end}`;
 }
 
