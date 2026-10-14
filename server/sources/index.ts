@@ -2,7 +2,7 @@
 // Settings page and the banner. Settings are read on every run, so a change applies at the next one.
 
 import type { Settings } from "../settings.ts";
-import { MAIL_SLOTS } from "../settings.ts";
+import { MAIL_SLOTS, WHATSAPP_SLOTS } from "../settings.ts";
 import type { Store } from "../store.ts";
 import { Waha, readWhatsApp } from "./whatsapp.ts";
 import { parseHost, readMailbox } from "./mail.ts";
@@ -15,8 +15,12 @@ export interface SourceStatus {
   on: boolean;
   ok: boolean;
   text: string;
-  /** For WhatsApp: the account still needs its QR code scanned. */
+  /** For WhatsApp: which number. */
+  slot?: number;
+  /** For WhatsApp: a QR code is up, waiting to be scanned. */
   needsQr?: boolean;
+  /** For WhatsApp: not linked and no code showing; the page offers a new one. */
+  needsLink?: boolean;
 }
 
 interface Track {
@@ -60,7 +64,9 @@ export interface Sources {
   status(): SourceStatus[];
   /** Problems worth a banner on Today. */
   problems(): string[];
-  waha(): Waha | null;
+  waha(slot: number): Waha | null;
+  /** Show a new QR code for a WhatsApp number. */
+  link(slot: number): Promise<void>;
   /** Whether iCal addresses are set, so the agenda comes from them instead of from bots. */
   calendarOn(): boolean;
 }
@@ -79,9 +85,9 @@ export function createSources(
     return t;
   };
 
-  const waha = () => {
-    const url = settings.str("whatsappUrl");
-    const key = settings.str("whatsappApiKey");
+  const waha = (n: number) => {
+    const url = settings.str(`whatsapp${n}Url`);
+    const key = settings.str(`whatsapp${n}ApiKey`);
     return url && key ? new Waha(url, key) : null;
   };
 
@@ -99,20 +105,24 @@ export function createSources(
   const sigOf = (keys: string[]) => JSON.stringify(keys.map((k) => settings.get(k)));
   function jobs(): Job[] {
     const list: Job[] = [];
-    const wa = waha();
-    const waSig = sigOf(["whatsappUrl", "whatsappApiKey"]);
-    list.push({
-      group: "WhatsApp",
-      everyMs: 60_000,
-      sig: waSig,
-      run: wa &&
-        (async () => {
-          const added = await readWhatsApp(wa, store, () => sigOf(["whatsappUrl", "whatsappApiKey"]) === waSig);
-          if (added === null) return "qr";
-          if (added) onNew(added);
-          return "";
-        }),
-    });
+    for (const n of WHATSAPP_SLOTS) {
+      const wa = waha(n);
+      const keys = [`whatsapp${n}Url`, `whatsapp${n}ApiKey`];
+      const waSig = sigOf(keys);
+      list.push({
+        group: `WhatsApp ${n}`,
+        // While a QR code is up, check often so the page shows the link as soon as you scan.
+        everyMs: tracks.get(`WhatsApp ${n}`)?.note.startsWith("wa:") ? 10_000 : 60_000,
+        sig: waSig,
+        run: wa &&
+          (async () => {
+            const r = await readWhatsApp(wa, store, n, () => sigOf(keys) === waSig);
+            if ("waiting" in r) return `wa:${r.waiting}`;
+            if (r.added) onNew(r.added);
+            return "";
+          }),
+      });
+    }
     for (const n of MAIL_SLOTS) {
       const a = mailAccount(n);
       const keys = [`mail${n}Host`, `mail${n}User`, `mail${n}Password`];
@@ -216,9 +226,14 @@ export function createSources(
         const t = tracks.get(job.group);
         if (!job.run) return { group: job.group, on: false, ok: true, text: "Off" };
         if (!t || t.sig !== job.sig || (!t.lastOk && !t.error)) return { group: job.group, on: true, ok: true, text: "Connecting…" };
-        if (t.error) return { group: job.group, on: true, ok: false, text: t.error };
-        if (t.note === "qr") return { group: job.group, on: true, ok: false, text: "Not linked yet. Scan the QR code with WhatsApp on your phone.", needsQr: true };
-        return { group: job.group, on: true, ok: true, text: `Read ${ago(t.lastOk!)}${t.note ? `. ${t.note}` : ""}` };
+        const slot = job.group.startsWith("WhatsApp ") ? Number(job.group.slice(9)) : undefined;
+        if (t.error) return { group: job.group, slot, on: true, ok: false, text: t.error };
+        if (t.note === "wa:SCAN_QR_CODE") return { group: job.group, slot, on: true, ok: false, text: "Not linked yet. Scan the QR code below with WhatsApp on your phone.", needsQr: true };
+        if (t.note === "wa:STARTING") return { group: job.group, slot, on: true, ok: true, text: "Getting a QR code from WhatsApp…" };
+        if (t.note.startsWith("wa:")) return { group: job.group, slot, on: true, ok: false, text: "Not linked. The last QR code expired unscanned.", needsLink: true };
+        const linked = slot ? store.getState(`whatsapp:slot${slot}:linked`) : null;
+        const who = linked && /^\d+$/.test(linked) ? `Linked to +${linked}. ` : "";
+        return { group: job.group, slot, on: true, ok: true, text: `${who}Read ${ago(t.lastOk!)}${t.note ? `. ${t.note}` : ""}` };
       });
     },
     problems() {
@@ -226,11 +241,21 @@ export function createSources(
       const out: string[] = [];
       for (const t of tracks.values()) {
         if (t.failingSince && now - t.failingSince > BANNER_AFTER_MS) out.push(`${t.group} can't be read: ${t.error}`);
-        else if (t.note === "qr") out.push("WhatsApp isn't linked. Open Settings to scan the QR code.");
+        else if (t.note.startsWith("wa:") && t.note !== "wa:STARTING") out.push(`${t.group} isn't linked. Open Settings to link it.`);
       }
       return out;
     },
     waha,
+    async link(slot) {
+      const wa = waha(slot);
+      if (!wa) throw new Error("This WhatsApp number is off. Set its WAHA address and API key first.");
+      await wa.link();
+      const t = tracks.get(`WhatsApp ${slot}`);
+      if (t) t.note = "wa:STARTING";
+      // Read right after, so the page learns when the code is up.
+      const job = jobs().find((j) => j.group === `WhatsApp ${slot}`);
+      if (job) void start(job);
+    },
     calendarOn: () => calendarUrls(settings.str("calendarUrls")).length > 0,
   };
 }

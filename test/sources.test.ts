@@ -77,6 +77,7 @@ function fakeWaha() {
     assert.equal(new Headers(init?.headers).get("x-api-key"), "wkey");
     if (u.pathname === "/api/sessions/default") return status === "MISSING" ? json({ error: "not found" }, 404) : json({ status, me: status === "WORKING" ? { id: "39340000@c.us" } : null });
     if (u.pathname === "/api/sessions" && method === "POST") { status = "SCAN_QR_CODE"; return json({ status }); }
+    if (u.pathname === "/api/sessions/default/restart" && method === "POST") { status = "SCAN_QR_CODE"; return json({ status }); }
     if (u.pathname === "/api/default/chats/overview") {
       return json([
         { id: "120363@g.us", name: "Lab group", lastMessage: { timestamp: now - 30 } },
@@ -92,13 +93,13 @@ function fakeWaha() {
     }
     return json({ error: "unexpected" }, 500);
   }) as typeof fetch;
-  return { waha: new Waha("http://waha:3000/", "wkey", fetchImpl), calls, link: () => { status = "WORKING"; } };
+  return { waha: new Waha("http://waha:3000/", "wkey", fetchImpl), calls, link: () => { status = "WORKING"; }, set: (s: string) => { status = s; } };
 }
 
 test("whatsapp: an unlinked account gets a session with markOnline off and reads nothing", async () => {
   const f = fakeWaha();
   const store = new Store(":memory:", () => Date.parse("2026-10-12T11:00:00Z"));
-  assert.equal(await readWhatsApp(f.waha, store), null);
+  assert.deepEqual(await readWhatsApp(f.waha, store), { waiting: "SCAN_QR_CODE" });
   const created = f.calls.find((c) => c.path === "/api/sessions")!;
   assert.deepEqual(created.body, { name: "default", start: true, config: { noweb: { markOnline: false, store: { enabled: true, fullSync: false } } } });
   assert.ok(!f.calls.some((c) => c.path.includes("/chats")));
@@ -108,7 +109,7 @@ test("whatsapp: a linked account reads new messages once, skipping status update
   const f = fakeWaha();
   f.link();
   const store = new Store(":memory:", () => Date.parse("2026-10-12T11:00:00Z"));
-  assert.equal(await readWhatsApp(f.waha, store), 3);
+  assert.deepEqual(await readWhatsApp(f.waha, store), { added: 3 });
   const rows = store.untriaged();
   assert.deepEqual(rows.map((r) => [r.thread, r.threadName, r.sender, r.fromMe, r.isGroup, r.text]), [
     ["120363@g.us", "Lab group", "Marco", false, true, "Who's free on Tuesday?"],
@@ -116,7 +117,7 @@ test("whatsapp: a linked account reads new messages once, skipping status update
     ["39333@c.us", "Anna", "Anna", false, false, "[media]"],
   ]);
   assert.ok(!f.calls.some((c) => c.path.includes("39999")), "a chat with nothing new isn't opened");
-  assert.equal(await readWhatsApp(f.waha, store), 0, "the second run finds nothing new");
+  assert.deepEqual(await readWhatsApp(f.waha, store), { added: 0 }, "the second run finds nothing new");
   assert.ok(!f.calls.some((c) => c.method !== "GET" && c.path.includes("/chats")), "nothing is ever marked read or sent");
 });
 
@@ -169,7 +170,7 @@ test("with iCal addresses set, the agenda shows the calendar and PoliTO, not wha
     const view = await get("/api/ui/settings");
     assert.deepEqual(view.status.find((x: { group: string }) => x.group === "Mail 1"), { group: "Mail 1", on: false, ok: true, text: "Off" });
     assert.equal(view.status.find((x: { group: string }) => x.group === "Calendar").text, "Connecting…");
-    assert.equal((await fetch(base + "/api/ui/whatsapp/qr", { headers: { "Tailscale-User-Login": "o@x.com" } })).status, 404, "no QR while WhatsApp is off");
+    assert.equal((await fetch(base + "/api/ui/whatsapp/1/qr", { headers: { "Tailscale-User-Login": "o@x.com" } })).status, 404, "no QR while WhatsApp is off");
   } finally {
     server.closeAllConnections();
     server.close();
@@ -324,9 +325,9 @@ test("whatsapp: long chats are paged, and the cursor waits for a chat cut short"
   }) as typeof fetch;
   const store = new Store(":memory:", () => now * 1000);
   const waha = new Waha("http://waha:3000", "k", fetchImpl);
-  assert.equal(await readWhatsApp(waha, store), 1000, "10 pages per run");
+  assert.deepEqual(await readWhatsApp(waha, store), { added: 1000 }, "10 pages per run");
   assert.match(store.getState("whatsapp:1:resume") ?? "", /big@g\.us/, "the busy chat is marked to go on");
-  assert.equal(await readWhatsApp(waha, store), 150, "the next run gets the rest");
+  assert.deepEqual(await readWhatsApp(waha, store), { added: 150 }, "the next run gets the rest");
   assert.equal(store.getState("whatsapp:1:resume"), null);
 });
 
@@ -354,7 +355,7 @@ test("whatsapp: a run whose settings changed meanwhile saves nothing", async () 
   const f = fakeWaha();
   f.link();
   const store = new Store(":memory:", () => Date.parse("2026-10-12T11:00:00Z"));
-  assert.equal(await readWhatsApp(f.waha, store, () => false), 0);
+  assert.deepEqual(await readWhatsApp(f.waha, store, 1, () => false), { added: 0 });
   assert.equal(store.untriaged().length, 0);
   assert.equal(store.getState("whatsapp:39340000"), null, "the cursor didn't move either");
 });
@@ -402,6 +403,60 @@ test("a calendar whose address changes mid-run doesn't overwrite the new agenda"
     assert.equal(store.listEvents("2000-01-01", "2100-01-01").length, 0, "the old address's events were dropped");
   } finally {
     globalThis.fetch = realFetch;
+    store.close();
+  }
+});
+
+// ---------- QR codes and a second number ----------
+
+test("whatsapp: a code that expired unscanned waits for you; a linked number that drops reconnects", async () => {
+  const f = fakeWaha();
+  const store = new Store(":memory:", () => Date.parse("2026-10-12T11:00:00Z"));
+  f.set("FAILED");
+  assert.deepEqual(await readWhatsApp(f.waha, store), { waiting: "FAILED" });
+  assert.ok(!f.calls.some((c) => c.path.endsWith("/restart")), "no new codes nobody looks at");
+  f.link();
+  await readWhatsApp(f.waha, store);
+  f.set("FAILED");
+  await readWhatsApp(f.waha, store);
+  assert.ok(f.calls.some((c) => c.path === "/api/sessions/default/restart"), "a number that was linked reconnects by itself");
+});
+
+test("Settings offers a new QR code once the old one expired, and asks WhatsApp for it", async () => {
+  const f = fakeWaha();
+  f.set("FAILED");
+  const env = { OWNER_LOGIN: "o@x.com", BOT_TOKEN: "test-token-123", TZ: "Europe/Rome" };
+  const config = { ...loadConfig(env), publicDir: new URL("../public", import.meta.url).pathname.replace(/\/$/, "") };
+  const store = new Store(":memory:");
+  const settings = new Settings(store, config, env);
+  const realFetch = globalThis.fetch;
+  globalThis.fetch = ((input: URL | RequestInfo, init?: RequestInit) => (String(input).startsWith("http://waha2:3000") ? f.waha.fetch(input, init) : realFetch(input, init))) as typeof fetch;
+  const sources = createSources(settings, store, config.tz, () => {});
+  const server = http.createServer(createApp({ config, store, settings, sources, log: () => {} }));
+  await new Promise<void>((r) => server.listen(0, "127.0.0.1", r));
+  const base = `http://127.0.0.1:${(server.address() as AddressInfo).port}`;
+  const ui = async (method: string, path: string) => (await realFetch(base + path, { method, headers: { "Tailscale-User-Login": "o@x.com", ...(method === "POST" ? { "Content-Type": "application/json" } : {}) }, body: method === "POST" ? "{}" : undefined })).json();
+  try {
+    settings.update({ whatsapp2Url: "http://waha2:3000", whatsapp2ApiKey: "wkey", whatsapp2Name: "Business" });
+    await sources.refresh();
+    const two = (await ui("GET", "/api/ui/settings")).status.find((x: { group: string }) => x.group === "WhatsApp 2");
+    assert.deepEqual([two.slot, two.needsLink, two.needsQr], [2, true, undefined]);
+    assert.equal((await ui("GET", "/api/ui/settings")).status.find((x: { group: string }) => x.group === "WhatsApp 1").text, "Off");
+    await ui("POST", "/api/ui/whatsapp/2/link");
+    assert.ok(f.calls.some((c) => c.path === "/api/sessions/default/restart"));
+    await sources.refresh();
+    const after = (await ui("GET", "/api/ui/settings")).status.find((x: { group: string }) => x.group === "WhatsApp 2");
+    assert.equal(after.needsQr, true);
+    f.link();
+    await sources.refresh();
+    const linked = (await ui("GET", "/api/ui/settings")).status.find((x: { group: string }) => x.group === "WhatsApp 2");
+    assert.match(linked.text, /^Linked to \+39340000\. Read just now/);
+    assert.ok(store.untriaged().every((m) => m.source === "whatsapp:2"), "messages carry the number they came from");
+    assert.ok(store.untriaged().length > 0);
+  } finally {
+    globalThis.fetch = realFetch;
+    server.closeAllConnections();
+    server.close();
     store.close();
   }
 });

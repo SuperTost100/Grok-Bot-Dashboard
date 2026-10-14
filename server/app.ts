@@ -628,14 +628,29 @@ export function createApp(deps: AppDeps) {
 
   route("GET", "/api/ui/settings", "ui", () => settingsView());
 
-  route("GET", "/api/ui/whatsapp/qr", "ui", async () => {
-    const waha = deps.sources?.waha();
-    if (!waha) throw new HttpError(404, "WhatsApp is off. Set the WAHA address and API key first.");
+  const wahaFor = (slot: string) => {
+    const waha = deps.sources?.waha(Number(slot));
+    if (!waha) throw new HttpError(404, "This WhatsApp number is off. Set its WAHA address and API key first.");
+    return waha;
+  };
+
+  route("GET", "/api/ui/whatsapp/:slot/qr", "ui", async (_r, p) => {
+    const waha = wahaFor(p[0]);
     try {
       return new Raw("image/png", await waha.qr());
     } catch (err) {
       throw new HttpError(502, (err as Error).message);
     }
+  });
+
+  route("POST", "/api/ui/whatsapp/:slot/link", "ui", async (_r, p) => {
+    wahaFor(p[0]);
+    try {
+      await deps.sources!.link(Number(p[0]));
+    } catch (err) {
+      throw new HttpError(502, (err as Error).message);
+    }
+    return settingsView();
   });
 
   route("PUT", "/api/ui/settings", "ui", (_r, _p, _q, b) => {

@@ -1,0 +1,23 @@
+# A second WhatsApp number (say, your business one), with its own WAHA: the free edition
+# links one account per container. Use it together with compose.whatsapp.yaml:
+#   COMPOSE_FILE=compose.yaml:compose.whatsapp.yaml:compose.whatsapp2.yaml
+# Then open Settings on the dashboard and scan the QR code under WhatsApp 2.
+services:
+  waha2:
+    image: devlikeapro/waha:noweb-2026.9.2
+    restart: unless-stopped
+    environment:
+      WAHA_API_KEY: ${WAHA_API_KEY:?set WAHA_API_KEY in .env}
+      WHATSAPP_DEFAULT_ENGINE: NOWEB
+      WHATSAPP_RESTART_ALL_SESSIONS: "True"
+      WAHA_PRINT_QR: "False"
+      WAHA_DASHBOARD_ENABLED: "False"
+      WHATSAPP_SWAGGER_ENABLED: "False"
+    volumes:
+      - ./data/waha2/sessions:/app/.sessions
+      - ./data/waha2/media:/app/.media
+
+  dashboard:
+    environment:
+      WAHA2_URL: http://waha2:3000
+      WAHA2_API_KEY: ${WAHA_API_KEY}

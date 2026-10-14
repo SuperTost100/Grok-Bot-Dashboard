@@ -288,7 +288,7 @@ export function createTriage(deps: TriageDeps): Triage {
   function replied(msgs: InboxMessage[]) {
     const last = msgs.at(-1)!;
     store.dropFromGrokQueue(last.source, last.thread);
-    const how = last.source === "whatsapp" ? "You replied on WhatsApp" : "You replied by mail";
+    const how = last.source.startsWith("whatsapp") ? "You replied on WhatsApp" : "You replied by mail";
     for (const card of store.triageCards(bot(), last.source, last.thread)) {
       if (card.section === "needs" && !store.pendingActionFor(card.id)) store.closeItem(card.id, "bot", how);
     }

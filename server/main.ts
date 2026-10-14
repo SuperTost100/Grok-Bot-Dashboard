@@ -44,8 +44,10 @@ const sources = createSources(settings, store, config.tz, log);
 
 /** How a message's source is named on cards and described to Jev. */
 function sourceInfo(m: InboxMessage) {
-  if (m.source === "whatsapp") {
-    return { label: `WhatsApp · ${m.threadName}`, app: "whatsapp", where: m.isGroup ? `WhatsApp group chat "${m.threadName}"` : `WhatsApp chat with ${m.threadName}` };
+  if (m.source.startsWith("whatsapp:")) {
+    const name = settings.str(`whatsapp${m.source.slice(9)}Name`) || "WhatsApp";
+    const account = name === "WhatsApp" ? "WhatsApp" : `WhatsApp (the user's ${name} number)`;
+    return { label: `${name} · ${m.threadName}`, app: "whatsapp", where: m.isGroup ? `${account} group chat "${m.threadName}"` : `${account} chat with ${m.threadName}` };
   }
   const slot = m.source.replace(/^mail:/, "");
   const name = settings.str(`mail${slot}Name`) || `Mail ${slot}`;
