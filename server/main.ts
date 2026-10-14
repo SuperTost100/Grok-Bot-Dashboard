@@ -6,7 +6,8 @@ import { loadConfig } from "./config.ts";
 import { Store } from "./store.ts";
 import { Todoist } from "./todoist.ts";
 import { Polito, POLITO_BOT, createPolitoSync } from "./polito.ts";
-import { createApp, STALE_CLAIM_MS } from "./app.ts";
+import { createApp, STALE_CLAIM_MS, type AppDeps } from "./app.ts";
+import { Settings } from "./settings.ts";
 import { checkWebhookUrl, guardedLookup, missedRun, retryDue, RETRY_WINDOW } from "./webhook.ts";
 import { lastSlot, localStamp } from "./time.ts";
 
@@ -22,10 +23,20 @@ try {
   log(`could not restrict permissions on ${config.dataDir}`);
 }
 const store = new Store(path.join(config.dataDir, "dashboard.db"));
-const todoist = config.todoistToken ? new Todoist(config.todoistToken, config.todoistFilter, config.tz) : null;
-const polito = config.areadidatticaUrl
-  ? createPolitoSync(new Polito(config.areadidatticaUrl, config.areadidatticaToken), store, config.tz, log)
-  : null;
+const settings = new Settings(store, config);
+
+// Todoist and PoliTO are rebuilt when their settings change on the Settings page.
+function makeTodoist() {
+  const token = settings.str("todoistToken");
+  return token ? new Todoist(token, settings.str("todoistFilter"), config.tz) : null;
+}
+function makePolito() {
+  const url = settings.str("areadidatticaUrl");
+  const token = settings.str("areadidatticaToken");
+  if (url && !token) log("PoliTO stays off: the areadidattica token is missing");
+  return url && token ? createPolitoSync(new Polito(url, token), store, config.tz, log) : null;
+}
+let polito = makePolito();
 
 // PoliTO is checked whenever the bots are scheduled to check their sources (every 2 hours when no bot
 // has told its schedule yet), plus on Refresh. The first tick checks once at startup.
@@ -105,7 +116,19 @@ function post(url: string, token: string, body: unknown): Promise<number> {
   });
 }
 
-const handle = createApp({ config, store, todoist, polito, notify, lastPing: (bot) => lastPing.get(bot), log });
+const deps: AppDeps = { config, store, settings, todoist: makeTodoist(), polito, notify, lastPing: (bot) => lastPing.get(bot), log };
+settings.onChange((keys) => {
+  if (keys.some((k) => k.startsWith("todoist"))) {
+    deps.todoist = makeTodoist();
+    log(`to-dos now ${deps.todoist ? "from Todoist" : "from bots"}`);
+  }
+  if (keys.some((k) => k.startsWith("areadidattica"))) {
+    deps.polito = polito = makePolito();
+    politoSlot = null; // check right away with the new address
+    log(`PoliTO now ${polito ? "on" : "off"}`);
+  }
+});
+const handle = createApp(deps);
 const server = http.createServer((req, res) => {
   handle(req, res).catch((err) => {
     log(`unhandled error on ${req.method} ${req.url}: ${(err as Error).stack}`);
@@ -142,7 +165,8 @@ const tick = setInterval(() => {
 
 // One consistent backup a day in DATA_DIR/backups, keeping BACKUP_DAYS of them.
 async function dailyBackup() {
-  if (!config.backupDays) return;
+  const keep = settings.int("backupDays");
+  if (!keep) return;
   const dir = path.join(config.dataDir, "backups");
   fs.mkdirSync(dir, { recursive: true });
   const file = path.join(dir, `dashboard-${localStamp(new Date(), config.tz).slice(0, 10)}.db`);
@@ -154,19 +178,19 @@ async function dailyBackup() {
       log(`backup failed: ${(err as Error).message}`);
     }
   }
-  const old = fs.readdirSync(dir).filter((f) => /^dashboard-\d{4}-\d{2}-\d{2}\.db$/.test(f)).sort().slice(0, -config.backupDays);
+  const old = fs.readdirSync(dir).filter((f) => /^dashboard-\d{4}-\d{2}-\d{2}\.db$/.test(f)).sort().slice(0, -keep);
   for (const f of old) fs.rmSync(path.join(dir, f));
 }
 
 const housekeeping = setInterval(() => {
-  store.purge(config.archiveDays);
+  store.purge(settings.int("archiveDays"));
   void dailyBackup();
 }, 3600_000);
-store.purge(config.archiveDays);
+store.purge(settings.int("archiveDays"));
 void dailyBackup();
 
 server.listen(config.port, config.host, () => {
-  log(`Grok Bot Dashboard on http://${config.host}:${config.port} (auth: ${config.authMode}, to-dos: ${todoist ? "Todoist" : "from bots"}, PoliTO: ${polito ? "on" : "off"}, time zone: ${config.tz})`);
+  log(`Grok Bot Dashboard on http://${config.host}:${config.port} (auth: ${config.authMode}, to-dos: ${deps.todoist ? "Todoist" : "from bots"}, PoliTO: ${polito ? "on" : "off"}, time zone: ${config.tz})`);
 });
 
 function shutdown() {

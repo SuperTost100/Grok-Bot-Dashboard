@@ -30,6 +30,7 @@
   <symbol id="i-archive" viewBox="0 0 24 24"><rect x="3.5" y="4.5" width="17" height="4.5" rx="1.5"/><path d="M5 9v9a2 2 0 0 0 2 2h10a2 2 0 0 0 2-2V9M10 13h4"/></symbol>
   <symbol id="i-bell" viewBox="0 0 24 24"><path d="M6 16V11a6 6 0 0 1 12 0v5l1.5 2h-15z"/><path d="M10 20.5a2 2 0 0 0 4 0"/></symbol>
   <symbol id="i-x" viewBox="0 0 24 24"><path d="M6 6l12 12M18 6L6 18"/></symbol>
+  <symbol id="i-sliders" viewBox="0 0 24 24"><path d="M4 7h9M17 7h3M4 17h3M11 17h9"/><circle cx="15" cy="7" r="2"/><circle cx="9" cy="17" r="2"/></symbol>
   <symbol id="i-msg" viewBox="0 0 24 24"><path d="M5 18.5V7a2 2 0 0 1 2-2h10a2 2 0 0 1 2 2v7a2 2 0 0 1-2 2H8z"/></symbol>
 </svg>
 
@@ -44,6 +45,7 @@
       <div class="desk-tabs" role="tablist" aria-label="Views">
         <button role="tab" aria-selected="true" data-tab="today">Today</button>
         <button role="tab" aria-selected="false" data-tab="archive">Archive</button>
+        <button role="tab" aria-selected="false" data-tab="settings">Settings</button>
       </div>
       <button class="refresh" id="refresh" type="button" aria-label="Ask the bots for a fresh scan">
         <svg class="i" aria-hidden="true"><use href="#i-refresh"/></svg><span id="refresh-label">Loading</span>
@@ -86,6 +88,11 @@
     <label class="search"><svg class="i" aria-hidden="true"><use href="#i-search"/></svg><span class="sr-only">Search the archive</span><input id="arch-q" type="search" placeholder="Search the last 30 days" autocomplete="off"></label>
     <div class="list" id="archive"></div>
   </div>
+
+  <div class="view" id="view-settings" hidden>
+    <div id="settings"><div class="skeleton" aria-label="Loading"><div></div></div></div>
+    <p class="settings-note">Your Tailscale login, the bot token, the port and the time zone stay in <code>.env</code>, so a typo here can't lock you out.</p>
+  </div>
 </main>
 
 <p class="foot" id="foot"></p>
@@ -95,6 +102,7 @@
 <nav class="tabbar" role="tablist" aria-label="Views">
   <button role="tab" aria-selected="true" data-tab="today"><svg class="i" aria-hidden="true"><use href="#i-today"/></svg>Today</button>
   <button role="tab" aria-selected="false" data-tab="archive"><svg class="i" aria-hidden="true"><use href="#i-archive"/></svg>Archive</button>
+  <button role="tab" aria-selected="false" data-tab="settings"><svg class="i" aria-hidden="true"><use href="#i-sliders"/></svg>Settings</button>
 </nav>
 </body>
 </html>

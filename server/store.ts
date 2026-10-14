@@ -203,6 +203,10 @@ CREATE TABLE IF NOT EXISTS todos (
   completed_due TEXT,
   PRIMARY KEY (bot, id)
 );
+CREATE TABLE IF NOT EXISTS settings (
+  key TEXT PRIMARY KEY,
+  value TEXT NOT NULL
+);
 `;
 
 // Columns added after the first release, as [table, column, definition].
@@ -365,6 +369,18 @@ export class Store {
       this.db.exec("ROLLBACK");
       throw err;
     }
+  }
+
+  // Settings saved on the Settings page, as JSON text
+
+  getSetting(key: string): string | null {
+    const r = this.db.prepare("SELECT value FROM settings WHERE key = ?").get(key) as Row | undefined;
+    return r ? String(r.value) : null;
+  }
+
+  setSetting(key: string, value: string | null) {
+    if (value === null) this.db.prepare("DELETE FROM settings WHERE key = ?").run(key);
+    else this.db.prepare("INSERT INTO settings (key, value) VALUES (?, ?) ON CONFLICT (key) DO UPDATE SET value = excluded.value").run(key, value);
   }
 
   // Bots
