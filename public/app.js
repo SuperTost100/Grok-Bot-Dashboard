@@ -246,9 +246,10 @@ function renderHeader() {
   const hooks = s.bots.filter((b) => b.hasWebhook).length;
   // PoliTO has a filter chip like a bot, but no bot behind it.
   const real = s.bots.filter((b) => b.slug !== "polito").length;
-  $("#foot").textContent = real
+  const runs = s.grokRunsToday == null ? "" : ` Grok runs today: ${s.grokRunsToday}.`;
+  $("#foot").textContent = (real
     ? `${real} bot${real > 1 ? "s" : ""} connected. ${hooks ? "Taps reach the bots within seconds." : "No bot has a webhook yet, so taps wait for the next scheduled scan."}`
-    : "No bot has posted yet. Set up the Dashboard bot from bot/README.md in the repo.";
+    : "No bot has posted yet. Set up the Dashboard bot from bot/README.md in the repo.") + runs;
 }
 
 function renderFilters() {
@@ -584,6 +585,9 @@ function settingSource(s) {
 function settingControl(s) {
   const id = `set-${s.key}`;
   const invalid = ui.settingErrors.has(s.key) ? ` aria-invalid="true" aria-describedby="err-${esc(s.key)}"` : "";
+  if (s.type === "choice") {
+    return `<select id="${id}" data-setting="${esc(s.key)}"${invalid}>${s.options.map(([v, l]) => `<option value="${esc(v)}"${v === s.value ? " selected" : ""}>${esc(l)}</option>`).join("")}</select>`;
+  }
   if (s.type === "bool") {
     return `<input type="checkbox" class="switch" id="${id}" data-setting="${esc(s.key)}"${s.value ? " checked" : ""}${invalid}>`;
   }

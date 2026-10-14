@@ -16,12 +16,14 @@ If the local command tool fails because the computer is offline, stop at once an
 
 ## Every run
 
-1. **Taps.** Run `grokdash actions`. Do each action and report it with `grokdash done ID "what you did"` or `grokdash fail ID "why"`. If the dashboard's webhook started this run and `refreshRequested` is false, stop here.
-2. **Check for news.** Read each source in "Your setup" for messages since `lastScanAt` from `grokdash actions`, not since your last run. Fetch only those messages, plus at most the last 20 of a chat when you need context.
-3. **Nothing new?** If no source has anything new and this isn't an agenda run (see "Your setup"), finish with `grokdash scanned STARTED_AT` and stop.
-4. **Cards.** Post all new cards in one call: `grokdash post '{"items": [CARD, CARD]}'`. Update the catch-up digests that changed. Close the cards the news settled with `grokdash close KEY "reason"`, for example when the user already answered from the phone.
-5. **Agenda runs only.** Send today's and tomorrow's complete agenda with `grokdash agenda`. It replaces both days. Run `grokdash list` and close the cards that no longer apply. Also send the agenda on any run where a message moved or added an event.
-6. **Finish** with `grokdash scanned STARTED_AT`, where `STARTED_AT` is the `now` that `grokdash actions` printed. Skip it if a source failed, so the next run looks back far enough. Never send an agenda built from a source that failed.
+1. **Taps.** Run `grokdash actions`. Do each action and report it with `grokdash done ID "what you did"` or `grokdash fail ID "why"`.
+2. **Inbox.** `grokdash actions` also lists `inbox`: chats the dashboard sorted and found need a reply or an answer from the user. Each has a `key`, the `messages` (`isNew` marks the new ones), `need` and `urgent`. For each one, write the card with that exact key: `choice` with 2 to 4 likely answers, or `draft` with a reply. If it needs nothing after all, close the key with `grokdash close KEY "reason"`. Post all inbox cards in one call. The dashboard already pinged the user about urgent ones, so don't notify anyone.
+3. **Stop here** unless this is a scheduled run or `refreshRequested` is true. When the dashboard reads the user's sources itself, neither happens, and your run ends after step 2 with one short line.
+4. **Check for news.** Read each source in "Your setup" for messages since `lastScanAt` from `grokdash actions`, not since your last run. Fetch only those messages, plus at most the last 20 of a chat when you need context.
+5. **Nothing new?** If no source has anything new and this isn't an agenda run (see "Your setup"), finish with `grokdash scanned STARTED_AT` and stop.
+6. **Cards.** Post all new cards in one call: `grokdash post '{"items": [CARD, CARD]}'`. Update the catch-up digests that changed. Close the cards the news settled with `grokdash close KEY "reason"`, for example when the user already answered from the phone.
+7. **Agenda runs only.** Send today's and tomorrow's complete agenda with `grokdash agenda`. It replaces both days. Run `grokdash list` and close the cards that no longer apply. Also send the agenda on any run where a message moved or added an event.
+8. **Finish** with `grokdash scanned STARTED_AT`, where `STARTED_AT` is the `now` that `grokdash actions` printed. Skip it if a source failed, so the next run looks back far enough. Never send an agenda built from a source that failed.
 
 ## Actions
 

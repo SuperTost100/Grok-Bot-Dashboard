@@ -10,6 +10,7 @@ import { checkWebhookUrl } from "./webhook.ts";
 import { POLITO_BOT, type PolitoSync } from "./polito.ts";
 import { GROUPS, SettingError, Settings } from "./settings.ts";
 import type { Sources } from "./sources/index.ts";
+import type { Triage } from "./triage.ts";
 import { CALENDAR_OWNER } from "./sources/calendar.ts";
 
 /** A route result sent as-is instead of as JSON, like an image. */
@@ -155,7 +156,9 @@ export interface AppDeps {
   polito?: PolitoSync | null;
   /** WhatsApp, mail and calendars the dashboard reads itself. */
   sources?: Sources | null;
-  notify?: (bot: string, reason: "actions" | "refresh") => void;
+  /** Jev sorting the messages the sources read. */
+  triage?: Triage | null;
+  notify?: (bot: string, reason: "actions" | "refresh" | "inbox") => void;
   /** The last webhook ping to a bot and whether its routine accepted it. */
   lastPing?: (bot: string) => { at: number; ok: boolean } | undefined;
   log?: (msg: string) => void;
@@ -178,7 +181,9 @@ export function createApp(deps: AppDeps) {
   /** The scheduled run and the accepted ping a bot missed since it last showed up (empty while it's on time). */
   function missed(b: Bot): number[] {
     const now = store.now();
-    const slot = lastSlot(now - OFFLINE_AFTER_MS, b.schedule, tz);
+    // With triage on, the Grok bot runs only when woken: its old run times no longer mean anything.
+    const schedule = deps.triage?.active() && b.slug === settings.str("grokBot") ? [] : b.schedule;
+    const slot = lastSlot(now - OFFLINE_AFTER_MS, schedule, tz);
     const ping = deps.lastPing?.(b.slug);
     return [slot, ping?.ok && now - ping.at > OFFLINE_AFTER_MS ? ping.at : null].filter((t): t is number => t !== null && t > (b.lastSeenAt ?? 0));
   }
@@ -235,6 +240,7 @@ export function createApp(deps: AppDeps) {
       agenda: agenda(day),
       polito: deps.polito ? { error: deps.polito.error() } : null,
       sourceProblems: deps.sources?.problems() ?? [],
+      grokRunsToday: deps.triage?.active() ? deps.triage.runsToday() : null,
     };
   }
 
@@ -403,6 +409,7 @@ export function createApp(deps: AppDeps) {
         example: { key: "wa:120363@g.us:poll-7", kind: "choice", app: "whatsapp", source: "WhatsApp · Lab group", title: "Marco needs your vote on the lab swap", urgent: "answer by 14:00", options: [{ label: "Vote Tuesday", instruction: "Vote Tuesday in the Lab group poll" }] },
         list: "GET /api/bot/items?status=open|closed|all", close: "POST /api/bot/items/close {key, reason}",
       },
+      inbox: "GET /api/bot/actions also returns inbox: chats the dashboard's triage handed you, each with key, source, app, chat, urgent, need (reply or decision) and messages (isNew marks the new ones). For each, post one card with that exact key: kind choice with 2 to 4 answers, or kind draft with a reply. If it needs nothing after all, close the key. Never send anything yourself.",
       actions: {
         take: "GET /api/bot/actions claims every waiting action. Do each one once, using its id to avoid doing it twice.",
         report: "POST /api/bot/actions/<id> {ok: true|false, result: 'one line'}. Report every action you took.",
@@ -453,6 +460,7 @@ export function createApp(deps: AppDeps) {
     if (new Set(keys).size !== keys.length) throw bad("Two items in this call share a key. Send each key once.");
     const results = parsed.map((p) => {
       const r = store.upsertItem(p);
+      if (p.key && p.bot === settings.str("grokBot")) deps.triage?.ack(p.key);
       return { id: r.item.id, key: r.item.key, status: r.item.status, created: r.created, reopened: r.reopened, ignored: r.ignored };
     });
     return batch ? { results } : results[0];
@@ -476,6 +484,7 @@ export function createApp(deps: AppDeps) {
     if (!item || item.bot !== bot) throw new HttpError(404, "No item with that id or key for this bot.");
     if (store.pendingActionFor(item.id)?.status === "claimed") throw conflict("You hold an action on this card. Report it instead of closing the card.");
     const closed = store.closeItem(item.id, "bot", text(b.reason, "reason", 200) || "Closed by the bot");
+    if (item.key && bot === settings.str("grokBot")) deps.triage?.ack(item.key);
     return { id: closed!.id, status: closed!.status };
   });
 
@@ -537,8 +546,11 @@ export function createApp(deps: AppDeps) {
     store.promoteDue(bot);
     const actions = store.claimActions(bot).map(actionForBot);
     const b = store.getBot(bot)!;
+    // The chats triage queued for this bot ride along with its actions, whatever woke it.
+    const inbox = deps.triage?.active() && bot === settings.str("grokBot") ? deps.triage.claimForGrok() : [];
     return {
       actions,
+      inbox,
       refreshRequested: Boolean(b.refreshRequestedAt),
       lastScanAt: b.lastScanAt ? localStamp(new Date(b.lastScanAt), tz) : null,
       now: localStamp(new Date(store.now()), tz),
@@ -608,7 +620,11 @@ export function createApp(deps: AppDeps) {
     return { ...res, state: await state() };
   });
 
-  const settingsView = () => ({ groups: GROUPS, settings: settings.list(), status: deps.sources?.status() ?? [] });
+  const settingsView = () => ({
+    groups: GROUPS,
+    settings: settings.list(),
+    status: [...(deps.sources?.status() ?? []), ...(deps.triage?.status() ?? [])],
+  });
 
   route("GET", "/api/ui/settings", "ui", () => settingsView());
 
@@ -634,12 +650,22 @@ export function createApp(deps: AppDeps) {
   });
 
   route("POST", "/api/ui/refresh", "ui", async () => {
-    const bots = store.requestRefresh();
+    // With triage on, the dashboard reads the sources itself: Refresh reads them now and asks
+    // the Grok bot for nothing. Other bots still get asked.
+    const triageOn = Boolean(deps.triage?.active());
+    const grok = settings.str("grokBot");
+    const bots = store.listBots().filter((b) => !(triageOn && b.slug === grok));
+    for (const bot of bots) store.requestRefresh(bot.slug);
     for (const bot of bots) if (bot.webhookUrl) notify(bot.slug, "refresh");
+    // Chats still waiting for Grok (say, it missed its last wake) go to it when you press Refresh.
+    if (triageOn && deps.triage!.waiting() > 0) {
+      deps.triage!.woke();
+      notify(grok, "inbox");
+    }
     if (deps.polito) void deps.polito.sync();
     // PoliTO turned off after it ran: nothing would ever answer this refresh.
     else store.clearRefresh(POLITO_BOT);
-    if (deps.sources) void deps.sources.refresh();
+    if (deps.sources) void deps.sources.refresh().then(() => deps.triage?.tick());
     return { ok: true, webhooks: bots.filter((x) => x.webhookUrl).length, state: await state() };
   });
 
