@@ -16,7 +16,13 @@ export function calendarUrls(raw: string): string[] {
     .split(/\s+/)
     .filter(Boolean)
     .map((u) => u.replace(/^webcal:\/\//i, "https://"))
-    .filter((u) => /^https?:\/\/\S+$/i.test(u));
+    .filter((u) => {
+      try {
+        return /^https?:$/.test(new URL(u).protocol);
+      } catch {
+        return false;
+      }
+    });
 }
 
 const pad = (n: number) => String(n).padStart(2, "0");
@@ -47,8 +53,14 @@ function occurrence(start: ICAL.Time, end: ICAL.Time | null, item: ICAL.Event, t
 
 const cancelled = (c: ICAL.Component) => String(c.getFirstPropertyValue("status") ?? "").toUpperCase() === "CANCELLED";
 
-/** The events of one iCal file that touch the days [from, to). */
-export function eventsFromIcs(ics: string, from: string, to: string, tz: string, app: string): AgendaEvent[] {
+/** Repeats expanded per event, about 0.6 s of work. An hourly event from years ago can need more. */
+const MAX_REPEATS = 100_000;
+
+/**
+ * The events of one iCal file that touch the days [from, to).
+ * `skipped` counts repeating events too long to expand, so the page can say an agenda may be missing one.
+ */
+export function eventsFromIcs(ics: string, from: string, to: string, tz: string, app: string): { events: AgendaEvent[]; skipped: number } {
   const root = new ICAL.Component(ICAL.parse(ics));
   for (const vtz of root.getAllSubcomponents("vtimezone")) ICAL.TimezoneService.register(vtz);
   const masters = new Map<string, ICAL.Event>();
@@ -58,43 +70,91 @@ export function eventsFromIcs(ics: string, from: string, to: string, tz: string,
     if (ev.isRecurrenceException()) exceptions.push(ev);
     else masters.set(ev.uid, ev);
   }
-  for (const ex of exceptions) masters.get(ex.uid)?.relateException(ex);
 
   const windowEnd = zonedToEpoch(`${to}T00:00:00`, tz);
   const out: AgendaEvent[] = [];
+  const add = (start: ICAL.Time, end: ICAL.Time | null, item: ICAL.Event) => {
+    const o = occurrence(start, end, item, tz, app);
+    if (overlaps(o.start, o.end, from, to)) out.push(o);
+  };
+  // A moved occurrence counts on the day it moved to, wherever its original date was.
+  // Its original date is left out of the series below.
+  const moved = new Map<string, Set<string>>();
+  for (const ex of exceptions) {
+    if (!masters.has(ex.uid)) continue;
+    let set = moved.get(ex.uid);
+    if (!set) moved.set(ex.uid, (set = new Set()));
+    set.add(ex.recurrenceId.toUnixTime().toString());
+    if (!cancelled(ex.component)) add(ex.startDate, ex.endDate, ex);
+  }
+  let skipped = 0;
   for (const ev of masters.values()) {
     if (cancelled(ev.component)) continue;
     if (!ev.isRecurring()) {
-      const o = occurrence(ev.startDate, ev.endDate, ev, tz, app);
-      if (overlaps(o.start, o.end, from, to)) out.push(o);
+      add(ev.startDate, ev.endDate, ev);
       continue;
     }
+    const duration = ev.duration;
+    const skip = moved.get(ev.uid);
     const it = ev.iterator();
-    // A daily event for years is a long list; past the window nothing more can match.
-    for (let i = 0, next = it.next(); next && i < 5000; i++, next = it.next()) {
+    let n = 0;
+    for (let next = it.next(); next; next = it.next()) {
+      if (++n > MAX_REPEATS) {
+        skipped++;
+        break;
+      }
+      // Past the window (with a day's margin for time zones), nothing more can match.
       if (next.toJSDate().getTime() >= windowEnd + 86_400_000) break;
-      const d = ev.getOccurrenceDetails(next);
-      if (cancelled(d.item.component)) continue;
-      const o = occurrence(d.startDate, d.endDate, d.item, tz, app);
-      if (overlaps(o.start, o.end, from, to)) out.push(o);
+      if (skip?.has(next.toUnixTime().toString())) continue;
+      const end = next.clone();
+      end.addDuration(duration);
+      add(next, end, ev);
     }
   }
-  return out.sort((a, b) => (a.start < b.start ? -1 : a.start > b.start ? 1 : 0));
+  return { events: out.sort((a, b) => (a.start < b.start ? -1 : a.start > b.start ? 1 : 0)), skipped };
 }
 
 /** Fetch every calendar and return today's and tomorrow's events. Fails if any calendar fails, so the agenda never shows half a day. */
-export async function readCalendars(urls: string[], now: number, tz: string, fetchImpl: Fetch = fetch): Promise<{ from: string; to: string; events: AgendaEvent[] }> {
+export async function readCalendars(
+  urls: string[],
+  now: number,
+  tz: string,
+  fetchImpl: Fetch = fetch,
+): Promise<{ from: string; to: string; events: AgendaEvent[]; skipped: number }> {
   const from = localStamp(new Date(now), tz).slice(0, 10);
   const to = addDays(from, 2);
   const events: AgendaEvent[] = [];
+  let skipped = 0;
   for (const [i, url] of urls.entries()) {
-    const res = await fetchImpl(url, { signal: AbortSignal.timeout(30_000), redirect: "follow" });
-    // The address is a secret, so errors name the calendar by its position, never by its URL.
-    if (!res.ok) throw new Error(`Calendar ${i + 1} answered ${res.status}${res.status === 404 ? ". Its secret address may have been reset" : ""}`);
-    const text = await res.text();
-    if (!text.includes("BEGIN:VCALENDAR")) throw new Error(`Calendar ${i + 1} isn't an iCal file. Use the secret address in iCal format`);
-    const app = /(^|\.)google\.com$/i.test(new URL(url).hostname) ? "googlecalendar" : "";
-    events.push(...eventsFromIcs(text, from, to, tz, app));
+    // The address is a secret, and fetch errors quote it. So errors name the calendar by its position
+    // and give only a short reason, never the message of the error underneath.
+    const name = `Calendar ${i + 1}`;
+    let res: Response;
+    let text: string;
+    try {
+      res = await fetchImpl(url, { signal: AbortSignal.timeout(30_000), redirect: "follow" });
+      text = await res.text();
+    } catch (err) {
+      const e = err as Error & { cause?: { code?: string } };
+      const why = e.name === "TimeoutError" ? "didn't answer in time" : e.cause?.code === "ENOTFOUND" ? "has a server name that doesn't exist" : "couldn't be reached";
+      throw new Error(`${name} ${why}. Check its address.`);
+    }
+    if (!res.ok) throw new Error(`${name} answered ${res.status}${res.status === 404 ? ". Its secret address may have been reset" : ""}.`);
+    if (!text.includes("BEGIN:VCALENDAR")) throw new Error(`${name} isn't an iCal file. Use the secret address in iCal format.`);
+    let host = "";
+    try {
+      host = new URL(url).hostname;
+    } catch {
+      // calendarUrls only lets through addresses that parse.
+    }
+    let parsed: ReturnType<typeof eventsFromIcs>;
+    try {
+      parsed = eventsFromIcs(text, from, to, tz, /(^|\.)google\.com$/i.test(host) ? "googlecalendar" : "");
+    } catch {
+      throw new Error(`${name} couldn't be read: the iCal file is broken.`);
+    }
+    events.push(...parsed.events);
+    skipped += parsed.skipped;
   }
-  return { from, to, events: events.sort((a, b) => (a.start < b.start ? -1 : a.start > b.start ? 1 : 0)) };
+  return { from, to, events: events.sort((a, b) => (a.start < b.start ? -1 : a.start > b.start ? 1 : 0)), skipped };
 }

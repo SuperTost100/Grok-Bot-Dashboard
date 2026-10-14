@@ -8,6 +8,9 @@ import { FIRST_LOOK_BACK_MS } from "./mail.ts";
 type Fetch = typeof fetch;
 
 export const SESSION = "default";
+const PAGE = 100;
+/** Pages of one chat read per run. A chat with more waits for the next run. */
+const MAX_PAGES = 10;
 const MAX_TEXT = 4000;
 
 export interface WaStatus {
@@ -55,9 +58,10 @@ export class Waha {
     });
     if (res.status === 404 && method === "GET" && path === `/api/sessions/${SESSION}`) return null;
     if (!res.ok) {
-      const detail = await res.text().then((t) => t.slice(0, 200), () => "");
+      // WAHA's error text isn't shown: it can echo chat ids and message text.
+      await res.body?.cancel().catch(() => {});
       const hint = res.status === 401 ? " Check the WAHA API key." : "";
-      throw new Error(`WAHA answered ${res.status} on ${method} ${path.split("?")[0]}${detail ? `: ${detail}` : ""}.${hint}`);
+      throw new Error(`WAHA answered ${res.status}.${hint}`);
     }
     if (raw) return Buffer.from(await res.arrayBuffer());
     return res.status === 204 ? null : res.json();
@@ -86,12 +90,14 @@ export class Waha {
     return (await this.call("GET", `/api/${SESSION}/auth/qr?format=image`, undefined, true)) as Buffer;
   }
 
-  async chats(): Promise<ChatSummary[]> {
-    return (await this.call("GET", `/api/${SESSION}/chats/overview?limit=100`)) as ChatSummary[];
+  /** One page of chats, the most recently active first. */
+  async chats(offset: number): Promise<ChatSummary[]> {
+    return (await this.call("GET", `/api/${SESSION}/chats/overview?limit=${PAGE}&offset=${offset}`)) as ChatSummary[];
   }
 
-  async messagesSince(chatId: string, since: number): Promise<WaMessage[]> {
-    const q = `limit=100&sortBy=timestamp&sortOrder=asc&downloadMedia=false&filter.timestamp.gte=${since}`;
+  /** One page of a chat's messages since a time, oldest first. */
+  async messagesSince(chatId: string, since: number, offset: number): Promise<WaMessage[]> {
+    const q = `limit=${PAGE}&offset=${offset}&sortBy=timestamp&sortOrder=asc&downloadMedia=false&filter.timestamp.gte=${since}`;
     return (await this.call("GET", `/api/${SESSION}/chats/${encodeURIComponent(chatId)}/messages?${q}`)) as WaMessage[];
   }
 }
@@ -133,18 +139,27 @@ export async function readWhatsApp(waha: Waha, store: Store): Promise<number | n
   const cursor = Number(store.getState(key) ?? Math.floor((store.now() - FIRST_LOOK_BACK_MS) / 1000));
   // Messages can reach WAHA late (a phone that was offline), so each run looks 10 minutes behind the cursor.
   const since = cursor - 600;
-  let newest = cursor;
+  const started = Math.floor(store.now() / 1000);
+  // The next cursor: now, unless a chat couldn't be read to the end, then where that chat stopped.
+  let next = started;
   const found: InboxInput[] = [];
-  for (const chat of await waha.chats()) {
-    const last = chat.lastMessage?.timestamp ?? 0;
-    if (skipChat(chat.id) || last < since) continue;
-    for (const m of await waha.messagesSince(chat.id, since)) {
-      if (!m.id || !m.timestamp) continue;
-      found.push(toInbox(chat, m));
-      newest = Math.max(newest, m.timestamp);
+  const active: ChatSummary[] = [];
+  for (let offset = 0; ; offset += PAGE) {
+    const page = await waha.chats(offset);
+    active.push(...page.filter((c) => !skipChat(c.id) && (c.lastMessage?.timestamp ?? 0) >= since));
+    // Chats come newest first: once a page reaches back past the cursor, the rest are older still.
+    if (page.length < PAGE || page.some((c) => (c.lastMessage?.timestamp ?? 0) < since)) break;
+  }
+  for (const chat of active) {
+    for (let p = 0; ; p++) {
+      const page = await waha.messagesSince(chat.id, since, p * PAGE);
+      for (const m of page) if (m.id && m.timestamp) found.push(toInbox(chat, m));
+      if (page.length < PAGE) break;
+      if (p + 1 >= MAX_PAGES) {
+        next = Math.min(next, page.at(-1)!.timestamp);
+        break;
+      }
     }
   }
-  const added = store.addInbox(found);
-  store.setState(key, String(newest));
-  return added;
+  return store.addInbox(found, { key, value: String(Math.max(cursor, next)) });
 }

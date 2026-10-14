@@ -125,38 +125,43 @@ async function connect(a: MailAccount): Promise<ImapFlow> {
 
 interface Cursor { uidValidity: string; lastUid: number }
 
-/** Read one folder from where the last run stopped. */
-async function readFolder(client: ImapFlow, a: MailAccount, path: string, folder: "inbox" | "sent", store: Store): Promise<InboxInput[]> {
+/**
+ * Read one folder from where the last run stopped, oldest first, at most MAX_PER_RUN messages a run.
+ * A longer backlog continues on the next run. The messages and the cursor are saved together.
+ */
+export async function readFolder(client: ImapFlow, a: MailAccount, path: string, folder: "inbox" | "sent", store: Store): Promise<number> {
   const lock = await client.getMailboxLock(path, { readOnly: true });
   try {
     const box = client.mailbox;
-    if (!box) return [];
+    if (!box) return 0;
     const key = `mail:${a.slot}:${a.user}@${a.host}:${path}`;
     const saved = store.getState(key);
-    let cursor: Cursor | null = saved ? JSON.parse(saved) : null;
+    const cursor: Cursor | null = saved ? JSON.parse(saved) : null;
     const validity = String(box.uidValidity);
     let uids: number[];
+    let lastUid: number;
     if (!cursor || cursor.uidValidity !== validity) {
       // First run, or the server renumbered the folder: start from a few days back.
       uids = (await client.search({ since: new Date(store.now() - FIRST_LOOK_BACK_MS) }, { uid: true })) || [];
-      // Everything up to now counts as read from here on, even in a folder with nothing recent.
-      cursor = { uidValidity: validity, lastUid: Math.max(0, Number(box.uidNext ?? 1) - 1) };
+      // With nothing recent, everything up to now counts as read.
+      lastUid = uids.length ? Math.min(...uids) - 1 : Math.max(0, Number(box.uidNext ?? 1) - 1);
     } else {
-      uids = ((await client.search({ uid: `${cursor.lastUid + 1}:*` }, { uid: true })) || []).filter((u) => u > cursor!.lastUid);
+      lastUid = cursor.lastUid;
+      // "n:*" also returns the newest message when its UID is below n, so filter again.
+      uids = ((await client.search({ uid: `${lastUid + 1}:*` }, { uid: true })) || []).filter((u) => u > lastUid);
     }
-    uids = uids.sort((x, y) => x - y).slice(-MAX_PER_RUN);
-    const out: InboxInput[] = [];
-    if (uids.length) {
-      for await (const msg of client.fetch(uids, { uid: true, internalDate: true, source: { maxLength: 400_000 } }, { uid: true })) {
+    const batch = uids.sort((x, y) => x - y).slice(0, MAX_PER_RUN);
+    const found: InboxInput[] = [];
+    if (batch.length) {
+      for await (const msg of client.fetch(batch, { uid: true, internalDate: true, source: { maxLength: 400_000 } }, { uid: true })) {
         if (!msg.source) continue;
         const parsed = await PostalMime.parse(msg.source);
         const internal = msg.internalDate ? new Date(msg.internalDate).getTime() : store.now();
-        out.push(toInbox(a, parsed, msg.uid, folder, internal));
+        found.push(toInbox(a, parsed, msg.uid, folder, internal));
       }
+      lastUid = batch.at(-1)!;
     }
-    const last = Math.max(cursor.lastUid, ...uids);
-    store.setState(key, JSON.stringify({ uidValidity: validity, lastUid: last }));
-    return out;
+    return store.addInbox(found, { key, value: JSON.stringify({ uidValidity: validity, lastUid }) });
   } finally {
     lock.release();
   }
@@ -166,10 +171,10 @@ async function readFolder(client: ImapFlow, a: MailAccount, path: string, folder
 export async function readMailbox(a: MailAccount, store: Store): Promise<number> {
   const client = await connect(a);
   try {
-    const found = await readFolder(client, a, "INBOX", "inbox", store);
+    let added = await readFolder(client, a, "INBOX", "inbox", store);
     const sent = (await client.list()).find((b) => b.specialUse === "\\Sent");
-    if (sent) found.push(...(await readFolder(client, a, sent.path, "sent", store)));
-    return store.addInbox(found);
+    if (sent) added += await readFolder(client, a, sent.path, "sent", store);
+    return added;
   } finally {
     await client.logout().catch(() => client.close());
   }

@@ -22,6 +22,10 @@ export interface SourceStatus {
 interface Track {
   group: string;
   everyMs: number;
+  /** The settings the last run started with. A run with other settings starts fresh. */
+  sig: string;
+  /** Settings changed while a run was going: run again with the new ones when it ends. */
+  again: boolean;
   lastRun: number;
   lastOk: number | null;
   failingSince: number | null;
@@ -41,7 +45,8 @@ export function plainError(err: unknown): string {
   if (e?.code === "ECONNREFUSED" || /ECONNREFUSED/.test(msg)) return "The server refused the connection. Check the address and port.";
   if (/ETIMEDOUT|timed? ?out|TimeoutError/i.test(`${e?.code ?? ""} ${e?.name ?? ""} ${msg}`)) return "The server didn't answer in time.";
   if (/fetch failed/i.test(msg)) return "Couldn't connect. Check the address.";
-  return msg;
+  // A library may quote the address it called, and some addresses (iCal) are secrets.
+  return msg.replace(/\b[a-z][a-z0-9+.-]*:\/\/\S+/gi, "[address]").slice(0, 300);
 }
 
 // A source that keeps failing this long shows in the banner on Today. Shorter blips only show on Settings.
@@ -70,7 +75,7 @@ export function createSources(
   const tracks = new Map<string, Track>();
   const track = (group: string, everyMs: number) => {
     let t = tracks.get(group);
-    if (!t) tracks.set(group, (t = { group, everyMs, lastRun: 0, lastOk: null, failingSince: null, error: "", note: "", running: null }));
+    if (!t) tracks.set(group, (t = { group, everyMs, sig: "", again: false, lastRun: 0, lastOk: null, failingSince: null, error: "", note: "", running: null }));
     return t;
   };
 
@@ -89,14 +94,16 @@ export function createSources(
     return { slot: n, name: settings.str(`mail${n}Name`) || `Mail ${n}`, host: where.host, port: where.port, user, password };
   };
 
-  // Each source: its group, how often it runs, and the run itself (null when it's off).
-  type Job = { group: string; everyMs: number; run: (() => Promise<string>) | null };
+  // Each source: its group, how often it runs, the settings it runs with, and the run itself (null when it's off).
+  type Job = { group: string; everyMs: number; sig: string; run: (() => Promise<string>) | null };
+  const sigOf = (keys: string[]) => JSON.stringify(keys.map((k) => settings.get(k)));
   function jobs(): Job[] {
     const list: Job[] = [];
     const wa = waha();
     list.push({
       group: "WhatsApp",
       everyMs: 60_000,
+      sig: sigOf(["whatsappUrl", "whatsappApiKey"]),
       run: wa &&
         (async () => {
           const added = await readWhatsApp(wa, store);
@@ -110,6 +117,7 @@ export function createSources(
       list.push({
         group: `Mail ${n}`,
         everyMs: 120_000,
+        sig: sigOf([`mail${n}Host`, `mail${n}User`, `mail${n}Password`]),
         run: a &&
           (async () => {
             if ("error" in a) throw new Error(a.error);
@@ -120,14 +128,19 @@ export function createSources(
       });
     }
     const urls = calendarUrls(settings.str("calendarUrls"));
+    const calSig = sigOf(["calendarUrls"]);
     list.push({
       group: "Calendar",
       everyMs: 15 * 60_000,
+      sig: calSig,
       run: urls.length
         ? async () => {
-            const { from, to, events } = await readCalendars(urls, store.now(), tz);
+            const { from, to, events, skipped } = await readCalendars(urls, store.now(), tz);
+            // The addresses changed while this run fetched the old ones: its agenda is out of date.
+            if (sigOf(["calendarUrls"]) !== calSig) return "";
             store.replaceEvents(CALENDAR_OWNER, from, to, events, false);
-            return `${events.length} event${events.length === 1 ? "" : "s"} today and tomorrow`;
+            const note = `${events.length} event${events.length === 1 ? "" : "s"} today and tomorrow`;
+            return skipped ? `${note}. ${skipped} repeating event${skipped === 1 ? " repeats" : "s repeat"} too often to show` : note;
           }
         : null,
     });
@@ -136,7 +149,15 @@ export function createSources(
 
   function start(job: Job): Promise<void> {
     const t = track(job.group, job.everyMs);
-    if (t.running || !job.run) return t.running ?? Promise.resolve();
+    if (t.running) {
+      if (job.sig !== t.sig) t.again = true;
+      return t.running;
+    }
+    if (!job.run) return Promise.resolve();
+    if (job.sig !== t.sig) {
+      // New settings: old errors and notes belong to the old ones.
+      Object.assign(t, { sig: job.sig, lastOk: null, failingSince: null, error: "", note: "" });
+    }
     t.lastRun = store.now();
     t.running = job
       .run()
@@ -155,6 +176,11 @@ export function createSources(
       })
       .finally(() => {
         t.running = null;
+        if (t.again) {
+          t.again = false;
+          const latest = jobs().find((j) => j.group === job.group);
+          if (latest) void start(latest);
+        }
       });
     return t.running;
   }
@@ -170,8 +196,8 @@ export function createSources(
       for (const job of jobs()) {
         const t = track(job.group, job.everyMs);
         if (!job.run) {
-          // Switched off: forget the old state so switching on starts clean.
-          tracks.delete(job.group);
+          // Switched off: forget the old state so switching on starts clean, but not while a run is still going.
+          if (!t.running) tracks.delete(job.group);
           continue;
         }
         // After a failure, wait a little longer each time, up to 15 minutes, so a dead server isn't hammered.
@@ -186,7 +212,7 @@ export function createSources(
       return jobs().map((job) => {
         const t = tracks.get(job.group);
         if (!job.run) return { group: job.group, on: false, ok: true, text: "Off" };
-        if (!t || (!t.lastOk && !t.error)) return { group: job.group, on: true, ok: true, text: "Connecting…" };
+        if (!t || t.sig !== job.sig || (!t.lastOk && !t.error)) return { group: job.group, on: true, ok: true, text: "Connecting…" };
         if (t.error) return { group: job.group, on: true, ok: false, text: t.error };
         if (t.note === "qr") return { group: job.group, on: true, ok: false, text: "Not linked yet. Scan the QR code with WhatsApp on your phone.", needsQr: true };
         return { group: job.group, on: true, ok: true, text: `Read ${ago(t.lastOk!)}${t.note ? `. ${t.note}` : ""}` };

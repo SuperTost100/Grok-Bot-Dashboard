@@ -465,9 +465,13 @@ export class Store {
 
   // Inbox: messages read straight from WhatsApp and mail
 
-  /** Store new messages. A message already stored (same source and id) is skipped. Returns how many were new. */
-  addInbox(messages: InboxInput[]): number {
+  /**
+   * Store new messages. A message already stored (same source and id) is skipped. Returns how many were new.
+   * With `state`, a source's cursor is saved in the same transaction, so it never moves past messages that weren't stored.
+   */
+  addInbox(messages: InboxInput[], state?: { key: string; value: string }): number {
     return this.tx(() => {
+      if (state) this.setState(state.key, state.value);
       const ins = this.db.prepare(
         `INSERT OR IGNORE INTO inbox (source, ext_id, thread, thread_name, sender, from_me, is_group, automated, subject, text, link, at, received_at)
          VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
