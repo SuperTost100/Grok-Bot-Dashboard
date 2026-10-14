@@ -130,36 +130,50 @@ export function toInbox(chat: ChatSummary, m: WaMessage): InboxInput {
   };
 }
 
-/** Read new messages since the last run. Returns how many were new, or null when the account isn't linked. */
-export async function readWhatsApp(waha: Waha, store: Store): Promise<number | null> {
+/** A chat with more new messages than one run reads: where to go on. */
+type Resume = Record<string, { name: string; since: number; offset: number }>;
+
+/**
+ * Read new messages since the last run. Returns how many were new, or null when the account isn't linked.
+ * `current` says whether the settings this run started with still hold; if not, nothing is saved.
+ */
+export async function readWhatsApp(waha: Waha, store: Store, current: () => boolean = () => true): Promise<number | null> {
   const session = await waha.ensureSession();
   if (session.status !== "WORKING") return null;
   const key = `whatsapp:${session.me}`;
   // WhatsApp timestamps are seconds. Messages read twice are skipped as duplicates.
   const cursor = Number(store.getState(key) ?? Math.floor((store.now() - FIRST_LOOK_BACK_MS) / 1000));
+  const resume: Resume = JSON.parse(store.getState(`${key}:resume`) ?? "{}");
   // Messages can reach WAHA late (a phone that was offline), so each run looks 10 minutes behind the cursor.
   const since = cursor - 600;
   const started = Math.floor(store.now() / 1000);
-  // The next cursor: now, unless a chat couldn't be read to the end, then where that chat stopped.
-  let next = started;
   const found: InboxInput[] = [];
-  const active: ChatSummary[] = [];
+  const active = new Map<string, ChatSummary>();
   for (let offset = 0; ; offset += PAGE) {
     const page = await waha.chats(offset);
-    active.push(...page.filter((c) => !skipChat(c.id) && (c.lastMessage?.timestamp ?? 0) >= since));
+    for (const c of page) if (!skipChat(c.id) && (c.lastMessage?.timestamp ?? 0) >= since) active.set(c.id, c);
     // Chats come newest first: once a page reaches back past the cursor, the rest are older still.
     if (page.length < PAGE || page.some((c) => (c.lastMessage?.timestamp ?? 0) < since)) break;
   }
-  for (const chat of active) {
-    for (let p = 0; ; p++) {
-      const page = await waha.messagesSince(chat.id, since, p * PAGE);
+  // A chat cut short last time goes on from where it stopped, with the same starting point.
+  for (const [id, r] of Object.entries(resume)) if (!active.has(id)) active.set(id, { id, name: r.name });
+  const next: Resume = {};
+  for (const chat of active.values()) {
+    const from = resume[chat.id]?.since ?? since;
+    let offset = resume[chat.id]?.offset ?? 0;
+    for (let p = 0; ; p++, offset += PAGE) {
+      const page = await waha.messagesSince(chat.id, from, offset);
       for (const m of page) if (m.id && m.timestamp) found.push(toInbox(chat, m));
       if (page.length < PAGE) break;
       if (p + 1 >= MAX_PAGES) {
-        next = Math.min(next, page.at(-1)!.timestamp);
+        next[chat.id] = { name: chat.name ?? "", since: from, offset: offset + PAGE };
         break;
       }
     }
   }
-  return store.addInbox(found, { key, value: String(Math.max(cursor, next)) });
+  if (!current()) return 0;
+  return store.tx(() => {
+    store.setState(`${key}:resume`, Object.keys(next).length ? JSON.stringify(next) : null);
+    return store.addInbox(found, { key, value: String(Math.max(cursor, started)) });
+  });
 }

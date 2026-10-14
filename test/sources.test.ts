@@ -325,8 +325,58 @@ test("whatsapp: long chats are paged, and the cursor waits for a chat cut short"
   const store = new Store(":memory:", () => now * 1000);
   const waha = new Waha("http://waha:3000", "k", fetchImpl);
   assert.equal(await readWhatsApp(waha, store), 1000, "10 pages per run");
-  assert.ok(Number(store.getState("whatsapp:1")) < now, "the cursor stops where the busy chat was cut");
+  assert.match(store.getState("whatsapp:1:resume") ?? "", /big@g\.us/, "the busy chat is marked to go on");
   assert.equal(await readWhatsApp(waha, store), 150, "the next run gets the rest");
+  assert.equal(store.getState("whatsapp:1:resume"), null);
+});
+
+test("whatsapp: 1,500 messages within five minutes all arrive over two runs", async () => {
+  const now = Math.floor(Date.parse("2026-10-12T11:00:00Z") / 1000);
+  const dense = Array.from({ length: 1500 }, (_, i) => ({ id: `d${i}`, timestamp: now - 300 + Math.floor(i / 5), fromMe: false, body: `m${i}` }));
+  const fetchImpl = (async (input: URL | RequestInfo) => {
+    const u = new URL(String(input));
+    if (u.pathname === "/api/sessions/default") return json({ status: "WORKING", me: { id: "1@c.us" } });
+    if (u.pathname === "/api/default/chats/overview") return json(Number(u.searchParams.get("offset")) ? [] : [{ id: "dense@g.us", name: "Dense", lastMessage: { timestamp: now } }]);
+    const off = Number(u.searchParams.get("offset"));
+    const since = Number(u.searchParams.get("filter.timestamp.gte"));
+    return json(dense.filter((m) => m.timestamp >= since).slice(off, off + 100));
+  }) as typeof fetch;
+  let clock = now * 1000;
+  const store = new Store(":memory:", () => clock);
+  const waha = new Waha("http://waha:3000", "k", fetchImpl);
+  await readWhatsApp(waha, store);
+  clock += 60_000;
+  await readWhatsApp(waha, store);
+  assert.equal(store.untriaged(5000).length, 1500);
+});
+
+test("whatsapp: a run whose settings changed meanwhile saves nothing", async () => {
+  const f = fakeWaha();
+  f.link();
+  const store = new Store(":memory:", () => Date.parse("2026-10-12T11:00:00Z"));
+  assert.equal(await readWhatsApp(f.waha, store, () => false), 0);
+  assert.equal(store.untriaged().length, 0);
+  assert.equal(store.getState("whatsapp:39340000"), null, "the cursor didn't move either");
+});
+
+test("calendar: a change to this and all future occurrences applies", () => {
+  const ics = VCAL(`
+    BEGIN:VEVENT
+    UID:f@x
+    SUMMARY:Seminar
+    DTSTART:20261007T080000Z
+    DTEND:20261007T090000Z
+    RRULE:FREQ=WEEKLY
+    END:VEVENT
+    BEGIN:VEVENT
+    UID:f@x
+    RECURRENCE-ID;RANGE=THISANDFUTURE:20261014T080000Z
+    SUMMARY:Seminar (new time)
+    DTSTART:20261014T100000Z
+    DTEND:20261014T110000Z
+    END:VEVENT`);
+  const later = eventsFromIcs(ics, "2026-10-21", "2026-10-22", "Europe/Rome", "").events;
+  assert.deepEqual(later.map((e) => [e.title, e.start]), [["Seminar (new time)", "2026-10-21T12:00:00"]]);
 });
 
 test("a calendar whose address changes mid-run doesn't overwrite the new agenda", async () => {

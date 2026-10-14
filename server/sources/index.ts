@@ -100,13 +100,14 @@ export function createSources(
   function jobs(): Job[] {
     const list: Job[] = [];
     const wa = waha();
+    const waSig = sigOf(["whatsappUrl", "whatsappApiKey"]);
     list.push({
       group: "WhatsApp",
       everyMs: 60_000,
-      sig: sigOf(["whatsappUrl", "whatsappApiKey"]),
+      sig: waSig,
       run: wa &&
         (async () => {
-          const added = await readWhatsApp(wa, store);
+          const added = await readWhatsApp(wa, store, () => sigOf(["whatsappUrl", "whatsappApiKey"]) === waSig);
           if (added === null) return "qr";
           if (added) onNew(added);
           return "";
@@ -114,14 +115,16 @@ export function createSources(
     });
     for (const n of MAIL_SLOTS) {
       const a = mailAccount(n);
+      const keys = [`mail${n}Host`, `mail${n}User`, `mail${n}Password`];
+      const mailSig = sigOf(keys);
       list.push({
         group: `Mail ${n}`,
         everyMs: 120_000,
-        sig: sigOf([`mail${n}Host`, `mail${n}User`, `mail${n}Password`]),
+        sig: mailSig,
         run: a &&
           (async () => {
             if ("error" in a) throw new Error(a.error);
-            const added = await readMailbox(a, store);
+            const added = await readMailbox(a, store, () => sigOf(keys) === mailSig);
             if (added) onNew(added);
             return "";
           }),

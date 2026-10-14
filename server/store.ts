@@ -427,7 +427,9 @@ export class Store {
     await backup(this.db, file);
   }
 
+  /** Run fn in one transaction. Inside another transaction it simply joins that one. */
   tx<T>(fn: () => T): T {
+    if (this.db.isTransaction) return fn();
     this.db.exec("BEGIN IMMEDIATE");
     try {
       const out = fn();

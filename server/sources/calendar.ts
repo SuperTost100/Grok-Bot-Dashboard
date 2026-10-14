@@ -94,7 +94,6 @@ export function eventsFromIcs(ics: string, from: string, to: string, tz: string,
       add(ev.startDate, ev.endDate, ev);
       continue;
     }
-    const duration = ev.duration;
     const skip = moved.get(ev.uid);
     const it = ev.iterator();
     let n = 0;
@@ -105,10 +104,12 @@ export function eventsFromIcs(ics: string, from: string, to: string, tz: string,
       }
       // Past the window (with a day's margin for time zones), nothing more can match.
       if (next.toJSDate().getTime() >= windowEnd + 86_400_000) break;
+      // An occurrence moved on its own was added above, on the day it moved to.
       if (skip?.has(next.toUnixTime().toString())) continue;
-      const end = next.clone();
-      end.addDuration(duration);
-      add(next, end, ev);
+      // getOccurrenceDetails applies changes made to "this and all future" occurrences.
+      const d = ev.getOccurrenceDetails(next);
+      if (d.item !== ev && cancelled(d.item.component)) continue;
+      add(d.startDate, d.endDate, d.item);
     }
   }
   return { events: out.sort((a, b) => (a.start < b.start ? -1 : a.start > b.start ? 1 : 0)), skipped };

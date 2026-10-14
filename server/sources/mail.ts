@@ -129,7 +129,14 @@ interface Cursor { uidValidity: string; lastUid: number }
  * Read one folder from where the last run stopped, oldest first, at most MAX_PER_RUN messages a run.
  * A longer backlog continues on the next run. The messages and the cursor are saved together.
  */
-export async function readFolder(client: ImapFlow, a: MailAccount, path: string, folder: "inbox" | "sent", store: Store): Promise<number> {
+export async function readFolder(
+  client: ImapFlow,
+  a: MailAccount,
+  path: string,
+  folder: "inbox" | "sent",
+  store: Store,
+  current: () => boolean = () => true,
+): Promise<number> {
   const lock = await client.getMailboxLock(path, { readOnly: true });
   try {
     const box = client.mailbox;
@@ -161,6 +168,8 @@ export async function readFolder(client: ImapFlow, a: MailAccount, path: string,
       }
       lastUid = batch.at(-1)!;
     }
+    // The account was changed or switched off while this ran: keep nothing.
+    if (!current()) return 0;
     return store.addInbox(found, { key, value: JSON.stringify({ uidValidity: validity, lastUid }) });
   } finally {
     lock.release();
@@ -168,12 +177,12 @@ export async function readFolder(client: ImapFlow, a: MailAccount, path: string,
 }
 
 /** Read new mail and your new replies. Returns how many messages were new. */
-export async function readMailbox(a: MailAccount, store: Store): Promise<number> {
+export async function readMailbox(a: MailAccount, store: Store, current: () => boolean = () => true): Promise<number> {
   const client = await connect(a);
   try {
-    let added = await readFolder(client, a, "INBOX", "inbox", store);
+    let added = await readFolder(client, a, "INBOX", "inbox", store, current);
     const sent = (await client.list()).find((b) => b.specialUse === "\\Sent");
-    if (sent) added += await readFolder(client, a, sent.path, "sent", store);
+    if (sent) added += await readFolder(client, a, sent.path, "sent", store, current);
     return added;
   } finally {
     await client.logout().catch(() => client.close());
