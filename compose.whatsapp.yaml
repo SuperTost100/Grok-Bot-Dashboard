@@ -6,7 +6,7 @@
 # Then open Settings on the dashboard and scan the QR code under WhatsApp.
 services:
   waha:
-    image: devlikeapro/waha:2026.9.2
+    image: devlikeapro/waha:noweb-2026.9.2
     restart: unless-stopped
     environment:
       WAHA_API_KEY: ${WAHA_API_KEY:?set WAHA_API_KEY in .env}
