@@ -636,11 +636,17 @@ function renderSourceStatus() {
   }
   for (const el of $$("[data-qr-group]")) {
     const st = list.find((x) => x.group === el.dataset.qrGroup);
+    if (st?.needsLink) {
+      if (!el.querySelector("[data-act=wa-link]")) {
+        el.innerHTML = `<div class="qr qr-expired"><p>WhatsApp shows a QR code for a few minutes. Get a new one when your phone is at hand.</p><button class="btn primary" data-act="wa-link" data-slot="${st.slot}">Show a new QR code</button></div>`;
+      }
+      continue;
+    }
     if (!st?.needsQr) { el.innerHTML = ""; continue; }
     // WhatsApp replaces its code every 20 seconds or so; the image is fetched again with each status poll.
-    const src = `/api/ui/whatsapp/qr?t=${qrStamp}`;
-    if (!el.firstChild) {
-      el.innerHTML = `<div class="qr"><img alt="QR code to link WhatsApp" width="220" height="220"><ol><li>Open WhatsApp on your phone.</li><li>Go to Settings, then Linked devices.</li><li>Tap Link a device and point the camera at this code.</li></ol></div>`;
+    const src = `/api/ui/whatsapp/${st.slot}/qr?t=${qrStamp}`;
+    if (!el.querySelector("img")) {
+      el.innerHTML = `<div class="qr"><img alt="QR code to link WhatsApp" width="220" height="220"><ol><li>Open WhatsApp on your phone${st.slot === 2 ? " (the business number)" : ""}.</li><li>Go to Settings, then Linked devices.</li><li>Tap Link a device and point the camera at this code.</li></ol></div>`;
     }
     const img = $("img", el);
     if (img.getAttribute("src") !== src) img.src = src;
@@ -712,6 +718,20 @@ document.addEventListener("input", (e) => {
 document.addEventListener("click", async (e) => {
   const b = e.target.closest("[data-act], [data-tab], [data-bot]");
   if (b?.dataset.act === "setting-reset") return saveSetting(b.dataset.key, null);
+  if (b?.dataset.act === "wa-link") {
+    b.disabled = true;
+    b.textContent = "Asking WhatsApp for a code…";
+    try {
+      const fresh = await api("POST", `/api/ui/whatsapp/${b.dataset.slot}/link`, {});
+      ui.settings = { ...ui.settings, status: fresh.status };
+      renderSourceStatus();
+    } catch (err) {
+      toast(err.message);
+      b.disabled = false;
+      b.textContent = "Show a new QR code";
+    }
+    return;
+  }
   if (!b || !ui.state || b.disabled) return;
   if (b.dataset.tab) return setTab(b.dataset.tab);
   if (b.dataset.bot) {

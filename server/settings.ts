@@ -26,8 +26,9 @@ export interface SettingDef {
 }
 
 export const MAIL_SLOTS = [1, 2, 3] as const;
+export const WHATSAPP_SLOTS = [1, 2] as const;
 
-export const GROUPS = ["General", "Triage", "Grok wakes", "Phone pings", "WhatsApp", ...MAIL_SLOTS.map((n) => `Mail ${n}`), "Calendar", "Todoist", "PoliTO"];
+export const GROUPS = ["General", "Triage", "Grok wakes", "Phone pings", ...WHATSAPP_SLOTS.map((n) => `WhatsApp ${n}`), ...MAIL_SLOTS.map((n) => `Mail ${n}`), "Calendar", "Todoist", "PoliTO"];
 
 export const DEFS: SettingDef[] = [
   {
@@ -96,14 +97,22 @@ export const DEFS: SettingDef[] = [
     key: "dashboardUrl", env: "DASHBOARD_URL", group: "Phone pings", type: "url", fallback: "", placeholder: "https://your-machine.your-tailnet.ts.net:8443",
     label: "Dashboard address", help: "Tapping the ping opens this.",
   },
-  {
-    key: "whatsappUrl", env: "WAHA_URL", group: "WhatsApp", type: "url", fallback: "", placeholder: "http://waha:3000",
-    label: "WAHA address", help: "Where the WAHA WhatsApp bridge answers. Empty turns WhatsApp off. The dashboard only reads.",
-  },
-  {
-    key: "whatsappApiKey", env: "WAHA_API_KEY", group: "WhatsApp", type: "secret", fallback: "",
-    label: "WAHA API key", help: "The WAHA_API_KEY that WAHA runs with.",
-  },
+  ...WHATSAPP_SLOTS.flatMap((n): SettingDef[] => [
+    {
+      key: `whatsapp${n}Name`, env: `WAHA${n === 1 ? "" : n}_NAME`, group: `WhatsApp ${n}`, type: "text",
+      fallback: n === 1 ? "WhatsApp" : "WhatsApp Business", placeholder: n === 1 ? "WhatsApp" : "WhatsApp Business",
+      label: "Name", help: "Shown on cards from this number, so you can tell your numbers apart.",
+    },
+    {
+      key: `whatsapp${n}Url`, env: `WAHA${n === 1 ? "" : n}_URL`, group: `WhatsApp ${n}`, type: "url", fallback: "",
+      placeholder: `http://waha${n === 1 ? "" : n}:3000`,
+      label: "WAHA address", help: `Where this number's WAHA bridge answers.${n === 1 ? "" : " Each number needs its own WAHA."} Empty turns it off. The dashboard only reads.`,
+    },
+    {
+      key: `whatsapp${n}ApiKey`, env: `WAHA${n === 1 ? "" : n}_API_KEY`, group: `WhatsApp ${n}`, type: "secret", fallback: "",
+      label: "WAHA API key", help: "The WAHA_API_KEY that this WAHA runs with.",
+    },
+  ]),
   ...MAIL_SLOTS.flatMap((n): SettingDef[] => [
     {
       key: `mail${n}Name`, env: `MAIL${n}_NAME`, group: `Mail ${n}`, type: "text", fallback: "", placeholder: n === 1 ? "PoliTO" : n === 2 ? "Work" : "Gmail",
