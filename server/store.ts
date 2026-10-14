@@ -231,6 +231,26 @@ CREATE TABLE IF NOT EXISTS inbox (
 );
 CREATE INDEX IF NOT EXISTS inbox_untriaged ON inbox (triaged_at, source, thread);
 CREATE INDEX IF NOT EXISTS inbox_thread ON inbox (source, thread, at);
+CREATE TABLE IF NOT EXISTS triage (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  source TEXT NOT NULL,
+  thread TEXT NOT NULL,
+  message_ids TEXT NOT NULL,
+  decided_at INTEGER NOT NULL,
+  answers TEXT NOT NULL DEFAULT '{}',
+  level INTEGER NOT NULL,
+  need TEXT NOT NULL,
+  route TEXT NOT NULL,
+  item_id INTEGER,
+  grok TEXT,
+  grok_at INTEGER,
+  cost REAL NOT NULL DEFAULT 0
+);
+CREATE INDEX IF NOT EXISTS triage_grok ON triage (grok, level);
+CREATE TABLE IF NOT EXISTS wakes (
+  at INTEGER NOT NULL,
+  reason TEXT NOT NULL
+);
 `;
 
 // Columns added after the first release, as [table, column, definition].
@@ -399,6 +419,45 @@ export interface ItemInput {
   reopen?: boolean;
 }
 
+/**
+ * One triage decision about the new messages of a chat or mail thread.
+ * route: wake (Grok now), ride (Grok at its next wake), card (a card without Grok), catchup, skip.
+ * grok: null when Grok isn't needed, then queued, then sent once Grok took it.
+ */
+export interface TriageRow {
+  id: number;
+  source: string;
+  thread: string;
+  messageIds: number[];
+  decidedAt: number;
+  answers: Record<string, unknown>;
+  level: number;
+  need: string;
+  route: string;
+  itemId: number | null;
+  grok: "queued" | "sent" | null;
+  grokAt: number | null;
+  cost: number;
+}
+
+function toTriage(r: Row): TriageRow {
+  return {
+    id: Number(r.id),
+    source: str(r.source),
+    thread: str(r.thread),
+    messageIds: JSON.parse(str(r.message_ids) || "[]"),
+    decidedAt: Number(r.decided_at),
+    answers: JSON.parse(str(r.answers) || "{}"),
+    level: Number(r.level),
+    need: str(r.need),
+    route: str(r.route),
+    itemId: num(r.item_id),
+    grok: (r.grok as TriageRow["grok"]) ?? null,
+    grokAt: num(r.grok_at),
+    cost: Number(r.cost ?? 0),
+  };
+}
+
 export class Store {
   db: DatabaseSync;
   now: () => number;
@@ -512,6 +571,64 @@ export class Store {
     return Number(this.db.prepare("DELETE FROM inbox WHERE at < ?").run(this.now() - days * 86_400_000).changes);
   }
 
+  // Triage decisions and Grok wakes
+
+  addTriage(t: Omit<TriageRow, "id" | "grokAt">): TriageRow {
+    const res = this.db
+      .prepare(
+        `INSERT INTO triage (source, thread, message_ids, decided_at, answers, level, need, route, item_id, grok, cost)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      )
+      .run(t.source, t.thread, JSON.stringify(t.messageIds), t.decidedAt, JSON.stringify(t.answers), t.level, t.need, t.route, t.itemId, t.grok, t.cost);
+    return this.getTriage(Number(res.lastInsertRowid))!;
+  }
+
+  getTriage(id: number): TriageRow | null {
+    const r = this.db.prepare("SELECT * FROM triage WHERE id = ?").get(id);
+    return r ? toTriage(r as Row) : null;
+  }
+
+  /** Decisions waiting for Grok, oldest first. */
+  grokQueue(): TriageRow[] {
+    return this.db.prepare("SELECT * FROM triage WHERE grok = 'queued' ORDER BY decided_at, id").all().map((r) => toTriage(r as Row));
+  }
+
+  /** Hand the queue to Grok. Each decision is handed out once. */
+  claimGrokQueue(limit = 30): TriageRow[] {
+    return this.tx(() => {
+      const rows = this.db.prepare("SELECT * FROM triage WHERE grok = 'queued' ORDER BY level DESC, decided_at, id LIMIT ?").all(limit).map((r) => toTriage(r as Row));
+      const upd = this.db.prepare("UPDATE triage SET grok = 'sent', grok_at = ? WHERE id = ?");
+      for (const t of rows) upd.run(this.now(), t.id);
+      return rows;
+    });
+  }
+
+  /** A queued decision that no longer needs Grok, like when you replied yourself. */
+  dropFromGrokQueue(source: string, thread: string) {
+    this.db.prepare("UPDATE triage SET grok = NULL WHERE grok = 'queued' AND source = ? AND thread = ?").run(source, thread);
+  }
+
+  triageSince(since: number): TriageRow[] {
+    return this.db.prepare("SELECT * FROM triage WHERE decided_at >= ? ORDER BY decided_at, id").all(since).map((r) => toTriage(r as Row));
+  }
+
+  addWake(reason: string) {
+    this.db.prepare("INSERT INTO wakes (at, reason) VALUES (?, ?)").run(this.now(), reason);
+  }
+
+  wakesSince(since: number): { at: number; reason: string }[] {
+    return (this.db.prepare("SELECT at, reason FROM wakes WHERE at >= ? ORDER BY at").all(since) as Row[]).map((r) => ({ at: Number(r.at), reason: str(r.reason) }));
+  }
+
+  /** Open cards that triage made for a chat or thread. Their keys start with inbox:<source>:<thread>:. */
+  triageCards(bot: string, source: string, thread: string): Item[] {
+    const prefix = `inbox:${source}:${thread}:`;
+    return this.db
+      .prepare("SELECT * FROM items WHERE bot = ? AND status IN ('open', 'snoozed') AND substr(key, 1, ?) = ?")
+      .all(bot, prefix.length, prefix)
+      .map((r) => toItem(r as Row));
+  }
+
   // Bots
 
   touchBot(slug: string): Bot {
@@ -527,6 +644,14 @@ export class Store {
         .run(slug, name, PALETTE[count % PALETTE.length], now);
     }
     return this.getBot(slug)!;
+  }
+
+  /** Create the bot's row if it's missing, without marking it as seen. */
+  ensureBot(slug: string) {
+    if (this.getBot(slug)) return;
+    const count = Number((this.db.prepare("SELECT COUNT(*) AS n FROM bots").get() as Row).n);
+    const name = slug.charAt(0).toUpperCase() + slug.slice(1).replace(/-/g, " ");
+    this.db.prepare("INSERT INTO bots (slug, name, color) VALUES (?, ?, ?)").run(slug, name, PALETTE[count % PALETTE.length]);
   }
 
   getBot(slug: string): Bot | null {
@@ -596,9 +721,11 @@ export class Store {
    * A closed item stays closed unless it's a catch-up summary whose text changed,
    * or the bot passes reopen: true. That stops a bot from resurrecting things you dismissed.
    */
-  upsertItem(input: ItemInput): { item: Item; created: boolean; reopened: boolean; ignored: boolean } {
+  upsertItem(input: ItemInput, opts: { asServer?: boolean } = {}): { item: Item; created: boolean; reopened: boolean; ignored: boolean } {
     return this.tx(() => {
-      this.touchBot(input.bot);
+      // A card the server writes for a bot (from triage) doesn't count as the bot checking in.
+      if (opts.asServer) this.ensureBot(input.bot);
+      else this.touchBot(input.bot);
       const now = this.now();
       const fields = {
         section: input.section,
@@ -768,6 +895,8 @@ export class Store {
       )
       .run(before);
     this.db.prepare("DELETE FROM actions WHERE finished_at IS NOT NULL AND finished_at < ?").run(before);
+    this.db.prepare("DELETE FROM triage WHERE decided_at < ?").run(before);
+    this.db.prepare("DELETE FROM wakes WHERE at < ?").run(before);
     return Number(res.changes);
   }
 

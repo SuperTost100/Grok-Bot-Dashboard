@@ -6,7 +6,7 @@ import type { Store } from "./store.ts";
 // only learns whether one is set. Login, bot token, port and time zone stay in .env, because a wrong
 // value on the page could lock you out or move the server.
 
-export type SettingType = "int" | "text" | "url" | "secret" | "bool";
+export type SettingType = "int" | "text" | "url" | "secret" | "bool" | "choice";
 
 export interface SettingDef {
   key: string;
@@ -19,13 +19,15 @@ export interface SettingDef {
   max?: number;
   unit?: string;
   placeholder?: string;
+  /** For "choice": the values and how the page names them. */
+  options?: [string, string][];
   /** Default when neither the page nor .env sets it. */
   fallback: string | number | boolean;
 }
 
 export const MAIL_SLOTS = [1, 2, 3] as const;
 
-export const GROUPS = ["General", "WhatsApp", ...MAIL_SLOTS.map((n) => `Mail ${n}`), "Calendar", "Todoist", "PoliTO"];
+export const GROUPS = ["General", "Triage", "Grok wakes", "Phone pings", "WhatsApp", ...MAIL_SLOTS.map((n) => `Mail ${n}`), "Calendar", "Todoist", "PoliTO"];
 
 export const DEFS: SettingDef[] = [
   {
@@ -39,6 +41,60 @@ export const DEFS: SettingDef[] = [
   {
     key: "backupDays", env: "BACKUP_DAYS", group: "General", type: "int", min: 0, max: 90, unit: "days", fallback: 7,
     label: "Daily backups", help: "Backups kept in data/backups. 0 turns them off.",
+  },
+  {
+    key: "openrouterKey", env: "OPENROUTER_API_KEY", group: "Triage", type: "secret", fallback: "",
+    label: "OpenRouter API key", help: "Jev, the model that sorts your messages, runs on OpenRouter. Without a key, nothing is sorted and Grok keeps its old schedule.",
+  },
+  {
+    key: "triageMode", env: "TRIAGE_MODE", group: "Triage", type: "choice", fallback: "shadow",
+    options: [["off", "Off"], ["shadow", "Shadow"], ["on", "On"]],
+    label: "Mode", help: "Shadow: Jev sorts and logs, but the page and Grok work as before, so you can check its choices first. On: triage makes the cards and wakes Grok.",
+  },
+  {
+    key: "jevModel", env: "JEV_MODEL", group: "Triage", type: "text", fallback: "typesafe/jev-1.13", placeholder: "typesafe/jev-1.13",
+    label: "Jev model", help: "The OpenRouter model id. A pinned version keeps decisions steady.",
+  },
+  {
+    key: "triageAbout", env: "TRIAGE_ABOUT", group: "Triage", type: "text", fallback: "",
+    placeholder: "I'm a student at PoliTO. Anything from my family or about exams is important.",
+    label: "About you", help: "A sentence or two Jev reads with every message: who you are, and the people or topics that always matter.",
+  },
+  {
+    key: "triageUnsure", env: "TRIAGE_UNSURE", group: "Triage", type: "int", min: 0, max: 100, unit: "%", fallback: 60,
+    label: "Unsure below", help: "When Jev is less sure than this, a message counts as more urgent, so a doubt costs a card, not a missed message.",
+  },
+  {
+    key: "grokBot", env: "GROK_BOT", group: "Grok wakes", type: "text", fallback: "dashboard", placeholder: "dashboard",
+    label: "Grok bot", help: "The bot that drafts replies and answers, by its grokdash id (BOT= in its config).",
+  },
+  {
+    key: "wakeCooldown", env: "WAKE_COOLDOWN", group: "Grok wakes", type: "int", min: 5, max: 600, unit: "minutes", fallback: 45,
+    label: "Wait between wakes", help: "Grok wakes at most this often for messages, and takes everything waiting in one run. Your taps always go through.",
+  },
+  {
+    key: "wakeCeiling", env: "WAKE_CEILING", group: "Grok wakes", type: "int", min: 0, max: 100, unit: "per day", fallback: 10,
+    label: "Daily ceiling", help: "No more message wakes after this many Grok runs in a day; the rest waits for tomorrow. 0 never wakes Grok for messages.",
+  },
+  {
+    key: "wakeBatch", env: "WAKE_BATCH", group: "Grok wakes", type: "int", min: 1, max: 50, unit: "chats", fallback: 3,
+    label: "Wake for", help: "Chats that need an answer today wake Grok once this many are waiting.",
+  },
+  {
+    key: "wakeBatchHours", env: "WAKE_BATCH_HOURS", group: "Grok wakes", type: "int", min: 1, max: 24, unit: "hours", fallback: 2,
+    label: "Or after", help: "Or once the oldest of them has waited this long.",
+  },
+  {
+    key: "ntfyTopic", env: "NTFY_TOPIC", group: "Phone pings", type: "secret", fallback: "",
+    label: "ntfy topic", help: "Urgent cards ping your phone through ntfy. Subscribe to this topic in the ntfy app. The ping only says how many urgent cards wait, never what they say.",
+  },
+  {
+    key: "ntfyServer", env: "NTFY_SERVER", group: "Phone pings", type: "url", fallback: "https://ntfy.sh", placeholder: "https://ntfy.sh",
+    label: "ntfy server", help: "ntfy.sh is public, so pick a topic nobody can guess.",
+  },
+  {
+    key: "dashboardUrl", env: "DASHBOARD_URL", group: "Phone pings", type: "url", fallback: "", placeholder: "https://your-machine.your-tailnet.ts.net:8443",
+    label: "Dashboard address", help: "Tapping the ping opens this.",
   },
   {
     key: "whatsappUrl", env: "WAHA_URL", group: "WhatsApp", type: "url", fallback: "", placeholder: "http://waha:3000",
@@ -101,6 +157,7 @@ export interface SettingView {
   max?: number;
   unit?: string;
   placeholder?: string;
+  options?: [string, string][];
   /** null for secrets: the page never sees them. */
   value: SettingValue | null;
   /** Whether a secret has a value. */
@@ -123,6 +180,11 @@ function parse(def: SettingDef, raw: unknown): SettingValue {
     }
     case "bool":
       if (typeof raw !== "boolean") throw new SettingError(`${def.label} must be on or off.`);
+      return raw;
+    case "choice":
+      if (typeof raw !== "string" || !def.options!.some(([v]) => v === raw)) {
+        throw new SettingError(`${def.label} must be one of: ${def.options!.map(([, l]) => l).join(", ")}.`);
+      }
       return raw;
     default: {
       if (typeof raw !== "string") throw new SettingError(`${def.label} must be text.`);

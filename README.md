@@ -142,12 +142,36 @@ The dashboard can read your WhatsApp, up to three mailboxes and your calendars i
 
 The first time a mailbox or WhatsApp is read, the dashboard looks back 3 days. Message text stays in `data/dashboard.db` for 14 days. Settings shows when each source was last read, and the banner on Today says when one has been failing for more than 10 minutes.
 
+## Triage with Jev
+
+With WhatsApp or mail connected, the dashboard can sort new messages itself, so the Grok Bot only runs when something needs a reply or an answer. The sorting is done by [Jev](https://openrouter.ai/docs/guides/community/jev), a decision model on OpenRouter that answers questions with probabilities instead of text. It costs $0.042 per million input tokens; one decision is about 500 tokens. Add an OpenRouter API key under Settings, Triage.
+
+Each burst of new messages in a chat or mail thread is one decision. Jev answers three questions: how soon you need to see it (never, whenever, this week, today, now), what it needs from you (a reply, a decision, a task, information, nothing), and whether a machine sent it. Then:
+
+| Jev says                          | What happens                                         | Grok runs?      |
+| --------------------------------- | ---------------------------------------------------- | --------------- |
+| Reply or decision, needed now     | Urgent card and a phone ping; Grok drafts the answer | Yes, right away |
+| Reply or decision, later          | A card now; Grok writes the answer at its next run   | Later           |
+| A task for you, or news for today | A card made from the message                         | No              |
+| Information that can wait         | A line in Catch up                                   | No              |
+| Noise or automatic mail           | Listed under "Filtered out today" in Catch up        | No              |
+
+When Jev is unsure, the message counts as more urgent, so a doubt costs a card rather than a missed message. When you reply from your phone, the chat's card closes.
+
+Grok wakes for chats that need it at most once every 45 minutes and takes everything waiting in one run. Chats due today wake it when 3 are waiting or the oldest has waited 2 hours, and anything left waits at most a day. After 10 Grok runs in a day, message wakes stop until the next day; your taps always go through. The footer counts Grok runs. All these numbers are on the Settings page.
+
+Triage starts in Shadow mode: Jev sorts and logs, but the page and Grok work as before, and Settings shows what triage would have done today. Switch Mode to On when its choices look right. Then Refresh only rereads your sources, and the Grok Bot needs the new instructions in [`bot/dashboard-bot.md`](bot/dashboard-bot.md).
+
+For urgent cards, set an [ntfy](https://ntfy.sh) topic under Phone pings and subscribe to it in the ntfy app. The ping says how many urgent cards wait and links to the dashboard, never what they say.
+
 ## Your data
 
 Everything lives in one SQLite file, `data/dashboard.db`, readable by your user only. These are the only things the server sends off the machine:
 
 - **Webhook calls.** When you tap or press refresh, the server calls the webhook URL each bot registered, with no card content in it.
 - **Todoist.** With `TODOIST_TOKEN` set, it reads your active tasks and completes or reopens the ones you tick.
+- **Triage.** With an OpenRouter key set, the text of new messages (up to 15 per decision, cut to 1,500 characters each) goes to OpenRouter and Jev's provider, TypeSafe.
+- **Phone pings.** With an ntfy topic set, urgent cards send a count and a link to that topic.
 - **WhatsApp, mail and calendars.** When you set them up, it reads them through WAHA, IMAP and the iCal addresses you gave it, as described above.
 - **areadidattica.** With `AREADIDATTICA_URL` set, it asks that local service for unread avvisi and deadlines, and tells it which ones you marked read. areadidattica is the one that talks to PoliTO.
 

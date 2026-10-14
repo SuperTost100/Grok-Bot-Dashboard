@@ -421,6 +421,10 @@ details.arch + details.arch { border-top: 1px solid var(--border); }
   width: 100%; min-height: 40px; padding: 0 12px; border-radius: 10px;
   border: 1px solid var(--border-strong); background: var(--surface); font-size: 16px;
 }
+.s-control select {
+  width: 100%; min-height: 40px; padding: 0 10px; border-radius: 10px;
+  border: 1px solid var(--border-strong); background: var(--surface); font-size: 16px;
+}
 .s-control input::placeholder { color: var(--muted); }
 .s-control input[aria-invalid="true"] { border-color: var(--urgent); }
 .with-unit { display: flex; align-items: center; gap: 8px; }
@@ -442,7 +446,8 @@ details.arch + details.arch { border-top: 1px solid var(--border); }
   .setting:not(.is-bool) { grid-template-columns: 1fr; }
 }
 .s-group .sec-head { flex-wrap: wrap; }
-.s-status { text-align: right; }
+.s-group .sec-head .s-status { flex-basis: 100%; margin-left: 0; text-align: left; }
+.s-status:empty { display: none; }
 .s-status.on { color: var(--ok); }
 .s-status.bad { color: var(--urgent); }
 .qr { display: flex; gap: 20px; align-items: center; flex-wrap: wrap; margin: 0 0 12px; padding: 16px; border: 1px solid var(--border); border-radius: var(--radius); background: var(--surface); }

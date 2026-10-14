@@ -74,6 +74,14 @@ Without the webhook routine, taps on the dashboard wait for the next scheduled r
 
 Every run uses your Grok Bot allowance, so the schedule is the main cost. With 8 runs a day, a quiet run reads the sources, finds nothing new and stops. Taps still reach the bot within a minute through the webhook. If a tap goes unanswered, the dashboard pings the bot once more after 10 minutes and then leaves it to the next scheduled run. A scheduled run that never shows up gets one ping in its place, which costs what the missed run would have.
 
+### With triage on
+
+When the dashboard reads WhatsApp and mail itself and triage is On (see [Triage with Jev](../README.md#triage-with-jev)), the bot doesn't need a schedule. The webhook wakes it when a chat needs a reply or an answer, and when you tap. So:
+
+1. Delete the routine that runs every 2 hours. Keep the webhook routine.
+2. Empty the schedule in `~/.config/grokdash/config`: `SCHEDULE=`.
+3. Give the bot the current [`dashboard-bot.md`](dashboard-bot.md). Its step 2 handles the chats the dashboard hands over.
+
 ## 3. Restart the app when its link drops
 
 The Grok Bot desktop app sometimes stays open but stops taking commands from the bots. On a Linux computer where a systemd service runs the app, a watchdog can restart it when the dashboard reports a missed run. It checks every 5 minutes and restarts the app once per missed run, not in a loop. Run as root, with the app's user and service name:

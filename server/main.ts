@@ -9,6 +9,8 @@ import { Polito, POLITO_BOT, createPolitoSync } from "./polito.ts";
 import { createApp, STALE_CLAIM_MS, type AppDeps } from "./app.ts";
 import { Settings } from "./settings.ts";
 import { createSources } from "./sources/index.ts";
+import { createTriage } from "./triage.ts";
+import type { InboxMessage } from "./store.ts";
 import { checkWebhookUrl, guardedLookup, missedRun, retryDue, RETRY_WINDOW } from "./webhook.ts";
 import { lastSlot, localStamp } from "./time.ts";
 
@@ -40,6 +42,18 @@ function makePolito() {
 let polito = makePolito();
 const sources = createSources(settings, store, config.tz, log);
 
+/** How a message's source is named on cards and described to Jev. */
+function sourceInfo(m: InboxMessage) {
+  if (m.source === "whatsapp") {
+    return { label: `WhatsApp · ${m.threadName}`, app: "whatsapp", where: m.isGroup ? `WhatsApp group chat "${m.threadName}"` : `WhatsApp chat with ${m.threadName}` };
+  }
+  const slot = m.source.replace(/^mail:/, "");
+  const name = settings.str(`mail${slot}Name`) || `Mail ${slot}`;
+  const gmail = /(^|\.)gmail\.com$/i.test(settings.str(`mail${slot}Host`).replace(/:\d+$/, ""));
+  return { label: `${name} · ${m.fromMe ? "You" : m.sender}`, app: gmail ? "gmail" : "mail", where: `Email to the user's ${name} mailbox` };
+}
+const triage = createTriage({ store, settings, tz: config.tz, log, sourceInfo });
+
 // PoliTO is checked whenever the bots are scheduled to check their sources (every 2 hours when no bot
 // has told its schedule yet), plus on Refresh. The first tick checks once at startup.
 let politoSlot: number | null = null;
@@ -59,14 +73,16 @@ const lastPing = new Map<string, { at: number; ok: boolean }>();
 const woken = new Map<string, number>(); // the missed scheduled run each bot was last woken for
 const deferred = new Map<string, NodeJS.Timeout>();
 
-function notify(slug: string, reason: "actions" | "refresh") {
+type Reason = "actions" | "refresh" | "inbox";
+
+function notify(slug: string, reason: Reason) {
   const wait = (lastPing.get(slug)?.at ?? 0) + PING_GAP - Date.now();
   if (wait <= 0) return void ping(slug, reason);
   if (deferred.has(slug)) return;
   deferred.set(slug, setTimeout(() => { deferred.delete(slug); void ping(slug, reason); }, wait));
 }
 
-async function ping(slug: string, reason: "actions" | "refresh") {
+async function ping(slug: string, reason: Reason) {
   const bot = store.getBot(slug);
   if (!bot?.webhookUrl) return;
   const sent = { at: Date.now(), ok: false };
@@ -78,9 +94,13 @@ async function ping(slug: string, reason: "actions" | "refresh") {
       message:
         reason === "actions"
           ? "You have dashboard actions waiting. Run: grokdash actions"
-          : "Someone pressed refresh on the dashboard. Scan your sources and update it.",
+          : reason === "inbox"
+            ? "Chats on the dashboard need a reply or an answer from you. Run: grokdash actions"
+            : "Someone pressed refresh on the dashboard. Scan your sources and update it.",
     });
     sent.ok = status >= 200 && status < 300;
+    // Every accepted ping starts a paid Grok run: the footer and the daily ceiling count them.
+    if (sent.ok) store.addWake(reason);
     log(`webhook ${slug} (${reason}): ${status}`);
   } catch (err) {
     log(`webhook ${slug} (${reason}) failed: ${(err as Error).message}`);
@@ -118,7 +138,7 @@ function post(url: string, token: string, body: unknown): Promise<number> {
   });
 }
 
-const deps: AppDeps = { config, store, settings, todoist: makeTodoist(), polito, sources, notify, lastPing: (bot) => lastPing.get(bot), log };
+const deps: AppDeps = { config, store, settings, todoist: makeTodoist(), polito, sources, triage, notify, lastPing: (bot) => lastPing.get(bot), log };
 settings.onChange((keys) => {
   if (keys.some((k) => k.startsWith("todoist"))) {
     deps.todoist = makeTodoist();
@@ -142,6 +162,7 @@ const server = http.createServer((req, res) => {
 });
 process.on("unhandledRejection", (err) => log(`unhandled rejection: ${(err as Error)?.stack ?? err}`));
 
+let ticks = 0;
 const tick = setInterval(() => {
   try {
     store.wakeSnoozed();
@@ -154,7 +175,9 @@ const tick = setInterval(() => {
       if (retryDue(lastPing.get(bot), Date.now())) notify(bot, "refresh");
     }
     for (const b of store.listBots()) {
-      const run = b.webhookUrl ? missedRun(b, Date.now(), config.tz) : null;
+      // With triage on, the Grok bot has no schedule to miss: it runs when triage or a tap wakes it.
+      const unscheduled = triage.active() && b.slug === settings.str("grokBot");
+      const run = b.webhookUrl && !unscheduled ? missedRun(b, Date.now(), config.tz) : null;
       if (run === null || woken.get(b.slug) === run) continue;
       woken.set(b.slug, run);
       log(`${b.slug} missed its ${localStamp(new Date(run), config.tz).slice(11, 16)} run, waking it`);
@@ -163,6 +186,13 @@ const tick = setInterval(() => {
     }
     if (polito && politoDue(Date.now())) void polito.sync();
     sources.tick();
+    if (++ticks % 5 === 0) void triage.tick();
+    if (triage.wakeDue()) {
+      triage.woke();
+      const grok = settings.str("grokBot");
+      log(`waking ${grok} for ${store.grokQueue().length} waiting chat(s)`);
+      notify(grok, "inbox");
+    }
   } catch (err) {
     log(`tick failed: ${(err as Error).message}`);
   }
