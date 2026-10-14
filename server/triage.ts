@@ -196,6 +196,12 @@ const STALE_MS = 6 * 3_600_000;
 const GROUPS_PER_RUN = 15;
 /** A chat that needs Grok but isn't urgent still gets a wake after a day. */
 const MAX_QUEUE_AGE_MS = 24 * 3_600_000;
+/** Grok took chats but never wrote or closed their cards in this long: hand them out again. */
+const CLAIM_LEASE_MS = 30 * 60_000;
+/** Hand-outs per chat before giving up on Grok for it. The card stays for you. */
+const MAX_HANDOUTS = 2;
+/** With nothing new since the last wake, Grok is woken again for the same chats only after this long. */
+const REWAKE_IDLE_MS = 6 * 3_600_000;
 /** At most one phone ping in this long; later urgent cards wait for the next one. */
 const PING_GAP_MS = 10 * 60_000;
 
@@ -213,6 +219,8 @@ export interface Triage {
   woke(): void;
   /** The chats waiting for Grok, handed to it with its actions. */
   claimForGrok(): ReturnType<typeof forGrok>[];
+  /** Grok wrote or closed a card: the chat it was handed for is done. */
+  ack(key: string): void;
   status(): TriageStatus[];
   runsToday(): number;
 }
@@ -314,23 +322,29 @@ export function createTriage(deps: TriageDeps): Triage {
     );
   }
 
-  async function handle(msgs: InboxMessage[]): Promise<number> {
-    const last = msgs.at(-1)!;
-    const ids = msgs.map((m) => m.id);
-    const acting = active();
+  async function handle(fresh: InboxMessage[]): Promise<number> {
+    const last = fresh.at(-1)!;
+    const ids = fresh.map((m) => m.id);
     if (last.fromMe) {
-      if (acting) replied(msgs);
+      if (active()) replied(fresh);
       store.addTriage({ source: last.source, thread: last.thread, messageIds: ids, decidedAt: store.now(), answers: {}, level: -1, need: "replied", route: "replied", itemId: null, grok: null, cost: 0 });
       store.markTriaged(ids);
       return 0;
     }
+    // Messages still waiting for Grok in this chat are judged again together with the new ones,
+    // so a later "never mind" can take the chat off Grok's list, and the chat stays one entry.
+    const pending = active() ? store.queuedFor(last.source, last.thread) : null;
+    const earlier = pending ? store.inboxByIds(pending.messageIds).filter((m) => !ids.includes(m.id)) : [];
+    const msgs = [...earlier, ...fresh];
+    const allIds = msgs.map((m) => m.id);
     const info = deps.sourceInfo(last);
     const context = store.threadMessages(last.source, last.thread, 40).filter((m) => m.at < msgs[0].at || (m.at === msgs[0].at && m.id < msgs[0].id));
     const state = stateFor(msgs, context, info, settings.str("triageAbout"), store.now(), tz);
     const result = await askJev(settings.str("openrouterKey"), settings.str("jevModel") || "typesafe/jev-1.13", state, QUESTIONS, fetchImpl);
     const d = decide(result.answers, settings.int("triageUnsure"), msgs.some((m) => m.automated));
     let route = routeFor(d);
-    if (!acting) {
+    // The mode may have changed while Jev answered: act on the mode as it is now.
+    if (!active()) {
       // Shadow: remember what triage would have done, and change nothing.
       store.addTriage({
         source: last.source, thread: last.thread, messageIds: ids, decidedAt: store.now(),
@@ -344,15 +358,16 @@ export function createTriage(deps: TriageDeps): Triage {
     // to update them, instead of a plain card replacing its work.
     const key = cardKey(last.source, last.thread, "needs");
     const existing = store.getItemByKey(bot(), key);
-    const grokWrote = existing && (existing.status === "open" || existing.status === "pending") && (existing.kind === "draft" || existing.kind === "choice");
+    const grokWrote = existing && ["open", "pending", "snoozed"].includes(existing.status) && (existing.kind === "draft" || existing.kind === "choice");
     if (route === "card" && grokWrote) route = "ride";
+    const forGrokNow = route === "wake" || route === "ride";
     let itemId: number | null = null;
     let urgent = 0;
-    if (grokWrote && (route === "wake" || route === "ride")) {
+    if (grokWrote && forGrokNow) {
       // The card keeps Grok's draft until Grok updates it at its next wake.
       itemId = existing.id;
       if (d.level >= NOW) urgent = 1;
-    } else if (route === "wake" || route === "ride" || route === "card") {
+    } else if (forGrokNow || route === "card") {
       const r = store.upsertItem(needsCard(bot(), msgs, info, d, tz), { asServer: true });
       itemId = r.item.id;
       if (d.level >= NOW && !r.ignored) urgent = 1;
@@ -360,18 +375,35 @@ export function createTriage(deps: TriageDeps): Triage {
       const recent = store.threadMessages(last.source, last.thread, 60).filter((m) => m.at > store.now() - 86_400_000);
       itemId = store.upsertItem(digestCard(bot(), recent.length ? recent : msgs, info), { asServer: true }).item.id;
     }
-    store.addTriage({
-      source: last.source, thread: last.thread, messageIds: ids, decidedAt: store.now(),
-      answers: { ...result.answers, model: result.model, unsure: d.unsure, automated: d.automated },
-      level: d.level, need: d.need, route, itemId, grok: route === "wake" || route === "ride" ? "queued" : null, cost: result.cost,
+    store.tx(() => {
+      // This decision replaces the one that was waiting; it keeps that one's place in line.
+      if (pending) store.supersede(pending.id);
+      store.addTriage({
+        source: last.source, thread: last.thread, messageIds: forGrokNow ? allIds : ids, decidedAt: store.now(),
+        answers: { ...result.answers, model: result.model, unsure: d.unsure, automated: d.automated },
+        level: d.level, need: d.need, route, itemId, grok: forGrokNow ? "queued" : null,
+        queuedAt: forGrokNow ? pending?.queuedAt ?? store.now() : null, cost: result.cost,
+      });
+      store.markTriaged(ids);
     });
-    store.markTriaged(ids);
     if (route === "skip") updateSkipped();
     return urgent;
   }
 
+  /**
+   * Messages that showed up long after they were sent (history read when a source was first linked),
+   * or that arrived before triage was on, are filed without a decision. Messages delayed by an
+   * OpenRouter outage are not: they arrived on time and still get decided.
+   */
+  function stale(m: InboxMessage, now: number, onSince: number) {
+    return now - m.at > STALE_MS && (m.receivedAt - m.at > STALE_MS || m.receivedAt < onSince);
+  }
+
   async function run() {
     const now = store.now();
+    const expired = store.expireGrokClaims(now - CLAIM_LEASE_MS, MAX_HANDOUTS);
+    if (expired.requeued || expired.failed) log(`Grok didn't confirm ${expired.requeued + expired.failed} chat(s): ${expired.requeued} queued again, ${expired.failed} left to you`);
+    const onSince = Number(store.getState("triage:onSince") ?? now);
     const groups = new Map<string, InboxMessage[]>();
     for (const m of store.untriaged(2000)) {
       const k = `${m.source}\n${m.thread}`;
@@ -379,24 +411,27 @@ export function createTriage(deps: TriageDeps): Triage {
     }
     let done = 0;
     let urgent = 0;
-    for (const msgs of groups.values()) {
+    for (let msgs of groups.values()) {
+      const old = msgs.filter((m) => stale(m, now, onSince));
+      if (old.length) store.markTriaged(old.map((m) => m.id));
+      msgs = msgs.filter((m) => !old.includes(m));
+      if (!msgs.length) continue;
       const newest = msgs.at(-1)!.at;
       const oldest = msgs[0].receivedAt;
-      if (now - newest > STALE_MS) {
-        store.markTriaged(msgs.map((m) => m.id));
-        continue;
-      }
       if (now - newest < QUIET_MS && now - oldest < MAX_WAIT_MS && !msgs.at(-1)!.fromMe) continue;
       if (done++ >= GROUPS_PER_RUN) break;
       urgent += await handle(msgs);
     }
-    await phone(urgent);
+    if (active()) await phone(urgent);
   }
 
   return {
     on,
     active,
     tick() {
+      // When triage started deciding: messages that arrived before then are not decided late.
+      if (!on()) store.setState("triage:onSince", null);
+      else if (!store.getState("triage:onSince")) store.setState("triage:onSince", String(store.now()));
       if (!on() || running || store.now() < retryAt) return running ?? Promise.resolve();
       running = run()
         .then(() => {
@@ -418,19 +453,25 @@ export function createTriage(deps: TriageDeps): Triage {
     wakeDue() {
       if (!active()) return false;
       const now = store.now();
+      const grok = bot();
       const cooldown = settings.int("wakeCooldown") * 60_000;
       if (now - lastAttempt < cooldown) return false;
-      if (store.wakesSince(now - cooldown).length) return false;
-      if (store.wakesSince(dayStart()).length >= settings.int("wakeCeiling")) return false;
+      if (store.wakesSince(now - cooldown, grok).length) return false;
+      if (store.wakesSince(dayStart(), grok).length >= settings.int("wakeCeiling")) return false;
       const queue = store.grokQueue();
       if (!queue.length) return false;
+      // A wake that Grok never answered isn't repeated for the same chats, only for new ones,
+      // or after a long quiet spell (the bot may have been offline).
+      const lastWake = Math.max(lastAttempt, store.wakesSince(0, grok).filter((w) => w.reason === "inbox").at(-1)?.at ?? 0);
+      if (!queue.some((t) => (t.queuedAt ?? 0) > lastWake) && now - lastWake < REWAKE_IDLE_MS) return false;
+      const waitedSince = (t: TriageRow) => t.queuedAt ?? t.decidedAt;
       const today = queue.filter((t) => t.level >= TODAY);
-      const due =
+      return (
         queue.some((t) => t.level >= NOW) ||
         today.length >= settings.int("wakeBatch") ||
-        (today.length > 0 && now - today[0].decidedAt >= settings.int("wakeBatchHours") * 3_600_000) ||
-        now - queue[0].decidedAt >= MAX_QUEUE_AGE_MS;
-      return due;
+        (today.length > 0 && now - Math.min(...today.map(waitedSince)) >= settings.int("wakeBatchHours") * 3_600_000) ||
+        now - Math.min(...queue.map(waitedSince)) >= MAX_QUEUE_AGE_MS
+      );
     },
     woke() {
       lastAttempt = store.now();
@@ -442,8 +483,11 @@ export function createTriage(deps: TriageDeps): Triage {
         return forGrok(store, t, info, tz);
       });
     },
+    ack(key) {
+      for (const t of store.sentToGrok()) if (cardKey(t.source, t.thread, "needs") === key) store.setGrok(t.id, "done");
+    },
     runsToday() {
-      return store.wakesSince(dayStart()).length;
+      return store.wakesSince(dayStart(), bot()).length;
     },
     status() {
       if (!on()) {
@@ -468,7 +512,7 @@ export function createTriage(deps: TriageDeps): Triage {
       }
       return [
         error ? { group: "Triage", on: true, ok: false, text: error } : { group: "Triage", on: true, ok: true, text: sorted },
-        { group: "Grok wakes", on: true, ok: true, text: `${store.wakesSince(dayStart()).length} Grok runs today, ${waiting} chat${waiting === 1 ? "" : "s"} waiting for Grok` },
+        { group: "Grok wakes", on: true, ok: true, text: `${store.wakesSince(dayStart(), bot()).length} Grok runs today, ${waiting} chat${waiting === 1 ? "" : "s"} waiting for Grok` },
         settings.str("ntfyTopic")
           ? { group: "Phone pings", on: true, ok: true, text: lastPing ? `Last ping ${localStamp(new Date(lastPing), tz).slice(11, 16)}` : "No ping yet" }
           : { group: "Phone pings", on: false, ok: true, text: "Off" },

@@ -460,6 +460,7 @@ export function createApp(deps: AppDeps) {
     if (new Set(keys).size !== keys.length) throw bad("Two items in this call share a key. Send each key once.");
     const results = parsed.map((p) => {
       const r = store.upsertItem(p);
+      if (p.key && p.bot === settings.str("grokBot")) deps.triage?.ack(p.key);
       return { id: r.item.id, key: r.item.key, status: r.item.status, created: r.created, reopened: r.reopened, ignored: r.ignored };
     });
     return batch ? { results } : results[0];
@@ -483,6 +484,7 @@ export function createApp(deps: AppDeps) {
     if (!item || item.bot !== bot) throw new HttpError(404, "No item with that id or key for this bot.");
     if (store.pendingActionFor(item.id)?.status === "claimed") throw conflict("You hold an action on this card. Report it instead of closing the card.");
     const closed = store.closeItem(item.id, "bot", text(b.reason, "reason", 200) || "Closed by the bot");
+    if (item.key && bot === settings.str("grokBot")) deps.triage?.ack(item.key);
     return { id: closed!.id, status: closed!.status };
   });
 

@@ -100,7 +100,7 @@ async function ping(slug: string, reason: Reason) {
     });
     sent.ok = status >= 200 && status < 300;
     // Every accepted ping starts a paid Grok run: the footer and the daily ceiling count them.
-    if (sent.ok) store.addWake(reason);
+    if (sent.ok) store.addWake(reason, slug);
     log(`webhook ${slug} (${reason}): ${status}`);
   } catch (err) {
     log(`webhook ${slug} (${reason}) failed: ${(err as Error).message}`);

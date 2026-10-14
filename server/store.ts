@@ -244,12 +244,15 @@ CREATE TABLE IF NOT EXISTS triage (
   item_id INTEGER,
   grok TEXT,
   grok_at INTEGER,
+  queued_at INTEGER,
+  attempts INTEGER NOT NULL DEFAULT 0,
   cost REAL NOT NULL DEFAULT 0
 );
 CREATE INDEX IF NOT EXISTS triage_grok ON triage (grok, level);
 CREATE TABLE IF NOT EXISTS wakes (
   at INTEGER NOT NULL,
-  reason TEXT NOT NULL
+  reason TEXT NOT NULL,
+  bot TEXT NOT NULL DEFAULT ''
 );
 `;
 
@@ -422,7 +425,8 @@ export interface ItemInput {
 /**
  * One triage decision about the new messages of a chat or mail thread.
  * route: wake (Grok now), ride (Grok at its next wake), card (a card without Grok), catchup, skip.
- * grok: null when Grok isn't needed, then queued, then sent once Grok took it.
+ * grok: null when Grok isn't needed (or a later decision about the same chat replaced this one),
+ * queued, sent once Grok took it, done when Grok wrote or closed the card, failed after two tries.
  */
 export interface TriageRow {
   id: number;
@@ -435,8 +439,12 @@ export interface TriageRow {
   need: string;
   route: string;
   itemId: number | null;
-  grok: "queued" | "sent" | null;
+  grok: "queued" | "sent" | "done" | "failed" | null;
   grokAt: number | null;
+  /** When the chat started waiting for Grok. */
+  queuedAt: number | null;
+  /** How often it was handed to Grok. */
+  attempts: number;
   cost: number;
 }
 
@@ -454,6 +462,8 @@ function toTriage(r: Row): TriageRow {
     itemId: num(r.item_id),
     grok: (r.grok as TriageRow["grok"]) ?? null,
     grokAt: num(r.grok_at),
+    queuedAt: num(r.queued_at),
+    attempts: Number(r.attempts ?? 0),
     cost: Number(r.cost ?? 0),
   };
 }
@@ -573,13 +583,16 @@ export class Store {
 
   // Triage decisions and Grok wakes
 
-  addTriage(t: Omit<TriageRow, "id" | "grokAt">): TriageRow {
+  addTriage(t: Omit<TriageRow, "id" | "grokAt" | "attempts" | "queuedAt"> & { queuedAt?: number | null }): TriageRow {
     const res = this.db
       .prepare(
-        `INSERT INTO triage (source, thread, message_ids, decided_at, answers, level, need, route, item_id, grok, cost)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+        `INSERT INTO triage (source, thread, message_ids, decided_at, answers, level, need, route, item_id, grok, queued_at, cost)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
       )
-      .run(t.source, t.thread, JSON.stringify(t.messageIds), t.decidedAt, JSON.stringify(t.answers), t.level, t.need, t.route, t.itemId, t.grok, t.cost);
+      .run(
+        t.source, t.thread, JSON.stringify(t.messageIds), t.decidedAt, JSON.stringify(t.answers), t.level, t.need, t.route,
+        t.itemId, t.grok, t.grok === "queued" ? t.queuedAt ?? this.now() : null, t.cost,
+      );
     return this.getTriage(Number(res.lastInsertRowid))!;
   }
 
@@ -588,22 +601,64 @@ export class Store {
     return r ? toTriage(r as Row) : null;
   }
 
-  /** Decisions waiting for Grok, oldest first. */
+  /** Decisions waiting for Grok, oldest first. There's at most one per chat. */
   grokQueue(): TriageRow[] {
-    return this.db.prepare("SELECT * FROM triage WHERE grok = 'queued' ORDER BY decided_at, id").all().map((r) => toTriage(r as Row));
+    return this.db.prepare("SELECT * FROM triage WHERE grok = 'queued' ORDER BY queued_at, id").all().map((r) => toTriage(r as Row));
   }
 
-  /** Hand the queue to Grok. Each decision is handed out once. */
+  /** The decision still waiting for Grok about this chat, if any. */
+  queuedFor(source: string, thread: string): TriageRow | null {
+    const r = this.db.prepare("SELECT * FROM triage WHERE grok = 'queued' AND source = ? AND thread = ? ORDER BY id DESC LIMIT 1").get(source, thread);
+    return r ? toTriage(r as Row) : null;
+  }
+
+  /** A newer decision about the same chat takes this one's place in the queue. */
+  supersede(id: number) {
+    this.db.prepare("UPDATE triage SET grok = NULL WHERE id = ? AND grok = 'queued'").run(id);
+  }
+
+  /** Hand the queue to Grok. Grok confirms each chat by writing or closing its card (ackGrok). */
   claimGrokQueue(limit = 30): TriageRow[] {
     return this.tx(() => {
-      const rows = this.db.prepare("SELECT * FROM triage WHERE grok = 'queued' ORDER BY level DESC, decided_at, id LIMIT ?").all(limit).map((r) => toTriage(r as Row));
-      const upd = this.db.prepare("UPDATE triage SET grok = 'sent', grok_at = ? WHERE id = ?");
+      const rows = this.db.prepare("SELECT * FROM triage WHERE grok = 'queued' ORDER BY level DESC, queued_at, id LIMIT ?").all(limit).map((r) => toTriage(r as Row));
+      const upd = this.db.prepare("UPDATE triage SET grok = 'sent', grok_at = ?, attempts = attempts + 1 WHERE id = ?");
       for (const t of rows) upd.run(this.now(), t.id);
-      return rows;
+      return rows.map((t) => ({ ...t, grok: "sent" as const, grokAt: this.now(), attempts: t.attempts + 1 }));
     });
   }
 
-  /** A queued decision that no longer needs Grok, like when you replied yourself. */
+  /** Chats handed to Grok and not confirmed yet. */
+  sentToGrok(): TriageRow[] {
+    return this.db.prepare("SELECT * FROM triage WHERE grok = 'sent'").all().map((r) => toTriage(r as Row));
+  }
+
+  setGrok(id: number, grok: TriageRow["grok"]) {
+    this.db.prepare("UPDATE triage SET grok = ? WHERE id = ?").run(grok, id);
+  }
+
+  /**
+   * Chats Grok took but never confirmed go back to the queue, as new work, so they get one more wake.
+   * After `maxAttempts` hand-outs they're marked failed; the card stays on the page for you.
+   */
+  expireGrokClaims(before: number, maxAttempts: number): { requeued: number; failed: number } {
+    return this.tx(() => {
+      const stale = this.db.prepare("SELECT * FROM triage WHERE grok = 'sent' AND grok_at < ?").all(before).map((r) => toTriage(r as Row));
+      let requeued = 0;
+      for (const t of stale) {
+        // A newer decision about the chat is already queued: that one carries the messages.
+        const newer = this.queuedFor(t.source, t.thread);
+        if (t.attempts >= maxAttempts || newer) {
+          this.setGrok(t.id, newer ? null : "failed");
+        } else {
+          this.db.prepare("UPDATE triage SET grok = 'queued', queued_at = ? WHERE id = ?").run(this.now(), t.id);
+          requeued++;
+        }
+      }
+      return { requeued, failed: stale.length - requeued };
+    });
+  }
+
+  /** A chat no longer needs Grok, like when you replied yourself. */
   dropFromGrokQueue(source: string, thread: string) {
     this.db.prepare("UPDATE triage SET grok = NULL WHERE grok = 'queued' AND source = ? AND thread = ?").run(source, thread);
   }
@@ -612,12 +667,24 @@ export class Store {
     return this.db.prepare("SELECT * FROM triage WHERE decided_at >= ? ORDER BY decided_at, id").all(since).map((r) => toTriage(r as Row));
   }
 
-  addWake(reason: string) {
-    this.db.prepare("INSERT INTO wakes (at, reason) VALUES (?, ?)").run(this.now(), reason);
+  inboxByIds(ids: number[]): InboxMessage[] {
+    if (!ids.length) return [];
+    return this.db
+      .prepare(`SELECT * FROM inbox WHERE id IN (${ids.map(() => "?").join(",")}) ORDER BY at, id`)
+      .all(...ids)
+      .map((r) => toInbox(r as Row));
   }
 
-  wakesSince(since: number): { at: number; reason: string }[] {
-    return (this.db.prepare("SELECT at, reason FROM wakes WHERE at >= ? ORDER BY at").all(since) as Row[]).map((r) => ({ at: Number(r.at), reason: str(r.reason) }));
+  /** A bot run started by a webhook ping. */
+  addWake(reason: string, bot: string) {
+    this.db.prepare("INSERT INTO wakes (at, reason, bot) VALUES (?, ?, ?)").run(this.now(), reason, bot);
+  }
+
+  wakesSince(since: number, bot: string): { at: number; reason: string }[] {
+    return (this.db.prepare("SELECT at, reason FROM wakes WHERE at >= ? AND bot = ? ORDER BY at").all(since, bot) as Row[]).map((r) => ({
+      at: Number(r.at),
+      reason: str(r.reason),
+    }));
   }
 
   /** Open cards that triage made for a chat or thread. Their keys start with inbox:<source>:<thread>:. */

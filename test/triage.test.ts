@@ -86,7 +86,7 @@ async function setup(opts: { reply?: (state: Record<string, unknown>) => JevResu
   const ui = async (method: string, path: string, body?: unknown) =>
     (await fetch(base + path, { method, headers: { "Tailscale-User-Login": "o@x.com", ...(body ? { "Content-Type": "application/json" } : {}) }, body: body ? JSON.stringify(body) : undefined })).json();
   return {
-    store, settings, triage, jevCalls, pings, notified, msg, bot, ui,
+    store, settings, triage, jevCalls, pings, notified, msg, bot, ui, base,
     advance: (ms: number) => { clock += ms; },
     now: () => clock,
     stop: () => { server.closeAllConnections(); server.close(); store.close(); },
@@ -167,7 +167,7 @@ test("non-urgent replies wait for a batch of 3, or for 2 hours", async () => {
 test("the cooldown and the daily ceiling hold Grok back, and taps count as runs", async () => {
   const t = await setup({ reply: () => answers(4, "reply") });
   try {
-    t.store.addWake("actions"); // a tap woke Grok a minute ago
+    t.store.addWake("actions", "dashboard"); // a tap woke Grok a minute ago
     t.store.addInbox([t.msg("1@c.us", "now!")]);
     await t.triage.tick();
     assert.equal(t.triage.wakeDue(), false, "Grok ran under 45 minutes ago");
@@ -320,6 +320,173 @@ test("with triage on, the Grok bot's old run times don't make it look offline", 
     assert.equal(await offline(), null);
     t.settings.update({ triageMode: "shadow" });
     assert.notEqual(await offline(), null, "in shadow mode the schedule still counts");
+  } finally {
+    t.stop();
+  }
+});
+
+// ---------- Review fixes ----------
+
+test("a wake Grok never answers isn't repeated for the same chats, only for new ones", async () => {
+  const t = await setup({ reply: () => answers(4, "reply") });
+  try {
+    t.store.addInbox([t.msg("1@c.us", "now!")]);
+    await t.triage.tick();
+    assert.equal(t.triage.wakeDue(), true);
+    t.triage.woke();
+    t.store.addWake("inbox", "dashboard");
+    t.advance(50 * 60_000);
+    assert.equal(t.triage.wakeDue(), false, "same chat, nothing new: no second paid wake");
+    t.store.addInbox([t.msg("2@c.us", "also now!", { at: t.now() - 120_000 })]);
+    await t.triage.tick();
+    assert.equal(t.triage.wakeDue(), true, "a new chat is worth a wake");
+  } finally {
+    t.stop();
+  }
+});
+
+test("several bursts in one chat stay one entry for Grok and count as one chat", async () => {
+  const t = await setup({ reply: () => answers(3, "reply") });
+  try {
+    for (const text of ["a", "b", "c"]) {
+      t.store.addInbox([t.msg("1@c.us", text, { at: t.now() - 120_000 })]);
+      await t.triage.tick();
+      t.advance(5 * 60_000);
+    }
+    assert.equal(t.store.grokQueue().length, 1);
+    assert.equal(t.triage.wakeDue(), false, "one chat isn't a batch of 3");
+    const inbox = (await t.bot("/api/bot/actions")).inbox;
+    assert.equal(inbox.length, 1);
+    assert.deepEqual(inbox[0].messages.filter((m: { isNew: boolean }) => m.isNew).map((m: { text: string }) => m.text), ["a", "b", "c"]);
+    assert.equal(t.jevCalls.at(-1)!.new_messages instanceof Array && (t.jevCalls.at(-1)!.new_messages as unknown[]).length, 3, "Jev judged all three together");
+  } finally {
+    t.stop();
+  }
+});
+
+test("a later 'never mind' takes the chat off Grok's list", async () => {
+  let n = 0;
+  const t = await setup({ reply: () => (n++ === 0 ? answers(4, "reply") : answers(1, "nothing")) });
+  try {
+    t.store.addInbox([t.msg("1@c.us", "Can you call me?")]);
+    await t.triage.tick();
+    assert.equal(t.store.grokQueue().length, 1);
+    t.store.addInbox([t.msg("1@c.us", "Never mind, sorted", { at: t.now() })]);
+    t.advance(2 * 60_000);
+    await t.triage.tick();
+    assert.equal(t.store.grokQueue().length, 0);
+    assert.equal(t.triage.wakeDue(), false);
+  } finally {
+    t.stop();
+  }
+});
+
+test("chats Grok took but never confirmed come back once, then stay with you", async () => {
+  const t = await setup({ reply: () => answers(4, "reply") });
+  try {
+    t.store.addInbox([t.msg("1@c.us", "now!")]);
+    await t.triage.tick();
+    assert.equal((await t.bot("/api/bot/actions")).inbox.length, 1);
+    t.advance(31 * 60_000);
+    await t.triage.tick();
+    assert.equal(t.store.grokQueue().length, 1, "queued again");
+    assert.equal(t.triage.wakeDue(), true, "worth one more wake");
+    assert.equal((await t.bot("/api/bot/actions")).inbox.length, 1);
+    t.advance(31 * 60_000);
+    await t.triage.tick();
+    assert.equal(t.store.grokQueue().length, 0, "two hand-outs is the limit");
+    assert.equal(t.store.triageSince(0).find((r) => r.route === "wake")!.grok, "failed");
+  } finally {
+    t.stop();
+  }
+});
+
+test("Grok writing the card confirms the chat", async () => {
+  const t = await setup({ reply: () => answers(4, "reply") });
+  try {
+    t.store.addInbox([t.msg("1@c.us", "now!")]);
+    await t.triage.tick();
+    const [item] = (await t.bot("/api/bot/actions")).inbox;
+    await fetch(t.base + "/api/bot/items", {
+      method: "POST",
+      headers: { Authorization: "Bearer test-token-123", "X-Bot": "dashboard", "Content-Type": "application/json" },
+      body: JSON.stringify({ key: item.key, kind: "draft", title: "Reply to Marco", draft: { to: "Marco", text: "On my way" } }),
+    });
+    t.advance(31 * 60_000);
+    await t.triage.tick();
+    assert.equal(t.store.grokQueue().length, 0);
+    assert.equal(t.store.triageSince(0).find((r) => r.route === "wake")!.grok, "done");
+  } finally {
+    t.stop();
+  }
+});
+
+test("switching to Shadow while Jev answers keeps the page untouched", async () => {
+  let settingsRef: Settings | null = null;
+  const t = await setup({
+    reply: () => {
+      settingsRef!.update({ triageMode: "shadow" });
+      return answers(4, "reply");
+    },
+  });
+  settingsRef = t.settings;
+  try {
+    t.store.addInbox([t.msg("1@c.us", "now!")]);
+    await t.triage.tick();
+    assert.equal(t.store.getItemByKey("dashboard", "inbox:whatsapp:1@c.us:needs"), null);
+    assert.equal(t.pings.length, 0);
+    assert.equal(t.store.grokQueue().length, 0);
+  } finally {
+    t.stop();
+  }
+});
+
+test("other bots' runs don't use up Grok's cooldown or ceiling", async () => {
+  const t = await setup({ reply: () => answers(4, "reply") });
+  try {
+    for (let i = 0; i < 12; i++) t.store.addWake("refresh", "venduto");
+    t.store.addInbox([t.msg("1@c.us", "now!")]);
+    await t.triage.tick();
+    assert.equal(t.triage.wakeDue(), true);
+    assert.equal(t.triage.runsToday(), 0);
+  } finally {
+    t.stop();
+  }
+});
+
+test("an OpenRouter outage delays decisions but loses no message; old history is filed", async () => {
+  let down = true;
+  const t = await setup({
+    reply: () => {
+      if (down) throw new Error("outage");
+      return answers(3, "info");
+    },
+  });
+  try {
+    await t.triage.tick(); // triage turns on now
+    t.store.addInbox([t.msg("1@c.us", "on time", { at: t.now() })]);
+    t.store.addInbox([t.msg("2@c.us", "history from when WhatsApp was linked", { at: t.now() - 3 * 86_400_000 })]);
+    t.advance(2 * 60_000);
+    await t.triage.tick();
+    t.advance(7 * 3_600_000);
+    down = false;
+    await t.triage.tick();
+    assert.ok(t.store.getItemByKey("dashboard", "inbox:whatsapp:1@c.us:needs"), "decided after the outage");
+    assert.equal(t.store.getItemByKey("dashboard", "inbox:whatsapp:2@c.us:needs"), null, "history isn't decided late");
+    assert.equal(t.store.untriaged().length, 0);
+  } finally {
+    t.stop();
+  }
+});
+
+test("a snoozed draft from Grok is kept when the chat moves on", async () => {
+  const t = await setup({ reply: () => answers(3, "info") });
+  try {
+    const { item } = t.store.upsertItem({ bot: "dashboard", key: "inbox:whatsapp:1@c.us:needs", section: "needs", kind: "draft", title: "Reply", draft: { to: "Marco", text: "Yes" } });
+    t.store.snoozeItem(item.id, t.now() + 3_600_000);
+    t.store.addInbox([t.msg("1@c.us", "and another thing")]);
+    await t.triage.tick();
+    assert.equal(t.store.getItem(item.id)!.draft!.text, "Yes");
   } finally {
     t.stop();
   }
