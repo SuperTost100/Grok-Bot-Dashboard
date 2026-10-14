@@ -625,3 +625,20 @@ test("Refresh wakes Grok when chats are waiting for it", async () => {
     t.stop();
   }
 });
+
+test("chats left over after Grok's 30 per run wake it again", async () => {
+  const t = await setup({ reply: () => answers(4, "reply") });
+  try {
+    t.store.addInbox(Array.from({ length: 31 }, (_, i) => t.msg(`${i}@c.us`, "now!")));
+    for (let i = 0; i < 3; i++) await t.triage.tick();
+    assert.equal(t.store.grokQueue().length, 31);
+    t.triage.woke();
+    t.store.addWake("inbox", "dashboard");
+    t.advance(60_000);
+    assert.equal((await t.bot("/api/bot/actions")).inbox.length, 30);
+    t.advance(50 * 60_000);
+    assert.equal(t.triage.wakeDue(), true, "Grok answered the last wake, so the 31st gets one");
+  } finally {
+    t.stop();
+  }
+});

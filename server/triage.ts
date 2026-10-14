@@ -465,7 +465,9 @@ export function createTriage(deps: TriageDeps): Triage {
       // A wake that Grok never answered isn't repeated for the same chats: only a new decision wakes it
       // again. Unanswered chats go along with that wake, a tap, or Refresh.
       const lastWake = Math.max(lastAttempt, store.wakesSince(0, grok).filter((w) => w.reason === "inbox").at(-1)?.at ?? 0);
-      if (!queue.some((t) => t.decidedAt > lastWake || (t.attempts > 0 && (t.queuedAt ?? 0) > lastWake))) return false;
+      // Grok came for its work after the last wake, so what's left (more than one run takes) is fair game.
+      const answered = Number(store.getState("triage:lastClaim") ?? 0) > lastWake;
+      if (!answered && !queue.some((t) => t.decidedAt > lastWake || (t.attempts > 0 && (t.queuedAt ?? 0) > lastWake))) return false;
       const waitedSince = (t: TriageRow) => t.queuedAt ?? t.decidedAt;
       const today = queue.filter((t) => t.level >= TODAY);
       return (
@@ -479,6 +481,7 @@ export function createTriage(deps: TriageDeps): Triage {
       lastAttempt = store.now();
     },
     claimForGrok() {
+      store.setState("triage:lastClaim", String(store.now()));
       return store.claimGrokQueue().map((t) => {
         const m = store.threadMessages(t.source, t.thread, 1)[0];
         const info = m ? deps.sourceInfo(m) : { label: t.source, app: "", where: "" };
