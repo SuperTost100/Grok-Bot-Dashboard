@@ -18,6 +18,8 @@ const ui = {
   doneTodos: new Map(), // "bot|id" -> { todo, at } for the Undo row after ticking a to-do
   todoBusy: new Set(),  // "bot|id" with a request in flight
   archive: { items: [], more: false, q: "" },
+  settings: null,          // { groups, settings } from the server
+  settingErrors: new Map(), // key -> { message, value } from a refused save, so what you typed stays
 };
 
 // ---------- talking to the server ----------
@@ -218,6 +220,7 @@ function render() {
 
 function renderHeader() {
   const s = ui.state;
+  $("#arch-q").placeholder = `Search the last ${s.archiveDays} days`;
   const now = new Date();
   $("#full-date").textContent = now.toLocaleDateString("en-GB", { weekday: "long", day: "numeric", month: "long", timeZone: tz() });
   const stamp = nowStamp();
@@ -540,21 +543,111 @@ function renderArchive() {
           </div>
         </details>`;
       }).join("") + (ui.archive.more ? `<div class="list-foot"><button class="btn" data-act="more-archive">Show older</button></div>` : "")
-    : `<div class="empty arch-empty"><strong>${q ? "No matches" : "Nothing archived yet"}</strong>${q ? "Try another word, or clear the bot filter." : "Cards you finish, dismiss or snooze land here for 30 days."}</div>`;
+    : `<div class="empty arch-empty"><strong>${q ? "No matches" : "Nothing archived yet"}</strong>${q ? "Try another word, or clear the bot filter." : `Cards you finish, dismiss or snooze land here for ${ui.state?.archiveDays ?? 30} days.`}</div>`;
   paintColors();
 }
 
 // ---------- interactions ----------
 
+const TITLES = { today: "Today", archive: "Archive", settings: "Settings" };
+
 function setTab(tab) {
   ui.tab = tab;
   for (const t of $$("[data-tab]")) t.setAttribute("aria-selected", String(t.dataset.tab === tab));
-  $("#view-today").hidden = tab !== "today";
-  $("#view-archive").hidden = tab !== "archive";
-  $("#view-title").textContent = tab === "today" ? "Today" : "Archive";
+  for (const name of Object.keys(TITLES)) $(`#view-${name}`).hidden = tab !== name;
+  $("#view-title").textContent = TITLES[tab];
+  // Bot filters only mean something on Today and Archive.
+  $("#filters").classList.toggle("off", tab === "settings");
   if (tab === "archive") loadArchive();
+  if (tab === "settings") loadSettings();
   window.scrollTo({ top: 0 });
 }
+
+// ---------- settings ----------
+
+async function loadSettings() {
+  try {
+    ui.settings = await api("GET", "/api/ui/settings");
+    renderSettings();
+  } catch (err) {
+    $("#settings").innerHTML = `<div class="empty-row"><strong>Couldn't load the settings.</strong> ${esc(err.message)}</div>`;
+  }
+}
+
+function settingSource(s) {
+  if (s.source === "page") return `<span>Saved here</span><button class="btn ghost reset" data-act="setting-reset" data-key="${esc(s.key)}">${s.type === "secret" ? "Remove" : "Reset"}</button>`;
+  if (s.source === "env") return `<span>From .env</span>`;
+  return "";
+}
+
+function settingControl(s) {
+  const id = `set-${s.key}`;
+  const invalid = ui.settingErrors.has(s.key) ? ` aria-invalid="true" aria-describedby="err-${esc(s.key)}"` : "";
+  if (s.type === "bool") {
+    return `<input type="checkbox" class="switch" id="${id}" data-setting="${esc(s.key)}"${s.value ? " checked" : ""}${invalid}>`;
+  }
+  const typed = ui.settingErrors.get(s.key)?.value;
+  const value = typed !== undefined && typeof typed !== "boolean" ? typed : s.value;
+  if (s.type === "int") {
+    return `<span class="with-unit"><input type="number" inputmode="numeric" id="${id}" data-setting="${esc(s.key)}" min="${s.min}" max="${s.max}" value="${esc(value)}"${invalid}>${s.unit ? `<span class="unit">${esc(s.unit)}</span>` : ""}</span>`;
+  }
+  if (s.type === "secret") {
+    // The page never gets a secret back, only whether one is set.
+    return `<input type="password" id="${id}" data-setting="${esc(s.key)}" autocomplete="off" placeholder="${s.set ? "Set. Type to replace it" : "Not set"}"${invalid}>`;
+  }
+  return `<input type="${s.type === "url" ? "url" : "text"}" id="${id}" data-setting="${esc(s.key)}" autocomplete="off" spellcheck="false" placeholder="${esc(s.placeholder || "")}" value="${esc(value)}"${invalid}>`;
+}
+
+function renderSettings() {
+  const { groups, settings } = ui.settings;
+  $("#settings").innerHTML = groups.map((g) => {
+    const rows = settings.filter((s) => s.group === g).map((s) => {
+      const err = ui.settingErrors.get(s.key)?.message;
+      return `<div class="setting${s.type === "bool" ? " is-bool" : ""}">
+        <div class="s-text">
+          <label for="set-${esc(s.key)}">${esc(s.label)}</label>
+          <p class="help">${esc(s.help)}</p>
+          ${err ? `<p class="s-error" id="err-${esc(s.key)}">${esc(err)}</p>` : ""}
+          <p class="s-src">${settingSource(s)}</p>
+        </div>
+        <div class="s-control">${settingControl(s)}</div>
+      </div>`;
+    }).join("");
+    return `<section class="s-group" aria-labelledby="g-${esc(g)}"><div class="sec-head"><h2 id="g-${esc(g)}">${esc(g)}</h2></div><div class="list">${rows}</div></section>`;
+  }).join("");
+}
+
+async function saveSetting(key, value) {
+  try {
+    ui.settings = await api("PUT", "/api/ui/settings", { values: { [key]: value } });
+    ui.settingErrors.delete(key);
+    toast(value === null ? "Back to the default." : "Saved.");
+  } catch (err) {
+    // A refused secret isn't kept on the page.
+    const s = ui.settings.settings.find((x) => x.key === key);
+    ui.settingErrors.set(key, { message: err.message, value: s?.type === "secret" ? undefined : value });
+  }
+  const focused = document.activeElement?.dataset?.setting;
+  renderSettings();
+  if (focused) $(`#set-${CSS.escape(focused)}`)?.focus();
+  // Undo window and archive length show on the other tabs too.
+  load();
+}
+
+document.addEventListener("change", (e) => {
+  const key = e.target.dataset?.setting;
+  if (!key || !ui.settings) return;
+  const s = ui.settings.settings.find((x) => x.key === key);
+  if (!s) return;
+  if (s.type === "bool") return saveSetting(key, e.target.checked);
+  if (s.type === "secret") {
+    const v = e.target.value.trim();
+    if (!v) return;
+    e.target.value = "";
+    return saveSetting(key, v);
+  }
+  saveSetting(key, s.type === "int" ? e.target.value.trim() : e.target.value);
+});
 
 const item = (id) => [...ui.state.needs, ...ui.state.catchup].find((x) => x.id === Number(id));
 const actOn = (id, body) => run("POST", `/api/ui/items/${id}/act`, body);
@@ -575,6 +668,7 @@ document.addEventListener("input", (e) => {
 
 document.addEventListener("click", async (e) => {
   const b = e.target.closest("[data-act], [data-tab], [data-bot]");
+  if (b?.dataset.act === "setting-reset") return saveSetting(b.dataset.key, null);
   if (!b || !ui.state || b.disabled) return;
   if (b.dataset.tab) return setTab(b.dataset.tab);
   if (b.dataset.bot) {

@@ -8,6 +8,7 @@ import { Todoist, pickTodos } from "./todoist.ts";
 import { addDays, lastSlot, localStamp, overlaps, parseWhen, snoozeChoices, zonedToEpoch } from "./time.ts";
 import { checkWebhookUrl } from "./webhook.ts";
 import { POLITO_BOT, type PolitoSync } from "./polito.ts";
+import { GROUPS, SettingError, Settings } from "./settings.ts";
 
 // Errors with a status code become JSON error responses; anything else is a 500.
 export class HttpError extends Error {
@@ -136,6 +137,8 @@ const MAX_BODY = 512 * 1024;
 export interface AppDeps {
   config: Config;
   store: Store;
+  settings?: Settings;
+  /** Read on every request: main.ts swaps them when their settings change. */
   todoist?: Todoist | null;
   polito?: PolitoSync | null;
   notify?: (bot: string, reason: "actions" | "refresh") => void;
@@ -151,12 +154,11 @@ export const OFFLINE_AFTER_MS = 20 * 60_000;
 
 export function createApp(deps: AppDeps) {
   const { config, store } = deps;
-  const todoist = deps.todoist ?? null;
-  const polito = deps.polito ?? null;
+  const settings = deps.settings ?? new Settings(store, config, {});
   const tz = config.tz;
   const notify = deps.notify ?? (() => {});
   const log = deps.log ?? ((m: string) => console.log(m));
-  const undoMs = config.undoSeconds * 1000;
+  const undoMs = () => settings.int("undoSeconds") * 1000;
   const today = () => localStamp(new Date(store.now()), tz).slice(0, 10);
 
   /** The scheduled run and the accepted ping a bot missed since it last showed up (empty while it's on time). */
@@ -179,6 +181,7 @@ export function createApp(deps: AppDeps) {
   }
 
   async function todosState() {
+    const todoist = deps.todoist;
     if (todoist) {
       try {
         const all = await todoist.list();
@@ -204,7 +207,8 @@ export function createApp(deps: AppDeps) {
       now: store.now(),
       today: day,
       tz,
-      undoSeconds: config.undoSeconds,
+      undoSeconds: settings.int("undoSeconds"),
+      archiveDays: settings.int("archiveDays"),
       snoozeChoices: snoozeChoices(store.now(), tz),
       bots: bots.map((b) => ({
         slug: b.slug, name: b.name, color: b.color, lastScanAt: b.lastScanAt, lastSeenAt: b.lastSeenAt,
@@ -215,7 +219,7 @@ export function createApp(deps: AppDeps) {
       catchup: items.filter((i) => i.section === "catchup"),
       todos: await todosState(),
       agenda: store.listEvents(day, addDays(day, 2)),
-      polito: polito ? { error: polito.error() } : null,
+      polito: deps.polito ? { error: deps.polito.error() } : null,
     };
   }
 
@@ -233,7 +237,7 @@ export function createApp(deps: AppDeps) {
 
   /** Closing a PoliTO card here marks it read there too, so the phone app stops counting it. */
   function readOnPolito(item: Item) {
-    if (polito && item.bot === POLITO_BOT && item.key) void polito.markRead(item.key);
+    if (deps.polito && item.bot === POLITO_BOT && item.key) void deps.polito.markRead(item.key);
   }
 
   async function act(item: Item, b: Record<string, unknown>) {
@@ -248,7 +252,7 @@ export function createApp(deps: AppDeps) {
       if (item.status === "closed" && !(item.section === "catchup" && fields.type === "write")) throw conflict("This card is already closed.");
       if (item.status === "snoozed") throw conflict("This card is snoozed. Restore it first.");
       if (store.pendingActionFor(item.id)) throw conflict("The bot is already working on this card.");
-      return store.addAction({ item, bot: item.bot, delayMs: undoMs, ...fields });
+      return store.addAction({ item, bot: item.bot, delayMs: undoMs(), ...fields });
     };
     switch (type) {
       case "choose": {
@@ -308,6 +312,7 @@ export function createApp(deps: AppDeps) {
   }
 
   async function completeTodo(bot: string, id: string, undo: boolean) {
+    const todoist = deps.todoist;
     if (todoist && bot === "todoist") {
       await serial(id, async () => {
         if (undo) {
@@ -337,7 +342,7 @@ export function createApp(deps: AppDeps) {
     }
     if (pending || todo.completedAt) throw conflict("This to-do is already being completed.");
     store.setTodoCompleted(bot, id, true);
-    const action = store.addAction({ todoId: id, todoDue: todo.due, bot, type: "complete_todo", label: todo.content, delayMs: undoMs });
+    const action = store.addAction({ todoId: id, todoDue: todo.due, bot, type: "complete_todo", label: todo.content, delayMs: undoMs() });
     return { ok: true, action };
   }
 
@@ -359,7 +364,7 @@ export function createApp(deps: AppDeps) {
       now: localStamp(new Date(store.now()), tz),
       timeZone: tz,
       today: today(),
-      undoSeconds: config.undoSeconds,
+      undoSeconds: settings.int("undoSeconds"),
       cards: {
         post: "POST /api/bot/items with one card or {\"items\": [...]} (up to 50). Same bot + key updates the card.",
         fields: {
@@ -500,7 +505,7 @@ export function createApp(deps: AppDeps) {
     });
     if (new Set(todos.map((t) => t.id)).size !== todos.length) throw bad("Two to-dos share an id. Send each id once.");
     store.replaceTodos(bot, todos);
-    return { stored: todos.length, ignored: Boolean(todoist) };
+    return { stored: todos.length, ignored: Boolean(deps.todoist) };
   });
 
   route("GET", "/api/bot/actions", "bot", (_r, _p, q) => {
@@ -558,7 +563,7 @@ export function createApp(deps: AppDeps) {
   route("GET", "/api/ui/archive", "ui", (_r, _p, q) => {
     const offset = Math.max(0, Math.min(10_000, Math.floor(Number(q.get("offset") ?? 0)) || 0));
     const bot = q.get("bot");
-    return store.archive(text(q.get("q"), "q", 100), config.archiveDays, 50, offset, bot && bot !== "all" ? slug(bot) : "");
+    return store.archive(text(q.get("q"), "q", 100), settings.int("archiveDays"), 50, offset, bot && bot !== "all" ? slug(bot) : "");
   });
 
   route("POST", "/api/ui/items/:id/act", "ui", async (_r, p, _q, b) => {
@@ -581,10 +586,23 @@ export function createApp(deps: AppDeps) {
     return { ...res, state: await state() };
   });
 
+  route("GET", "/api/ui/settings", "ui", () => ({ groups: GROUPS, settings: settings.list() }));
+
+  route("PUT", "/api/ui/settings", "ui", (_r, _p, _q, b) => {
+    const values = obj(b.values, "values");
+    try {
+      settings.update(values);
+    } catch (err) {
+      if (err instanceof SettingError) throw bad(err.message);
+      throw err;
+    }
+    return { groups: GROUPS, settings: settings.list() };
+  });
+
   route("POST", "/api/ui/refresh", "ui", async () => {
     const bots = store.requestRefresh();
     for (const bot of bots) if (bot.webhookUrl) notify(bot.slug, "refresh");
-    if (polito) void polito.sync();
+    if (deps.polito) void deps.polito.sync();
     // PoliTO turned off after it ran: nothing would ever answer this refresh.
     else store.clearRefresh(POLITO_BOT);
     return { ok: true, webhooks: bots.filter((x) => x.webhookUrl).length, state: await state() };

@@ -90,6 +90,8 @@ Open `http://127.0.0.1:8788`. `npm run dev` turns off the Tailscale check and ke
 
 Set these in `.env`. The full list with comments is in [`.env.example`](.env.example).
 
+The Settings tab on the page changes the undo window, the archive and backup length, Todoist and PoliTO without a restart. A value saved there wins over `.env` until you press Reset. Tokens saved there are stored in `data/dashboard.db` and never sent back to the page. Your login, the bot token, the port, the time zone and the webhook rule stay in `.env` only.
+
 | Variable                | Required | Default     | What it does                                                             |
 | ----------------------- | -------- | ----------- | ------------------------------------------------------------------------ |
 | `OWNER_LOGIN`           | yes      |             | The Tailscale login allowed to open the page                             |
