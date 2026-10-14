@@ -657,6 +657,11 @@ export function createApp(deps: AppDeps) {
     const bots = store.listBots().filter((b) => !(triageOn && b.slug === grok));
     for (const bot of bots) store.requestRefresh(bot.slug);
     for (const bot of bots) if (bot.webhookUrl) notify(bot.slug, "refresh");
+    // Chats still waiting for Grok (say, it missed its last wake) go to it when you press Refresh.
+    if (triageOn && deps.triage!.waiting() > 0) {
+      deps.triage!.woke();
+      notify(grok, "inbox");
+    }
     if (deps.polito) void deps.polito.sync();
     // PoliTO turned off after it ran: nothing would ever answer this refresh.
     else store.clearRefresh(POLITO_BOT);

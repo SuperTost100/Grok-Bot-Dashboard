@@ -491,3 +491,137 @@ test("a snoozed draft from Grok is kept when the chat moves on", async () => {
     t.stop();
   }
 });
+
+// ---------- Review round two ----------
+
+test("a database from the first triage commit gets the new columns", async () => {
+  const fs = await import("node:fs");
+  const os = await import("node:os");
+  const path = await import("node:path");
+  const { DatabaseSync } = await import("node:sqlite");
+  const file = path.join(fs.mkdtempSync(path.join(os.tmpdir(), "gbd-")), "old.db");
+  const old = new DatabaseSync(file);
+  old.exec(`CREATE TABLE triage (id INTEGER PRIMARY KEY AUTOINCREMENT, source TEXT NOT NULL, thread TEXT NOT NULL, message_ids TEXT NOT NULL,
+    decided_at INTEGER NOT NULL, answers TEXT NOT NULL DEFAULT '{}', level INTEGER NOT NULL, need TEXT NOT NULL, route TEXT NOT NULL,
+    item_id INTEGER, grok TEXT, grok_at INTEGER, cost REAL NOT NULL DEFAULT 0);
+    CREATE TABLE wakes (at INTEGER NOT NULL, reason TEXT NOT NULL);`);
+  old.close();
+  const store = new Store(file);
+  store.addWake("inbox", "dashboard");
+  store.addTriage({ source: "whatsapp", thread: "1@c.us", messageIds: [], decidedAt: 1, answers: {}, level: 4, need: "reply", route: "wake", itemId: null, grok: "queued", cost: 0 });
+  assert.equal(store.grokQueue().length, 1);
+  assert.equal(store.wakesSince(0, "dashboard").length, 1);
+  store.close();
+  fs.rmSync(path.dirname(file), { recursive: true });
+});
+
+test("'never mind' after Grok took the chat doesn't bring it back later", async () => {
+  let n = 0;
+  const t = await setup({ reply: () => (n++ === 0 ? answers(4, "reply") : answers(1, "nothing")) });
+  try {
+    t.store.addInbox([t.msg("1@c.us", "Call me?")]);
+    await t.triage.tick();
+    assert.equal((await t.bot("/api/bot/actions")).inbox.length, 1, "Grok took it");
+    t.store.addInbox([t.msg("1@c.us", "Never mind", { at: t.now() })]);
+    t.advance(2 * 60_000);
+    await t.triage.tick();
+    t.advance(31 * 60_000);
+    await t.triage.tick();
+    assert.equal(t.store.grokQueue().length, 0);
+    assert.equal(t.triage.wakeDue(), false);
+  } finally {
+    t.stop();
+  }
+});
+
+test("a draft Grok posts after its lease ran out still settles the chat", async () => {
+  const t = await setup({ reply: () => answers(4, "reply") });
+  try {
+    t.store.addInbox([t.msg("1@c.us", "now!")]);
+    await t.triage.tick();
+    const [item] = (await t.bot("/api/bot/actions")).inbox;
+    t.advance(31 * 60_000);
+    await t.triage.tick();
+    assert.equal(t.store.grokQueue().length, 1, "queued again");
+    t.triage.ack(item.key);
+    assert.equal(t.store.grokQueue().length, 0);
+    assert.equal(t.triage.wakeDue(), false);
+  } finally {
+    t.stop();
+  }
+});
+
+test("Grok taking a chat while Jev decides on new messages leaves one entry", async () => {
+  let t: Awaited<ReturnType<typeof setup>>;
+  let n = 0;
+  t = await setup({
+    reply: () => {
+      // The second decision: Grok grabs the queue while Jev is still answering.
+      if (n++ === 1) t.store.claimGrokQueue();
+      return answers(3, "reply");
+    },
+  });
+  try {
+    t.store.addInbox([t.msg("1@c.us", "a")]);
+    await t.triage.tick();
+    t.store.addInbox([t.msg("1@c.us", "b", { at: t.now() })]);
+    t.advance(2 * 60_000);
+    await t.triage.tick();
+    const owed = t.store.triageSince(0).filter((r) => r.grok === "queued" || r.grok === "sent");
+    assert.equal(owed.length, 1);
+    assert.equal(owed[0].messageIds.length, 2);
+  } finally {
+    t.stop();
+  }
+});
+
+test("a new urgent message in a chat Grok didn't answer wakes it after the cooldown", async () => {
+  const t = await setup({ reply: () => answers(4, "reply") });
+  try {
+    t.store.addInbox([t.msg("1@c.us", "now!")]);
+    await t.triage.tick();
+    t.triage.woke();
+    t.store.addWake("inbox", "dashboard");
+    t.advance(50 * 60_000);
+    t.store.addInbox([t.msg("1@c.us", "hello?? really urgent", { at: t.now() - 120_000 })]);
+    await t.triage.tick();
+    assert.equal(t.triage.wakeDue(), true);
+  } finally {
+    t.stop();
+  }
+});
+
+test("a message from just before triage was switched on survives a long outage", async () => {
+  let down = true;
+  const t = await setup({
+    reply: () => {
+      if (down) throw new Error("outage");
+      return answers(3, "info");
+    },
+  });
+  try {
+    t.store.setState("triage:onSince", null);
+    t.store.addInbox([t.msg("1@c.us", "just before", { at: t.now() - 60_000 })]);
+    t.advance(10_000);
+    await t.triage.tick();
+    t.advance(7 * 3_600_000);
+    down = false;
+    await t.triage.tick();
+    assert.ok(t.store.getItemByKey("dashboard", "inbox:whatsapp:1@c.us:needs"));
+  } finally {
+    t.stop();
+  }
+});
+
+test("Refresh wakes Grok when chats are waiting for it", async () => {
+  const t = await setup({ reply: () => answers(2, "reply") });
+  try {
+    t.store.addInbox([t.msg("1@c.us", "whenever")]);
+    await t.triage.tick();
+    assert.equal(t.triage.wakeDue(), false);
+    await t.ui("POST", "/api/ui/refresh", {});
+    assert.deepEqual(t.notified, ["dashboard:inbox"]);
+  } finally {
+    t.stop();
+  }
+});

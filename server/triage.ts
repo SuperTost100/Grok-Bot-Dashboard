@@ -200,8 +200,7 @@ const MAX_QUEUE_AGE_MS = 24 * 3_600_000;
 const CLAIM_LEASE_MS = 30 * 60_000;
 /** Hand-outs per chat before giving up on Grok for it. The card stays for you. */
 const MAX_HANDOUTS = 2;
-/** With nothing new since the last wake, Grok is woken again for the same chats only after this long. */
-const REWAKE_IDLE_MS = 6 * 3_600_000;
+
 /** At most one phone ping in this long; later urgent cards wait for the next one. */
 const PING_GAP_MS = 10 * 60_000;
 
@@ -221,6 +220,8 @@ export interface Triage {
   claimForGrok(): ReturnType<typeof forGrok>[];
   /** Grok wrote or closed a card: the chat it was handed for is done. */
   ack(key: string): void;
+  /** Chats waiting for Grok. */
+  waiting(): number;
   status(): TriageStatus[];
   runsToday(): number;
 }
@@ -333,7 +334,7 @@ export function createTriage(deps: TriageDeps): Triage {
     }
     // Messages still waiting for Grok in this chat are judged again together with the new ones,
     // so a later "never mind" can take the chat off Grok's list, and the chat stays one entry.
-    const pending = active() ? store.queuedFor(last.source, last.thread) : null;
+    const pending = active() ? store.outstandingFor(last.source, last.thread) : null;
     const earlier = pending ? store.inboxByIds(pending.messageIds).filter((m) => !ids.includes(m.id)) : [];
     const msgs = [...earlier, ...fresh];
     const allIds = msgs.map((m) => m.id);
@@ -376,8 +377,9 @@ export function createTriage(deps: TriageDeps): Triage {
       itemId = store.upsertItem(digestCard(bot(), recent.length ? recent : msgs, info), { asServer: true }).item.id;
     }
     store.tx(() => {
-      // This decision replaces the one that was waiting; it keeps that one's place in line.
-      if (pending) store.supersede(pending.id);
+      // This decision replaces whatever Grok still owed for the chat (looked up again: Grok may have
+      // taken it while Jev answered). It keeps that one's place in line.
+      store.dropFromGrokQueue(last.source, last.thread);
       store.addTriage({
         source: last.source, thread: last.thread, messageIds: forGrokNow ? allIds : ids, decidedAt: store.now(),
         answers: { ...result.answers, model: result.model, unsure: d.unsure, automated: d.automated },
@@ -396,7 +398,7 @@ export function createTriage(deps: TriageDeps): Triage {
    * OpenRouter outage are not: they arrived on time and still get decided.
    */
   function stale(m: InboxMessage, now: number, onSince: number) {
-    return now - m.at > STALE_MS && (m.receivedAt - m.at > STALE_MS || m.receivedAt < onSince);
+    return now - m.at > STALE_MS && (m.receivedAt - m.at > STALE_MS || m.receivedAt < onSince - STALE_MS);
   }
 
   async function run() {
@@ -460,10 +462,10 @@ export function createTriage(deps: TriageDeps): Triage {
       if (store.wakesSince(dayStart(), grok).length >= settings.int("wakeCeiling")) return false;
       const queue = store.grokQueue();
       if (!queue.length) return false;
-      // A wake that Grok never answered isn't repeated for the same chats, only for new ones,
-      // or after a long quiet spell (the bot may have been offline).
+      // A wake that Grok never answered isn't repeated for the same chats: only a new decision wakes it
+      // again. Unanswered chats go along with that wake, a tap, or Refresh.
       const lastWake = Math.max(lastAttempt, store.wakesSince(0, grok).filter((w) => w.reason === "inbox").at(-1)?.at ?? 0);
-      if (!queue.some((t) => (t.queuedAt ?? 0) > lastWake) && now - lastWake < REWAKE_IDLE_MS) return false;
+      if (!queue.some((t) => t.decidedAt > lastWake || (t.attempts > 0 && (t.queuedAt ?? 0) > lastWake))) return false;
       const waitedSince = (t: TriageRow) => t.queuedAt ?? t.decidedAt;
       const today = queue.filter((t) => t.level >= TODAY);
       return (
@@ -484,8 +486,11 @@ export function createTriage(deps: TriageDeps): Triage {
       });
     },
     ack(key) {
-      for (const t of store.sentToGrok()) if (cardKey(t.source, t.thread, "needs") === key) store.setGrok(t.id, "done");
+      // Handed-out chats, and ones queued again after their lease ran out, are done once Grok writes the card.
+      const handedOut = [...store.sentToGrok(), ...store.grokQueue().filter((t) => t.attempts > 0)];
+      for (const t of handedOut) if (cardKey(t.source, t.thread, "needs") === key) store.setGrok(t.id, "done");
     },
+    waiting: () => store.grokQueue().length,
     runsToday() {
       return store.wakesSince(dayStart(), bot()).length;
     },

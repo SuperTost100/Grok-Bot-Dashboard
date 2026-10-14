@@ -266,6 +266,9 @@ const MIGRATIONS: [string, string, string][] = [
   ["todos", "completed_due", "TEXT"],
   ["actions", "snapshot", "TEXT"],
   ["bots", "schedule", "TEXT NOT NULL DEFAULT ''"],
+  ["triage", "queued_at", "INTEGER"],
+  ["triage", "attempts", "INTEGER NOT NULL DEFAULT 0"],
+  ["wakes", "bot", "TEXT NOT NULL DEFAULT ''"],
 ];
 
 // An event overlaps [from, to) when it starts before `to` and is still going at `from`.
@@ -612,9 +615,10 @@ export class Store {
     return r ? toTriage(r as Row) : null;
   }
 
-  /** A newer decision about the same chat takes this one's place in the queue. */
-  supersede(id: number) {
-    this.db.prepare("UPDATE triage SET grok = NULL WHERE id = ? AND grok = 'queued'").run(id);
+  /** The decision about this chat that Grok still owes: queued, or handed out and not confirmed. */
+  outstandingFor(source: string, thread: string): TriageRow | null {
+    const r = this.db.prepare("SELECT * FROM triage WHERE grok IN ('queued', 'sent') AND source = ? AND thread = ? ORDER BY id DESC LIMIT 1").get(source, thread);
+    return r ? toTriage(r as Row) : null;
   }
 
   /** Hand the queue to Grok. Grok confirms each chat by writing or closing its card (ackGrok). */
@@ -658,9 +662,12 @@ export class Store {
     });
   }
 
-  /** A chat no longer needs Grok, like when you replied yourself. */
+  /**
+   * A chat no longer needs Grok (you replied yourself, or a newer decision takes its place):
+   * whatever it still owed for the chat, queued or handed out, is dropped.
+   */
   dropFromGrokQueue(source: string, thread: string) {
-    this.db.prepare("UPDATE triage SET grok = NULL WHERE grok = 'queued' AND source = ? AND thread = ?").run(source, thread);
+    this.db.prepare("UPDATE triage SET grok = NULL WHERE grok IN ('queued', 'sent') AND source = ? AND thread = ?").run(source, thread);
   }
 
   triageSince(since: number): TriageRow[] {
