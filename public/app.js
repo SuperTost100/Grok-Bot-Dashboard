@@ -232,10 +232,11 @@ function renderHeader() {
   const hooked = s.bots.filter((b) => b.hasWebhook);
   const allDown = hooked.length > 0 && hooked.every((b) => b.offlineSince);
   const politoError = s.polito?.error ? `PoliTO avvisi couldn't be checked: ${s.polito.error}` : "";
-  $("#offline").hidden = !down.length && !politoError;
+  const problems = s.sourceProblems || [];
+  $("#offline").hidden = !down.length && !politoError && !problems.length;
   $("#offline").textContent = down
     .map((b) => `${b.name} hasn't checked in since ${b.lastSeenAt ? whenFull(b.lastSeenAt) : "it was set up"}. ${b.hasWebhook ? "Tap Refresh to wake it." : "Taps wait for its next run."}`)
-    .concat(politoError || [])
+    .concat(politoError || [], problems)
     .join(" ");
   const asked = s.bots.some((b) => b.refreshRequestedAt);
   const label = asked ? "Scan requested" : allDown ? "Bot offline" : ago(s.lastScanAt);
@@ -613,9 +614,47 @@ function renderSettings() {
         <div class="s-control">${settingControl(s)}</div>
       </div>`;
     }).join("");
-    return `<section class="s-group" aria-labelledby="g-${esc(g)}"><div class="sec-head"><h2 id="g-${esc(g)}">${esc(g)}</h2></div><div class="list">${rows}</div></section>`;
+    const gid = g.replace(/\W+/g, "-");
+    return `<section class="s-group" aria-labelledby="g-${gid}"><div class="sec-head"><h2 id="g-${gid}">${esc(g)}</h2><span class="note s-status" data-status-group="${esc(g)}" role="status"></span></div><div class="qr-slot" data-qr-group="${esc(g)}"></div><div class="list">${rows}</div></section>`;
   }).join("");
+  renderSourceStatus();
 }
+
+let qrStamp = 0;
+/** Status lines and the QR code update in place, so a poll never wipes what you're typing. */
+function renderSourceStatus() {
+  const list = ui.settings?.status || [];
+  for (const el of $$("[data-status-group]")) {
+    const st = list.find((x) => x.group === el.dataset.statusGroup);
+    el.textContent = st ? st.text : "";
+    el.classList.toggle("bad", Boolean(st && !st.ok));
+    el.classList.toggle("on", Boolean(st?.on && st.ok));
+  }
+  for (const el of $$("[data-qr-group]")) {
+    const st = list.find((x) => x.group === el.dataset.qrGroup);
+    if (!st?.needsQr) { el.innerHTML = ""; continue; }
+    // WhatsApp replaces its code every 20 seconds or so; the image is fetched again with each status poll.
+    const src = `/api/ui/whatsapp/qr?t=${qrStamp}`;
+    if (!el.firstChild) {
+      el.innerHTML = `<div class="qr"><img alt="QR code to link WhatsApp" width="220" height="220"><ol><li>Open WhatsApp on your phone.</li><li>Go to Settings, then Linked devices.</li><li>Tap Link a device and point the camera at this code.</li></ol></div>`;
+    }
+    const img = $("img", el);
+    if (img.getAttribute("src") !== src) img.src = src;
+  }
+}
+
+async function pollSettingsStatus() {
+  if (ui.tab !== "settings" || document.visibilityState !== "visible") return;
+  try {
+    const fresh = await api("GET", "/api/ui/settings");
+    ui.settings = { ...ui.settings, status: fresh.status };
+    qrStamp = Date.now();
+    renderSourceStatus();
+  } catch {
+    // The Today banner already says when the server is unreachable.
+  }
+}
+setInterval(pollSettingsStatus, 5000);
 
 async function saveSetting(key, value) {
   try {

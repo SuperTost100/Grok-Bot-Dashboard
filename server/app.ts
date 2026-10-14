@@ -9,6 +9,18 @@ import { addDays, lastSlot, localStamp, overlaps, parseWhen, snoozeChoices, zone
 import { checkWebhookUrl } from "./webhook.ts";
 import { POLITO_BOT, type PolitoSync } from "./polito.ts";
 import { GROUPS, SettingError, Settings } from "./settings.ts";
+import type { Sources } from "./sources/index.ts";
+import { CALENDAR_OWNER } from "./sources/calendar.ts";
+
+/** A route result sent as-is instead of as JSON, like an image. */
+class Raw {
+  type: string;
+  data: Buffer;
+  constructor(type: string, data: Buffer) {
+    this.type = type;
+    this.data = data;
+  }
+}
 
 // Errors with a status code become JSON error responses; anything else is a 500.
 export class HttpError extends Error {
@@ -141,6 +153,8 @@ export interface AppDeps {
   /** Read on every request: main.ts swaps them when their settings change. */
   todoist?: Todoist | null;
   polito?: PolitoSync | null;
+  /** WhatsApp, mail and calendars the dashboard reads itself. */
+  sources?: Sources | null;
   notify?: (bot: string, reason: "actions" | "refresh") => void;
   /** The last webhook ping to a bot and whether its routine accepted it. */
   lastPing?: (bot: string) => { at: number; ok: boolean } | undefined;
@@ -218,9 +232,17 @@ export function createApp(deps: AppDeps) {
       needs: items.filter((i) => i.section === "needs"),
       catchup: items.filter((i) => i.section === "catchup"),
       todos: await todosState(),
-      agenda: store.listEvents(day, addDays(day, 2)),
+      agenda: agenda(day),
       polito: deps.polito ? { error: deps.polito.error() } : null,
+      sourceProblems: deps.sources?.problems() ?? [],
     };
+  }
+
+  /** With iCal addresses set, the agenda comes from them and PoliTO; what bots send is left out. */
+  function agenda(day: string) {
+    const events = store.listEvents(day, addDays(day, 2));
+    if (!deps.sources?.calendarOn()) return events.filter((e) => e.bot !== CALENDAR_OWNER);
+    return events.filter((e) => e.bot === CALENDAR_OWNER || e.bot === POLITO_BOT);
   }
 
   function itemOr404(id: string) {
@@ -586,7 +608,19 @@ export function createApp(deps: AppDeps) {
     return { ...res, state: await state() };
   });
 
-  route("GET", "/api/ui/settings", "ui", () => ({ groups: GROUPS, settings: settings.list() }));
+  const settingsView = () => ({ groups: GROUPS, settings: settings.list(), status: deps.sources?.status() ?? [] });
+
+  route("GET", "/api/ui/settings", "ui", () => settingsView());
+
+  route("GET", "/api/ui/whatsapp/qr", "ui", async () => {
+    const waha = deps.sources?.waha();
+    if (!waha) throw new HttpError(404, "WhatsApp is off. Set the WAHA address and API key first.");
+    try {
+      return new Raw("image/png", await waha.qr());
+    } catch (err) {
+      throw new HttpError(502, (err as Error).message);
+    }
+  });
 
   route("PUT", "/api/ui/settings", "ui", (_r, _p, _q, b) => {
     const values = obj(b.values, "values");
@@ -596,13 +630,14 @@ export function createApp(deps: AppDeps) {
       if (err instanceof SettingError) throw bad(err.message);
       throw err;
     }
-    return { groups: GROUPS, settings: settings.list() };
+    return settingsView();
   });
 
   route("POST", "/api/ui/refresh", "ui", async () => {
     const bots = store.requestRefresh();
     for (const bot of bots) if (bot.webhookUrl) notify(bot.slug, "refresh");
     if (deps.polito) void deps.polito.sync();
+    if (deps.sources) void deps.sources.refresh();
     // PoliTO turned off after it ran: nothing would ever answer this refresh.
     else store.clearRefresh(POLITO_BOT);
     return { ok: true, webhooks: bots.filter((x) => x.webhookUrl).length, state: await state() };
@@ -713,7 +748,12 @@ export function createApp(deps: AppDeps) {
           if (body.bot === undefined) body.bot = headerBot;
           if (!u.searchParams.has("bot")) u.searchParams.set("bot", headerBot);
         }
-        return send(res, 200, await r.fn(req, m.slice(1), u.searchParams, body));
+        const out = await r.fn(req, m.slice(1), u.searchParams, body);
+        if (out instanceof Raw) {
+          res.writeHead(200, { "Content-Type": out.type, "Cache-Control": "no-store", ...SECURITY_HEADERS });
+          return res.end(out.data);
+        }
+        return send(res, 200, out);
       }
       throw new HttpError(404, `No route for ${req.method} ${pathname}.`);
     } catch (err) {

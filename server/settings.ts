@@ -23,7 +23,9 @@ export interface SettingDef {
   fallback: string | number | boolean;
 }
 
-export const GROUPS = ["General", "Todoist", "PoliTO"] as const;
+export const MAIL_SLOTS = [1, 2, 3] as const;
+
+export const GROUPS = ["General", "WhatsApp", ...MAIL_SLOTS.map((n) => `Mail ${n}`), "Calendar", "Todoist", "PoliTO"];
 
 export const DEFS: SettingDef[] = [
   {
@@ -37,6 +39,37 @@ export const DEFS: SettingDef[] = [
   {
     key: "backupDays", env: "BACKUP_DAYS", group: "General", type: "int", min: 0, max: 90, unit: "days", fallback: 7,
     label: "Daily backups", help: "Backups kept in data/backups. 0 turns them off.",
+  },
+  {
+    key: "whatsappUrl", env: "WAHA_URL", group: "WhatsApp", type: "url", fallback: "", placeholder: "http://waha:3000",
+    label: "WAHA address", help: "Where the WAHA WhatsApp bridge answers. Empty turns WhatsApp off. The dashboard only reads.",
+  },
+  {
+    key: "whatsappApiKey", env: "WAHA_API_KEY", group: "WhatsApp", type: "secret", fallback: "",
+    label: "WAHA API key", help: "The WAHA_API_KEY that WAHA runs with.",
+  },
+  ...MAIL_SLOTS.flatMap((n): SettingDef[] => [
+    {
+      key: `mail${n}Name`, env: `MAIL${n}_NAME`, group: `Mail ${n}`, type: "text", fallback: "", placeholder: n === 1 ? "PoliTO" : n === 2 ? "Work" : "Gmail",
+      label: "Name", help: "Shown on cards from this mailbox.",
+    },
+    {
+      key: `mail${n}Host`, env: `MAIL${n}_HOST`, group: `Mail ${n}`, type: "text", fallback: "", placeholder: "imap.gmail.com",
+      label: "IMAP server", help: "Port 993 with TLS. Add :port for another one. Empty turns this mailbox off.",
+    },
+    {
+      key: `mail${n}User`, env: `MAIL${n}_USER`, group: `Mail ${n}`, type: "text", fallback: "", placeholder: "you@example.com",
+      label: "Login", help: "Usually the full address.",
+    },
+    {
+      key: `mail${n}Password`, env: `MAIL${n}_PASSWORD`, group: `Mail ${n}`, type: "secret", fallback: "",
+      label: "Password", help: "For Gmail, an app password (Google Account > Security > App passwords), not your normal one.",
+    },
+  ]),
+  {
+    key: "calendarUrls", env: "CALENDAR_URLS", group: "Calendar", type: "secret", fallback: "",
+    label: "Secret iCal addresses",
+    help: "In Google Calendar: Settings > your calendar > Integrate calendar > Secret address in iCal format. For several calendars, put spaces between the addresses.",
   },
   {
     key: "todoistToken", env: "TODOIST_TOKEN", group: "Todoist", type: "secret", fallback: "",

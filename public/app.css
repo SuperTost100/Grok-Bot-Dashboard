@@ -441,3 +441,10 @@ details.arch + details.arch { border-top: 1px solid var(--border); }
 @media (max-width: 640px) {
   .setting:not(.is-bool) { grid-template-columns: 1fr; }
 }
+.s-group .sec-head { flex-wrap: wrap; }
+.s-status { text-align: right; }
+.s-status.on { color: var(--ok); }
+.s-status.bad { color: var(--urgent); }
+.qr { display: flex; gap: 20px; align-items: center; flex-wrap: wrap; margin: 0 0 12px; padding: 16px; border: 1px solid var(--border); border-radius: var(--radius); background: var(--surface); }
+.qr img { width: 220px; height: 220px; border-radius: 8px; background: #fff; image-rendering: pixelated; }
+.qr ol { margin: 0; padding-left: 20px; font-size: 15px; line-height: 1.6; }
