@@ -207,6 +207,30 @@ CREATE TABLE IF NOT EXISTS settings (
   key TEXT PRIMARY KEY,
   value TEXT NOT NULL
 );
+CREATE TABLE IF NOT EXISTS state (
+  key TEXT PRIMARY KEY,
+  value TEXT NOT NULL
+);
+CREATE TABLE IF NOT EXISTS inbox (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  source TEXT NOT NULL,
+  ext_id TEXT NOT NULL,
+  thread TEXT NOT NULL,
+  thread_name TEXT NOT NULL DEFAULT '',
+  sender TEXT NOT NULL DEFAULT '',
+  from_me INTEGER NOT NULL DEFAULT 0,
+  is_group INTEGER NOT NULL DEFAULT 0,
+  automated INTEGER NOT NULL DEFAULT 0,
+  subject TEXT NOT NULL DEFAULT '',
+  text TEXT NOT NULL DEFAULT '',
+  link TEXT NOT NULL DEFAULT '',
+  at INTEGER NOT NULL,
+  received_at INTEGER NOT NULL,
+  triaged_at INTEGER,
+  UNIQUE (source, ext_id)
+);
+CREATE INDEX IF NOT EXISTS inbox_untriaged ON inbox (triaged_at, source, thread);
+CREATE INDEX IF NOT EXISTS inbox_thread ON inbox (source, thread, at);
 `;
 
 // Columns added after the first release, as [table, column, definition].
@@ -313,6 +337,50 @@ function toTodo(row: Row): BotTodo {
   };
 }
 
+/** A message the dashboard read itself, waiting for triage. */
+export interface InboxMessage {
+  id: number;
+  /** "whatsapp", or "mail:<slot>" like "mail:1". */
+  source: string;
+  extId: string;
+  /** Chat id, or the mail thread's first Message-ID. */
+  thread: string;
+  threadName: string;
+  sender: string;
+  fromMe: boolean;
+  isGroup: boolean;
+  /** Headers or the chat type say a machine sent it (newsletter, notification). A hint, not a verdict. */
+  automated: boolean;
+  subject: string;
+  text: string;
+  link: string;
+  at: number;
+  receivedAt: number;
+  triagedAt: number | null;
+}
+
+export type InboxInput = Omit<InboxMessage, "id" | "receivedAt" | "triagedAt">;
+
+function toInbox(r: Row): InboxMessage {
+  return {
+    id: Number(r.id),
+    source: str(r.source),
+    extId: str(r.ext_id),
+    thread: str(r.thread),
+    threadName: str(r.thread_name),
+    sender: str(r.sender),
+    fromMe: Number(r.from_me) === 1,
+    isGroup: Number(r.is_group) === 1,
+    automated: Number(r.automated) === 1,
+    subject: str(r.subject),
+    text: str(r.text),
+    link: str(r.link),
+    at: Number(r.at),
+    receivedAt: Number(r.received_at),
+    triagedAt: num(r.triaged_at),
+  };
+}
+
 export interface ItemInput {
   bot: string;
   key?: string | null;
@@ -359,7 +427,9 @@ export class Store {
     await backup(this.db, file);
   }
 
+  /** Run fn in one transaction. Inside another transaction it simply joins that one. */
   tx<T>(fn: () => T): T {
+    if (this.db.isTransaction) return fn();
     this.db.exec("BEGIN IMMEDIATE");
     try {
       const out = fn();
@@ -381,6 +451,65 @@ export class Store {
   setSetting(key: string, value: string | null) {
     if (value === null) this.db.prepare("DELETE FROM settings WHERE key = ?").run(key);
     else this.db.prepare("INSERT INTO settings (key, value) VALUES (?, ?) ON CONFLICT (key) DO UPDATE SET value = excluded.value").run(key, value);
+  }
+
+  // Small values the server keeps between runs, like where each source stopped reading
+
+  getState(key: string): string | null {
+    const r = this.db.prepare("SELECT value FROM state WHERE key = ?").get(key) as Row | undefined;
+    return r ? String(r.value) : null;
+  }
+
+  setState(key: string, value: string | null) {
+    if (value === null) this.db.prepare("DELETE FROM state WHERE key = ?").run(key);
+    else this.db.prepare("INSERT INTO state (key, value) VALUES (?, ?) ON CONFLICT (key) DO UPDATE SET value = excluded.value").run(key, value);
+  }
+
+  // Inbox: messages read straight from WhatsApp and mail
+
+  /**
+   * Store new messages. A message already stored (same source and id) is skipped. Returns how many were new.
+   * With `state`, a source's cursor is saved in the same transaction, so it never moves past messages that weren't stored.
+   */
+  addInbox(messages: InboxInput[], state?: { key: string; value: string }): number {
+    return this.tx(() => {
+      if (state) this.setState(state.key, state.value);
+      const ins = this.db.prepare(
+        `INSERT OR IGNORE INTO inbox (source, ext_id, thread, thread_name, sender, from_me, is_group, automated, subject, text, link, at, received_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      );
+      let added = 0;
+      for (const m of messages) {
+        const res = ins.run(
+          m.source, m.extId, m.thread, m.threadName, m.sender, m.fromMe ? 1 : 0, m.isGroup ? 1 : 0, m.automated ? 1 : 0,
+          m.subject, m.text, m.link, m.at, this.now(),
+        );
+        added += Number(res.changes);
+      }
+      return added;
+    });
+  }
+
+  untriaged(limit = 500): InboxMessage[] {
+    return this.db.prepare("SELECT * FROM inbox WHERE triaged_at IS NULL ORDER BY at, id LIMIT ?").all(limit).map((r) => toInbox(r as Row));
+  }
+
+  /** The latest messages of one chat or thread, oldest first, for context. */
+  threadMessages(source: string, thread: string, limit = 20): InboxMessage[] {
+    return this.db
+      .prepare("SELECT * FROM (SELECT * FROM inbox WHERE source = ? AND thread = ? ORDER BY at DESC, id DESC LIMIT ?) ORDER BY at, id")
+      .all(source, thread, limit)
+      .map((r) => toInbox(r as Row));
+  }
+
+  markTriaged(ids: number[]) {
+    const upd = this.db.prepare("UPDATE inbox SET triaged_at = ? WHERE id = ?");
+    this.tx(() => { for (const id of ids) upd.run(this.now(), id); });
+  }
+
+  /** Message text is only needed while it's recent. */
+  purgeInbox(days: number): number {
+    return Number(this.db.prepare("DELETE FROM inbox WHERE at < ?").run(this.now() - days * 86_400_000).changes);
   }
 
   // Bots
@@ -813,9 +942,10 @@ export class Store {
   // Agenda
 
   /** Replace this bot's events that overlap [from, to). */
-  replaceEvents(bot: string, from: string, to: string, events: Omit<CalEvent, "id" | "bot">[]) {
+  replaceEvents(bot: string, from: string, to: string, events: Omit<CalEvent, "id" | "bot">[], touch = true) {
     this.tx(() => {
-      this.touchBot(bot);
+      // A calendar the dashboard reads itself isn't a bot, so it gets no filter chip.
+      if (touch) this.touchBot(bot);
       this.db
         .prepare(`DELETE FROM events WHERE bot = ? AND ${OVERLAP}`)
         .run(bot, to, from, from, from + "T00:00:00");

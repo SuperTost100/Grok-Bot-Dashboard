@@ -92,21 +92,24 @@ Set these in `.env`. The full list with comments is in [`.env.example`](.env.exa
 
 The Settings tab on the page changes the undo window, the archive and backup length, Todoist and PoliTO without a restart. A value saved there wins over `.env` until you press Reset. Tokens saved there are stored in `data/dashboard.db` and never sent back to the page. Your login, the bot token, the port, the time zone and the webhook rule stay in `.env` only.
 
-| Variable                | Required | Default     | What it does                                                             |
-| ----------------------- | -------- | ----------- | ------------------------------------------------------------------------ |
-| `OWNER_LOGIN`           | yes      |             | The Tailscale login allowed to open the page                             |
-| `BOT_TOKEN`             | yes      |             | Secret the bots send with every call                                     |
-| `TZ`                    | no       | system zone | Time zone for "today", the agenda and to-do dates                        |
-| `TODOIST_TOKEN`         | no       |             | Read and complete to-dos in Todoist directly                             |
-| `TODOIST_FILTER`        | no       |             | Show only tasks matching a Todoist filter, like `today \| overdue \| p1` |
-| `AREADIDATTICA_URL`     | no       |             | Where areadidattica answers; turns on PoliTO avvisi                      |
-| `AREADIDATTICA_TOKEN`   | with URL |             | The `API_TOKEN` from areadidattica's `.env`                              |
-| `UNDO_SECONDS`          | no       | `5`         | How long a tap waits before it goes to the bot                           |
-| `ARCHIVE_DAYS`          | no       | `30`        | How long closed cards stay in the archive                                |
-| `PORT`                  | no       | `8787`      | Port on `127.0.0.1`                                                      |
-| `BACKUP_DAYS`           | no       | `7`         | Daily backups kept in `data/backups`; `0` turns them off                 |
-| `WEBHOOK_ALLOW_PRIVATE` | no       | `0`         | `1` lets bots register webhooks on your LAN or tailnet                   |
-| `AUTH_MODE`             | no       | `tailscale` | `none` turns off the owner check. Only for local development.            |
+| Variable                      | Required | Default     | What it does                                                             |
+| ----------------------------- | -------- | ----------- | ------------------------------------------------------------------------ |
+| `OWNER_LOGIN`                 | yes      |             | The Tailscale login allowed to open the page                             |
+| `BOT_TOKEN`                   | yes      |             | Secret the bots send with every call                                     |
+| `TZ`                          | no       | system zone | Time zone for "today", the agenda and to-do dates                        |
+| `TODOIST_TOKEN`               | no       |             | Read and complete to-dos in Todoist directly                             |
+| `TODOIST_FILTER`              | no       |             | Show only tasks matching a Todoist filter, like `today \| overdue \| p1` |
+| `AREADIDATTICA_URL`           | no       |             | Where areadidattica answers; turns on PoliTO avvisi                      |
+| `AREADIDATTICA_TOKEN`         | with URL |             | The `API_TOKEN` from areadidattica's `.env`                              |
+| `WAHA_API_KEY`                | no       |             | Secret shared by WAHA and the dashboard; turns on WhatsApp               |
+| `MAIL1_HOST` ... `MAIL3_HOST` | no       |             | IMAP server of each mailbox, with `_NAME`, `_USER` and `_PASSWORD`       |
+| `CALENDAR_URLS`               | no       |             | Secret iCal addresses, separated by spaces                               |
+| `UNDO_SECONDS`                | no       | `5`         | How long a tap waits before it goes to the bot                           |
+| `ARCHIVE_DAYS`                | no       | `30`        | How long closed cards stay in the archive                                |
+| `PORT`                        | no       | `8787`      | Port on `127.0.0.1`                                                      |
+| `BACKUP_DAYS`                 | no       | `7`         | Daily backups kept in `data/backups`; `0` turns them off                 |
+| `WEBHOOK_ALLOW_PRIVATE`       | no       | `0`         | `1` lets bots register webhooks on your LAN or tailnet                   |
+| `AUTH_MODE`                   | no       | `tailscale` | `none` turns off the owner check. Only for local development.            |
 
 ## PoliTO avvisi
 
@@ -129,12 +132,23 @@ COMPOSE_FILE=compose.yaml:compose.polito.yaml
 
 `compose.polito.yaml` puts the dashboard on areadidattica's Compose network, which is named after the folder areadidattica runs from. The default, `areadidattica_default`, fits a folder called `areadidattica`; for another folder, set `AREADIDATTICA_NETWORK=<folder>_default`. Without Docker, use `AREADIDATTICA_URL=http://127.0.0.1:8789` and skip `COMPOSE_FILE`.
 
+## WhatsApp, mail and calendar
+
+The dashboard can read your WhatsApp, up to three mailboxes and your calendars itself, so the Grok Bot doesn't have to scan them on a schedule. Everything here is read-only: it never sends, marks read, moves or deletes anything. Set it up under Settings on the page.
+
+- **WhatsApp** goes through [WAHA](https://waha.devlike.pro), which links to your account as a device, like WhatsApp Web. Add `WAHA_API_KEY=<random secret>` to `.env`, add `compose.whatsapp.yaml` to `COMPOSE_FILE`, and run `docker compose up -d`. Then open Settings and scan the QR code under WhatsApp with your phone. The dashboard reads new messages every minute. WAHA is set never to show as online, so WhatsApp keeps sending notifications to your phone.
+- **Mail** is read over IMAP every 2 minutes: new mail in the inbox, and your own replies in the Sent folder. For Gmail, create an app password in your Google Account and use that, not your normal password.
+- **Calendar** comes from each calendar's secret iCal address, read every 15 minutes. In Google Calendar it's under Settings, your calendar, Integrate calendar. With an address set, the agenda shows those calendars and PoliTO deadlines, and agenda updates from bots are ignored.
+
+The first time a mailbox or WhatsApp is read, the dashboard looks back 3 days. Message text stays in `data/dashboard.db` for 14 days. Settings shows when each source was last read, and the banner on Today says when one has been failing for more than 10 minutes.
+
 ## Your data
 
 Everything lives in one SQLite file, `data/dashboard.db`, readable by your user only. These are the only things the server sends off the machine:
 
 - **Webhook calls.** When you tap or press refresh, the server calls the webhook URL each bot registered, with no card content in it.
 - **Todoist.** With `TODOIST_TOKEN` set, it reads your active tasks and completes or reopens the ones you tick.
+- **WhatsApp, mail and calendars.** When you set them up, it reads them through WAHA, IMAP and the iCal addresses you gave it, as described above.
 - **areadidattica.** With `AREADIDATTICA_URL` set, it asks that local service for unread avvisi and deadlines, and tells it which ones you marked read. areadidattica is the one that talks to PoliTO.
 
 The bots read your chats and mail inside Grok Bot, as they already do, and post only the summaries you see.

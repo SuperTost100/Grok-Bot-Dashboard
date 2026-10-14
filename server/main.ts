@@ -8,6 +8,7 @@ import { Todoist } from "./todoist.ts";
 import { Polito, POLITO_BOT, createPolitoSync } from "./polito.ts";
 import { createApp, STALE_CLAIM_MS, type AppDeps } from "./app.ts";
 import { Settings } from "./settings.ts";
+import { createSources } from "./sources/index.ts";
 import { checkWebhookUrl, guardedLookup, missedRun, retryDue, RETRY_WINDOW } from "./webhook.ts";
 import { lastSlot, localStamp } from "./time.ts";
 
@@ -37,6 +38,7 @@ function makePolito() {
   return url && token ? createPolitoSync(new Polito(url, token), store, config.tz, log) : null;
 }
 let polito = makePolito();
+const sources = createSources(settings, store, config.tz, log);
 
 // PoliTO is checked whenever the bots are scheduled to check their sources (every 2 hours when no bot
 // has told its schedule yet), plus on Refresh. The first tick checks once at startup.
@@ -116,7 +118,7 @@ function post(url: string, token: string, body: unknown): Promise<number> {
   });
 }
 
-const deps: AppDeps = { config, store, settings, todoist: makeTodoist(), polito, notify, lastPing: (bot) => lastPing.get(bot), log };
+const deps: AppDeps = { config, store, settings, todoist: makeTodoist(), polito, sources, notify, lastPing: (bot) => lastPing.get(bot), log };
 settings.onChange((keys) => {
   if (keys.some((k) => k.startsWith("todoist"))) {
     deps.todoist = makeTodoist();
@@ -127,6 +129,8 @@ settings.onChange((keys) => {
     politoSlot = null; // check right away with the new address
     log(`PoliTO now ${polito ? "on" : "off"}`);
   }
+  // A source with new settings is read right away instead of at its next turn.
+  if (keys.some((k) => /^(whatsapp|mail|calendar)/.test(k))) void sources.refresh();
 });
 const handle = createApp(deps);
 const server = http.createServer((req, res) => {
@@ -158,6 +162,7 @@ const tick = setInterval(() => {
       notify(b.slug, "refresh");
     }
     if (polito && politoDue(Date.now())) void polito.sync();
+    sources.tick();
   } catch (err) {
     log(`tick failed: ${(err as Error).message}`);
   }
@@ -182,8 +187,12 @@ async function dailyBackup() {
   for (const f of old) fs.rmSync(path.join(dir, f));
 }
 
+// Message text read from WhatsApp and mail is only kept while it can still matter.
+const INBOX_DAYS = 14;
+
 const housekeeping = setInterval(() => {
   store.purge(settings.int("archiveDays"));
+  store.purgeInbox(INBOX_DAYS);
   void dailyBackup();
 }, 3600_000);
 store.purge(settings.int("archiveDays"));
