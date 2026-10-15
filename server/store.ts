@@ -246,6 +246,7 @@ CREATE TABLE IF NOT EXISTS triage (
   grok_at INTEGER,
   queued_at INTEGER,
   attempts INTEGER NOT NULL DEFAULT 0,
+  card_key TEXT,
   cost REAL NOT NULL DEFAULT 0
 );
 CREATE INDEX IF NOT EXISTS triage_grok ON triage (grok, level);
@@ -269,6 +270,7 @@ const MIGRATIONS: [string, string, string][] = [
   ["triage", "queued_at", "INTEGER"],
   ["triage", "attempts", "INTEGER NOT NULL DEFAULT 0"],
   ["wakes", "bot", "TEXT NOT NULL DEFAULT ''"],
+  ["triage", "card_key", "TEXT"],
 ];
 
 // An event overlaps [from, to) when it starts before `to` and is still going at `from`.
@@ -448,6 +450,8 @@ export interface TriageRow {
   queuedAt: number | null;
   /** How often it was handed to Grok. */
   attempts: number;
+  /** The card Grok works on for this decision, when it isn't the chat's Needs-you card (a calendar addition). */
+  cardKey: string | null;
   cost: number;
 }
 
@@ -467,6 +471,7 @@ function toTriage(r: Row): TriageRow {
     grokAt: num(r.grok_at),
     queuedAt: num(r.queued_at),
     attempts: Number(r.attempts ?? 0),
+    cardKey: r.card_key == null ? null : String(r.card_key),
     cost: Number(r.cost ?? 0),
   };
 }
@@ -586,15 +591,15 @@ export class Store {
 
   // Triage decisions and Grok wakes
 
-  addTriage(t: Omit<TriageRow, "id" | "grokAt" | "attempts" | "queuedAt"> & { queuedAt?: number | null }): TriageRow {
+  addTriage(t: Omit<TriageRow, "id" | "grokAt" | "attempts" | "queuedAt" | "cardKey"> & { queuedAt?: number | null; cardKey?: string | null }): TriageRow {
     const res = this.db
       .prepare(
-        `INSERT INTO triage (source, thread, message_ids, decided_at, answers, level, need, route, item_id, grok, queued_at, cost)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+        `INSERT INTO triage (source, thread, message_ids, decided_at, answers, level, need, route, item_id, grok, queued_at, card_key, cost)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
       )
       .run(
         t.source, t.thread, JSON.stringify(t.messageIds), t.decidedAt, JSON.stringify(t.answers), t.level, t.need, t.route,
-        t.itemId, t.grok, t.grok === "queued" ? t.queuedAt ?? this.now() : null, t.cost,
+        t.itemId, t.grok, t.grok === "queued" ? t.queuedAt ?? this.now() : null, t.cardKey ?? null, t.cost,
       );
     return this.getTriage(Number(res.lastInsertRowid))!;
   }
@@ -611,13 +616,16 @@ export class Store {
 
   /** The decision still waiting for Grok about this chat, if any. */
   queuedFor(source: string, thread: string): TriageRow | null {
-    const r = this.db.prepare("SELECT * FROM triage WHERE grok = 'queued' AND source = ? AND thread = ? ORDER BY id DESC LIMIT 1").get(source, thread);
+    const r = this.db.prepare("SELECT * FROM triage WHERE grok = 'queued' AND route != 'calendar' AND source = ? AND thread = ? ORDER BY id DESC LIMIT 1").get(source, thread);
     return r ? toTriage(r as Row) : null;
   }
 
-  /** The decision about this chat that Grok still owes: queued, or handed out and not confirmed. */
+  /**
+   * The decision about this chat that Grok still owes: queued, or handed out and not confirmed.
+   * Calendar additions aren't counted: they stand on their own, whatever the chat says next.
+   */
   outstandingFor(source: string, thread: string): TriageRow | null {
-    const r = this.db.prepare("SELECT * FROM triage WHERE grok IN ('queued', 'sent') AND source = ? AND thread = ? ORDER BY id DESC LIMIT 1").get(source, thread);
+    const r = this.db.prepare("SELECT * FROM triage WHERE grok IN ('queued', 'sent') AND route != 'calendar' AND source = ? AND thread = ? ORDER BY id DESC LIMIT 1").get(source, thread);
     return r ? toTriage(r as Row) : null;
   }
 
@@ -650,7 +658,7 @@ export class Store {
       let requeued = 0;
       for (const t of stale) {
         // A newer decision about the chat is already queued: that one carries the messages.
-        const newer = this.queuedFor(t.source, t.thread);
+        const newer = t.route === "calendar" ? null : this.queuedFor(t.source, t.thread);
         if (t.attempts >= maxAttempts || newer) {
           this.setGrok(t.id, newer ? null : "failed");
         } else {
@@ -667,7 +675,7 @@ export class Store {
    * whatever it still owed for the chat, queued or handed out, is dropped.
    */
   dropFromGrokQueue(source: string, thread: string) {
-    this.db.prepare("UPDATE triage SET grok = NULL WHERE grok IN ('queued', 'sent') AND source = ? AND thread = ?").run(source, thread);
+    this.db.prepare("UPDATE triage SET grok = NULL WHERE grok IN ('queued', 'sent') AND route != 'calendar' AND source = ? AND thread = ?").run(source, thread);
   }
 
   triageSince(since: number): TriageRow[] {

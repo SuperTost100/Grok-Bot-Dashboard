@@ -409,7 +409,7 @@ export function createApp(deps: AppDeps) {
         example: { key: "wa:120363@g.us:poll-7", kind: "choice", app: "whatsapp", source: "WhatsApp · Lab group", title: "Marco needs your vote on the lab swap", urgent: "answer by 14:00", options: [{ label: "Vote Tuesday", instruction: "Vote Tuesday in the Lab group poll" }] },
         list: "GET /api/bot/items?status=open|closed|all", close: "POST /api/bot/items/close {key, reason}",
       },
-      inbox: "GET /api/bot/actions also returns inbox: chats the dashboard's triage handed you, each with key, source, app, chat, urgent, need (reply or decision) and messages (isNew marks the new ones). For each, post one card with that exact key: kind choice with 2 to 4 answers, or kind draft with a reply. If it needs nothing after all, close the key. Never send anything yourself.",
+      inbox: "GET /api/bot/actions also returns inbox: work the dashboard's triage handed you, each with key, task, source, app, chat, urgent, need and messages (isNew marks the new ones). task card: post one card with that exact key, kind choice with 2 to 4 answers or kind draft with a reply; if it needs nothing after all, close the key. task calendar: do what instruction says in the user's main calendar, then close the key with what you did. Never send anything yourself.",
       actions: {
         take: "GET /api/bot/actions claims every waiting action. Do each one once, using its id to avoid doing it twice.",
         report: "POST /api/bot/actions/<id> {ok: true|false, result: 'one line'}. Report every action you took.",

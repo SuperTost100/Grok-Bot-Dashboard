@@ -6,7 +6,7 @@ import { Store, type InboxInput, type InboxMessage } from "../server/store.ts";
 import { createApp } from "../server/app.ts";
 import { Settings } from "../server/settings.ts";
 import { loadConfig } from "../server/config.ts";
-import { createTriage, decide, routeFor, type Decision } from "../server/triage.ts";
+import { calendarFor, createTriage, decide, routeFor, type Decision } from "../server/triage.ts";
 import type { JevResult } from "../server/jev.ts";
 
 const TZ = "Europe/Rome";
@@ -18,9 +18,13 @@ const env = { OWNER_LOGIN: "o@x.com", BOT_TOKEN: "test-token-123", TZ };
 function answers(
   level: number,
   need: string,
-  opts: { when?: Record<string, number>; probs?: Record<string, number>; auto?: number; addressed?: number } = {},
+  opts: { when?: Record<string, number>; probs?: Record<string, number>; auto?: number; addressed?: number; event?: Record<string, number>; dated?: number } = {},
 ): JevResult["answers"] {
+  const event = opts.event ?? { none: 0.95 };
+  const top = Object.entries(event).sort((a, b) => b[1] - a[1])[0][0];
   return {
+    event: { type: "choice", choice: top, confidence: 0.8, probabilities: event },
+    dated: { type: "noul", noul: opts.dated ?? 0.9 },
     when: { type: "score", score: level, confidence: 0.5, probabilities: opts.when ?? { [String(Math.round(level))]: 0.9 } },
     need: { type: "choice", choice: need, confidence: 0.5, probabilities: opts.probs ?? { [need]: 0.9 } },
     addressed: { type: "noul", noul: opts.addressed ?? 0.9 },
@@ -81,12 +85,14 @@ async function setup(opts: { reply?: (state: Record<string, unknown>) => JevResu
   const store = new Store(":memory:", () => clock);
   const settings = new Settings(store, config, env);
   const jevCalls: Record<string, unknown>[] = [];
+  const jevQuestions: string[] = [];
   const pings: { url: string; body: string; headers: Headers }[] = [];
   const fetchImpl = (async (input: URL | RequestInfo, init?: RequestInit) => {
     const url = String(input);
     if (url.includes("openrouter.ai")) {
       const body = JSON.parse(String(init?.body));
       jevCalls.push(body.state);
+      jevQuestions.push(Object.keys(body.questions).sort().join(","));
       const a = opts.reply ? opts.reply(body.state) : answers(2, "info");
       return new Response(JSON.stringify({ model: "typesafe/jev-1.13-x", answers: a, usage: { cost: 0.00002 } }));
     }
@@ -111,7 +117,9 @@ async function setup(opts: { reply?: (state: Record<string, unknown>) => JevResu
   const ui = async (method: string, path: string, body?: unknown) =>
     (await fetch(base + path, { method, headers: { "Tailscale-User-Login": "o@x.com", ...(body ? { "Content-Type": "application/json" } : {}) }, body: body ? JSON.stringify(body) : undefined })).json();
   return {
-    store, settings, triage, jevCalls, pings, notified, msg, bot, ui, base,
+    store, settings, triage, jevCalls, jevQuestions, pings, notified, msg, bot, ui, base,
+    /** Full decisions only, not the calendar-only question asked about your own replies and live chats. */
+    decisions: () => jevQuestions.filter((q) => q.includes("need")).length,
     advance: (ms: number) => { clock += ms; },
     now: () => clock,
     stop: () => { server.closeAllConnections(); server.close(); store.close(); },
@@ -248,7 +256,8 @@ test("when you reply from your phone, the chat's card closes and Grok isn't need
     const card = t.store.getItemByKey("dashboard", "inbox:whatsapp:1@c.us:needs")!;
     assert.deepEqual([card.status, card.resolution], ["closed", "You replied on WhatsApp"]);
     assert.equal(t.store.grokQueue().length, 0);
-    assert.equal(t.jevCalls.length, 1, "your own message costs no decision");
+    assert.equal(t.decisions(), 1, "your own message gets no full decision");
+    assert.equal(t.jevQuestions.at(-1), "addressed,automated,dated,event", "only the calendar questions");
   } finally {
     t.stop();
   }
@@ -675,14 +684,76 @@ test("while you're chatting in a chat yourself, its new messages need no decisio
     await t.triage.tick();
     t.store.addInbox([t.msg("1@c.us", "ahah true", { at: t.now() - 5 * 60_000 })]);
     await t.triage.tick();
-    assert.equal(t.jevCalls.length, 0);
+    assert.equal(t.decisions(), 0);
     assert.equal(t.store.grokQueue().length, 0);
     assert.equal(t.store.triageSince(0).at(-1)!.route, "active");
     t.store.addInbox([t.msg("1@c.us", "are you there? need an answer", { at: t.now() + 30 * 60_000 })]);
     t.advance(33 * 60_000);
     await t.triage.tick();
-    assert.equal(t.jevCalls.length, 1, "once you've been quiet a while, it's decided again");
+    assert.equal(t.decisions(), 1, "once you've been quiet a while, it's decided again");
   } finally {
     t.stop();
   }
+});
+
+// ---------- Calendar ----------
+
+test("an event that's already set is added without asking: Grok gets it, the card says so", async () => {
+  const t = await setup({ reply: () => answers(2, "info", { event: { fixed: 0.8, none: 0.2 } }) });
+  try {
+    t.store.addInbox([t.msg("1@c.us", "L'esame è confermato per lunedì 20 alle 9:00", { extId: "e1" })]);
+    await t.triage.tick();
+    const card = t.store.getItemByKey("dashboard", "inbox:whatsapp:1@c.us:event:e1")!;
+    assert.deepEqual([card.kind, card.context], ["reminder", "Grok adds this to your calendar at its next run."]);
+    const [item] = (await t.bot("/api/bot/actions")).inbox;
+    assert.deepEqual([item.task, item.key], ["calendar", "inbox:whatsapp:1@c.us:event:e1"]);
+    assert.match(item.instruction, /deadline with a time becomes an event at that time/);
+    // Grok adds it and closes the card: done.
+    await fetch(t.base + "/api/bot/items/close", {
+      method: "POST",
+      headers: { Authorization: "Bearer test-token-123", "X-Bot": "dashboard", "Content-Type": "application/json" },
+      body: JSON.stringify({ key: item.key, reason: "Added to calendar: Esame, lun 20 ott 9:00" }),
+    });
+    assert.equal(t.store.triageSince(0).find((r) => r.route === "calendar")!.grok, "done");
+  } finally {
+    t.stop();
+  }
+});
+
+test("an open invitation gets an Add to calendar button and no Grok run", async () => {
+  const t = await setup({ reply: () => answers(2, "info", { event: { proposal: 0.7, none: 0.3 } }) });
+  try {
+    t.store.addInbox([t.msg("1@c.us", "Venerdì sera pizza da me, ci sei?", { extId: "p1" })]);
+    await t.triage.tick();
+    const card = t.store.getItemByKey("dashboard", "inbox:whatsapp:1@c.us:event:p1")!;
+    assert.equal(card.kind, "choice");
+    assert.deepEqual(card.options.map((o) => o.label), ["Add to calendar"]);
+    assert.equal(t.store.grokQueue().length, 0);
+  } finally {
+    t.stop();
+  }
+});
+
+test("plans you agree to in your own reply get calendarized, and the card survives your reply", async () => {
+  const t = await setup({ reply: (state) => (Array.isArray(state.new_messages) && (state.new_messages as { from: string }[]).some((m) => m.from === "the user") ? answers(2, "info", { event: { fixed: 0.75, none: 0.25 } }) : answers(2, "nothing")) });
+  try {
+    t.store.addInbox([t.msg("1@c.us", "Ok, ci vediamo venerdì alle 20 al Caffè", { fromMe: true, sender: "You", extId: "me1" })]);
+    await t.triage.tick();
+    const card = t.store.getItemByKey("dashboard", "inbox:whatsapp:1@c.us:event:me1")!;
+    assert.equal(card.status, "open");
+    assert.equal(t.store.grokQueue().length, 1);
+  } finally {
+    t.stop();
+  }
+});
+
+test("ads and other people's plans never touch your calendar", () => {
+  const ad = answers(1, "info", { event: { deadline: 0.5, proposal: 0.4, none: 0.1 }, auto: 0.95 });
+  assert.equal(calendarFor(ad, "email", true), null, "a sale that ends Sunday");
+  const booking = answers(2, "info", { event: { fixed: 0.9 }, auto: 0.95 });
+  assert.equal(calendarFor(booking, "email", true), "auto", "a booking confirmation from a machine still counts");
+  const groupPlan = answers(1, "nothing", { event: { proposal: 0.8 }, addressed: 0.1 });
+  assert.equal(calendarFor(groupPlan, "group", false), null);
+  assert.equal(calendarFor(answers(1, "info", { event: { proposal: 0.8 }, addressed: 0.8 }), "group", false), "ask");
+  assert.equal(calendarFor(answers(1, "info", { event: { fixed: 0.9 }, dated: 0.2 }), "private", false), null, "\"I'm on my way\" has no day to put in a calendar");
 });

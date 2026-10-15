@@ -157,6 +157,8 @@ Each burst of new messages in a chat or mail thread is one decision. Jev answers
 | Group chatter, or information that can wait                       | A line in Catch up                                   | No              |
 | Noise or automatic mail                                           | Listed under "Filtered out today" in Catch up        | No              |
 
+**Calendar.** Every burst, your own replies included, also gets two calendar questions: does it set a date for something you take part in, and does it name a specific day? Something already set (a confirmed appointment, an exam, a lesson that moved, a booking, a deadline you have to meet, a cancellation) goes to the Grok Bot, which puts it in your main Google Calendar at its next run; a card says so meanwhile. A deadline with a time becomes an event at that time. An open invitation gets a card with an "Add to calendar" button, and Grok runs only if you tap it. Dates in ads and newsletters, other people's plans in groups, and anything without a day ("let's talk this weekend", "I'm on my way") are left alone. On 223 real bursts this added 5 events and asked about none.
+
 In a group, a question needs you only when it names you or asks you to decide; mentions of you are rewritten as @your-name so Jev can tell. While you're chatting in a chat yourself (you wrote there in the last 15 minutes), its new messages need no decision. When you reply from your phone, the chat's card closes.
 
 These rules were tuned on 165 real decisions against the cards the Grok bot made for the same messages: Jev rates almost any live chat message as urgent, so urgency only counts when it's clear-cut.
