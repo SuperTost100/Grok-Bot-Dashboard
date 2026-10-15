@@ -110,6 +110,26 @@ export class Waha {
     return (await this.call("GET", `/api/${SESSION}/auth/qr?format=image`, undefined, true)) as Buffer;
   }
 
+  /** Your address book: each contact's saved name, by phone number and by LID. */
+  async contacts(): Promise<Map<string, string>> {
+    const names = new Map<string, string>();
+    for (let offset = 0; offset < 20_000; offset += 1000) {
+      const page = (await this.call("GET", `/api/contacts/all?session=${SESSION}&limit=1000&offset=${offset}`)) as {
+        id?: string; name?: string | null; pushname?: string | null; lid?: string | null; phoneNumber?: string | null;
+      }[];
+      for (const c of page) {
+        const name = (c.name || c.pushname || "").trim();
+        if (!name) continue;
+        for (const id of [c.id, c.lid, c.phoneNumber]) {
+          const digits = (id ?? "").replace(/@.*/, "");
+          if (/^\d+$/.test(digits)) names.set(digits, name);
+        }
+      }
+      if (page.length < 1000) break;
+    }
+    return names;
+  }
+
   /** One page of chats, the most recently active first. */
   async chats(offset: number): Promise<ChatSummary[]> {
     return (await this.call("GET", `/api/${SESSION}/chats/overview?limit=${PAGE}&offset=${offset}`)) as ChatSummary[];
@@ -133,12 +153,28 @@ export function mentionsOfYou(text: string, you: { me: string; lid?: string; nam
   return text.replace(new RegExp(`@(${ids.join("|")})\\b`, "g"), `@${you.name || "you"}`);
 }
 
-export function toInbox(chat: ChatSummary, m: WaMessage, source = "whatsapp:1", you?: { me: string; lid?: string; name?: string }): InboxInput {
+/** Mentions of other people (@<number or LID>) become the names in your address book. */
+export function mentionsOfOthers(text: string, names: Map<string, string>): string {
+  return text.replace(/@(\d{6,})\b/g, (all, id: string) => (names.has(id) ? `@${names.get(id)}` : all));
+}
+
+export function toInbox(
+  chat: ChatSummary,
+  m: WaMessage,
+  source = "whatsapp:1",
+  you?: { me: string; lid?: string; name?: string },
+  names: Map<string, string> = new Map(),
+): InboxInput {
   const group = isGroup(chat.id);
-  const name = chat.name || chat.id.replace(/@.*/, "");
-  const who = m.fromMe ? "You" : m._data?.verifiedBizName || m._data?.pushName || (group ? (m.participant ?? "").replace(/@.*/, "") : name) || name;
+  const id = (x: string | null | undefined) => (x ?? "").replace(/@.*/, "");
+  const name = chat.name || names.get(id(chat.id)) || id(chat.id);
+  // The name you saved for someone comes first, then the name they set for themselves, then their number.
+  const who = m.fromMe
+    ? "You"
+    : m._data?.verifiedBizName || (group ? names.get(id(m.participant)) : undefined) || m._data?.pushName || (group ? id(m.participant) : name) || name;
   let text = (m.body ?? "").trim();
   if (you) text = mentionsOfYou(text, you);
+  text = mentionsOfOthers(text, names);
   if (!text && m.hasMedia) text = "[media]";
   if (text.length > MAX_TEXT) text = text.slice(0, MAX_TEXT - 1).trimEnd() + "…";
   return {
@@ -156,6 +192,20 @@ export function toInbox(chat: ChatSummary, m: WaMessage, source = "whatsapp:1", 
     link: "",
     at: m.timestamp * 1000,
   };
+}
+
+// The address book changes rarely: read it once an hour per WAHA. If it can't be read, names fall back to numbers.
+const books = new Map<string, { at: number; names: Map<string, string> }>();
+async function addressBook(waha: Waha, now: number): Promise<Map<string, string>> {
+  const cached = books.get(waha.base);
+  if (cached && now - cached.at < 3_600_000) return cached.names;
+  try {
+    const names = await waha.contacts();
+    books.set(waha.base, { at: now, names });
+    return names;
+  } catch {
+    return cached?.names ?? new Map();
+  }
 }
 
 /** A chat with more new messages than one run reads: where to go on. */
@@ -195,12 +245,13 @@ export async function readWhatsApp(
   for (const [id, r] of Object.entries(resume)) if (!active.has(id)) active.set(id, { id, name: r.name });
   const next: Resume = {};
   const source = `whatsapp:${slot}`;
+  const names = await addressBook(waha, store.now());
   for (const chat of active.values()) {
     const from = resume[chat.id]?.since ?? since;
     let offset = resume[chat.id]?.offset ?? 0;
     for (let p = 0; ; p++, offset += PAGE) {
       const page = await waha.messagesSince(chat.id, from, offset);
-      for (const m of page) if (m.id && m.timestamp) found.push(toInbox(chat, m, source, session));
+      for (const m of page) if (m.id && m.timestamp) found.push(toInbox(chat, m, source, session, names));
       if (page.length < PAGE) break;
       if (p + 1 >= MAX_PAGES) {
         next[chat.id] = { name: chat.name ?? "", since: from, offset: offset + PAGE };

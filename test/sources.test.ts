@@ -10,7 +10,7 @@ import { Settings } from "../server/settings.ts";
 import { loadConfig } from "../server/config.ts";
 import { cleanText, parseHost, readFolder, toInbox as mailToInbox } from "../server/sources/mail.ts";
 import type { ImapFlow } from "imapflow";
-import { Waha, readWhatsApp, mentionsOfYou } from "../server/sources/whatsapp.ts";
+import { Waha, readWhatsApp, mentionsOfYou, mentionsOfOthers, toInbox as waToInbox } from "../server/sources/whatsapp.ts";
 import { eventsFromIcs, readCalendars, calendarUrls, CALENDAR_OWNER } from "../server/sources/calendar.ts";
 import { createSources, plainError } from "../server/sources/index.ts";
 
@@ -466,4 +466,40 @@ test("whatsapp: mentions of you become your name, so triage can tell a question 
   assert.equal(mentionsOfYou("@188411675705560 chiamiamo noi ora?", you), "@Tost chiamiamo noi ora?");
   assert.equal(mentionsOfYou("ciao @393331112222 e @555", you), "ciao @Tost e @555");
   assert.equal(mentionsOfYou("@1884116757055601 not you", you), "@1884116757055601 not you");
+});
+
+test("whatsapp: group senders and mentions use the names in your address book", async () => {
+  const names = new Map([["393401234567", "Marco Rossi"], ["188411675705999", "Anna"]]);
+  const chat = { id: "120363@g.us", name: "Lab group" };
+  const row = waToInbox(chat, { id: "x", timestamp: 1, fromMe: false, participant: "393401234567@c.us", body: "@188411675705999 ci sei?" }, "whatsapp:1", undefined, names);
+  assert.deepEqual([row.sender, row.text], ["Marco Rossi", "@Anna ci sei?"]);
+  const byLid = waToInbox(chat, { id: "y", timestamp: 1, fromMe: false, participant: "188411675705999@lid", body: "si", _data: { pushName: "anna_b" } }, "whatsapp:1", undefined, names);
+  assert.equal(byLid.sender, "Anna", "your saved name beats the name they set");
+  const unknown = waToInbox(chat, { id: "z", timestamp: 1, fromMe: false, participant: "555000111@lid", body: "hey", _data: { pushName: "Gio" } }, "whatsapp:1", undefined, names);
+  assert.equal(unknown.sender, "Gio");
+  assert.equal(mentionsOfOthers("@555000111 e @393401234567", names), "@555000111 e @Marco Rossi");
+});
+
+test("whatsapp: the address book is read through WAHA, and a failure falls back to numbers", async () => {
+  let contactsCalls = 0;
+  let failContacts = false;
+  const now = Math.floor(Date.parse("2026-10-12T11:00:00Z") / 1000);
+  const fetchImpl = (async (input: URL | RequestInfo) => {
+    const u = new URL(String(input));
+    if (u.pathname === "/api/sessions/default") return json({ status: "WORKING", me: { id: "1@c.us" } });
+    if (u.pathname === "/api/contacts/all") {
+      contactsCalls++;
+      return failContacts ? json({}, 500) : json([{ id: "39333@c.us", name: "Zia Carla", lid: "77777777@lid" }]);
+    }
+    if (u.pathname === "/api/default/chats/overview") return json([{ id: "g@g.us", name: "Famiglia", lastMessage: { timestamp: now } }]);
+    if (u.pathname.includes("/messages")) return json(Number(u.searchParams.get("offset")) ? [] : [{ id: `m${contactsCalls}`, timestamp: now, fromMe: false, participant: "77777777@lid", body: "pranzo?" }]);
+    return json({}, 500);
+  }) as typeof fetch;
+  const store = new Store(":memory:", () => now * 1000);
+  await readWhatsApp(new Waha("http://waha-names:3000", "k", fetchImpl), store);
+  assert.equal(store.untriaged()[0].sender, "Zia Carla");
+  failContacts = true;
+  const fresh = new Store(":memory:", () => now * 1000 + 7_200_000);
+  await readWhatsApp(new Waha("http://waha-names-2:3000", "k", fetchImpl), fresh);
+  assert.equal(fresh.untriaged()[0].sender, "77777777", "no address book: the number");
 });
