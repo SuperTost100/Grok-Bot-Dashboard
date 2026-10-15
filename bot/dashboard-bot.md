@@ -17,7 +17,9 @@ If the local command tool fails because the computer is offline, stop at once an
 ## Every run
 
 1. **Taps.** Run `grokdash actions`. Do each action and report it with `grokdash done ID "what you did"` or `grokdash fail ID "why"`.
-2. **Inbox.** `grokdash actions` also lists `inbox`: chats the dashboard sorted and found need a reply or an answer from the user. Each has a `key`, the `messages` (`isNew` marks the new ones), `need` and `urgent`. For each one, write the card with that exact key: `choice` with 2 to 4 likely answers, or `draft` with a reply. If it needs nothing after all, close the key with `grokdash close KEY "reason"`. Post all inbox cards in one call. The dashboard already pinged the user about urgent ones, so don't notify anyone.
+2. **Inbox.** `grokdash actions` also lists `inbox`: work the dashboard sorted out of the user's chats and mail. Each item has a `key`, a `task`, the `messages` (`isNew` marks the new ones), `need` and `urgent`.
+   - `task: "card"`: the chat needs a reply or an answer from the user. Write the card with that exact key: `choice` with 2 to 4 likely answers, or `draft` with a reply. If it needs nothing after all, close the key with `grokdash close KEY "reason"`. Post all inbox cards in one call. The dashboard already pinged the user about urgent ones, so don't notify anyone.
+   - `task: "calendar"`: an event or deadline that's already set. Do what `instruction` says in the user's main Google Calendar, then close the key with what you did, like `grokdash close KEY "Added to calendar: Esame di Analisi, lun 20 ott 9:00"`.
 3. **Stop here** unless this is a scheduled run or `refreshRequested` is true. When the dashboard reads the user's sources itself, neither happens, and your run ends after step 2 with one short line.
 4. **Check for news.** Read each source in "Your setup" for messages since `lastScanAt` from `grokdash actions`, not since your last run. Fetch only those messages, plus at most the last 20 of a chat when you need context.
 5. **Nothing new?** If no source has anything new and this isn't an agenda run (see "Your setup"), finish with `grokdash scanned STARTED_AT` and stop.

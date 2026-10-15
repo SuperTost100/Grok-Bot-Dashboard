@@ -55,6 +55,34 @@ export const QUESTIONS: Record<string, Question> = {
       false: "A person writing to the user or to a group the user is in.",
     },
   },
+  event: {
+    type: "choice",
+    instructions: "Do the new messages, including the user's own, set a date or time for something the user takes part in?",
+    criteria: {
+      none: "No date or time for something the user takes part in. Dates in ads, newsletters and other people's plans count as none.",
+      fixed: "Something already set that the user is part of: a confirmed appointment or meeting, an exam, a lesson or event someone in charge set or moved, a booking or ticket, a plan the user agreed to.",
+      deadline: "A deadline the user personally has to meet: hand in, pay, sign up or reply by a date or time.",
+      cancelled: "An event the user is part of is called off.",
+      proposal: "An invitation or a plan still open that the user could join: a party, an outing, 'shall we meet Friday?'.",
+    },
+  },
+};
+
+QUESTIONS.dated = {
+  type: "noul",
+  instructions: "Do the new messages give a specific future day or date for that event or deadline, like 'Friday', 'the 20th' or 'tomorrow at 9'?",
+  criteria: {
+    true: "A day or date in the future is named or clear from the messages.",
+    false: "No day is given, it's vague ('sometime', 'this weekend we'll talk'), or it's happening right now.",
+  },
+};
+
+/** Asked about bursts that need no other decision (your own replies, live conversations): only about events. */
+export const EVENT_QUESTIONS: Record<string, Question> = {
+  event: QUESTIONS.event,
+  dated: QUESTIONS.dated,
+  addressed: QUESTIONS.addressed,
+  automated: QUESTIONS.automated,
 };
 
 export type Need = "reply" | "decision" | "task" | "info" | "nothing";
@@ -118,6 +146,26 @@ export function routeFor(d: Decision): Route {
   if (d.need === "info" && d.level >= TODAY && !group && !d.automated) return "card";
   if (d.automated) return "skip";
   return "catchup";
+}
+
+/**
+ * Calendar: something already set (an appointment, an exam, a booking, a cancellation, a deadline) is added
+ * to the main calendar without asking; an open invitation gets a card with an "Add to calendar" button.
+ * Machines only get the first for bookings and changes they announce, never for deadlines (a sale that
+ * "ends Sunday") or invitations (a webinar ad).
+ */
+export function calendarFor(answers: JevResult["answers"], chat: Decision["chat"], automatedHint: boolean): "auto" | "ask" | null {
+  const ev = answers.event as ChoiceAnswer | undefined;
+  if (!ev) return null;
+  const automated = ((answers.automated as NoulAnswer | undefined)?.noul ?? 0) >= 0.7 || automatedHint;
+  const addressed = (answers.addressed as NoulAnswer | undefined)?.noul ?? (chat === "group" ? 0 : 1);
+  // Without a day there's nothing to put in a calendar: "I'm on my way", "let's talk this weekend".
+  const dated = (answers.dated as NoulAnswer | undefined)?.noul ?? 0;
+  if (dated < 0.4) return null;
+  const set = prob(ev, "fixed") + prob(ev, "cancelled") + (automated ? 0 : prob(ev, "deadline"));
+  if (set >= 0.7) return "auto";
+  if (!automated && prob(ev, "proposal") >= 0.5 && (chat !== "group" || addressed >= 0.5)) return "ask";
+  return null;
 }
 
 // ---------- What Jev reads ----------
@@ -193,6 +241,33 @@ export function needsCard(bot: string, msgs: InboxMessage[], info: SourceInfo, d
     // New messages in a chat whose card you closed are news, so the card comes back.
     reopen: true,
   };
+}
+
+export const eventKey = (m: InboxMessage) => `inbox:${m.source}:${m.thread}:event:${m.extId}`;
+
+const ADD_TO_CALENDAR =
+  "Add the event in these messages to the user's main Google Calendar. A deadline with a time becomes an event at that time; " +
+  "without a time, an all-day event. If the event is already there, update it to match; if it was called off, remove it. " +
+  "If there's no clear event with a day after all, add nothing and say so.";
+
+/** A card for a calendar event: a button to add it, or, for something already set, a note that Grok is adding it. */
+export function eventCard(bot: string, msgs: InboxMessage[], info: SourceInfo, mode: "auto" | "ask", tz: string): ItemInput {
+  const last = msgs.at(-1)!;
+  const time = (m: InboxMessage) => localStamp(new Date(m.at), tz).slice(11, 16);
+  const body = msgs.slice(-6).map((m) => `${m.fromMe ? "You" : m.sender}, ${time(m)}: ${m.text}`).join("\n");
+  const base = {
+    bot,
+    key: eventKey(last),
+    section: "needs" as const,
+    title: cut(`Calendar: ${firstLine(last.subject || last.text) || "event"}`, 140),
+    body: cut(body, 2000),
+    source: cut(info.label, 120),
+    app: info.app,
+    link: last.link,
+  };
+  return mode === "ask"
+    ? { ...base, kind: "choice", options: [{ label: "Add to calendar", instruction: ADD_TO_CALENDAR }] }
+    : { ...base, kind: "reminder", context: "Grok adds this to your calendar at its next run." };
 }
 
 /** A catch-up line for a chat that needs no answer: how many messages, and the latest ones. */
@@ -271,9 +346,13 @@ export function forGrok(store: Store, t: TriageRow, info: SourceInfo, tz: string
   const msgs = store.threadMessages(t.source, t.thread, 25);
   const newIds = new Set(t.messageIds);
   const last = msgs.at(-1);
+  const calendar = t.route === "calendar";
   return {
     id: t.id,
-    key: cardKey(t.source, t.thread, "needs"),
+    key: t.cardKey ?? cardKey(t.source, t.thread, "needs"),
+    // "card": write the card (draft or answers). "calendar": put the event in the main calendar, then close the key.
+    task: calendar ? "calendar" : "card",
+    ...(calendar ? { instruction: ADD_TO_CALENDAR } : {}),
     source: info.label,
     app: info.app,
     chat: last?.threadName ?? "",
@@ -321,7 +400,7 @@ export function createTriage(deps: TriageDeps): Triage {
     store.dropFromGrokQueue(last.source, last.thread);
     const how = last.source.startsWith("whatsapp") ? "You replied on WhatsApp" : "You replied by mail";
     for (const card of store.triageCards(bot(), last.source, last.thread)) {
-      if (card.section === "needs" && !store.pendingActionFor(card.id)) store.closeItem(card.id, "bot", how);
+      if (card.section === "needs" && !card.key?.includes(":event:") && !store.pendingActionFor(card.id)) store.closeItem(card.id, "bot", how);
     }
   }
 
@@ -354,20 +433,55 @@ export function createTriage(deps: TriageDeps): Triage {
     );
   }
 
+  /**
+   * The calendar part of a decision: an automatic addition queued for Grok, or a card with a button.
+   * Runs for every burst, your own replies and live conversations too: that's where plans get agreed.
+   */
+  function calendarize(msgs: InboxMessage[], answers: JevResult["answers"], level: number, cost: number) {
+    const last = msgs.at(-1)!;
+    const chat = last.source.startsWith("mail:") ? "email" : last.isGroup ? "group" : "private";
+    const mode = calendarFor(answers, chat, msgs.some((m) => !m.fromMe && m.automated));
+    if (!mode) return;
+    const ids = msgs.map((m) => m.id);
+    if (!active()) {
+      store.addTriage({ source: last.source, thread: last.thread, messageIds: ids, decidedAt: store.now(), answers: { event: answers.event, shadow: true }, level, need: mode, route: "calendar", itemId: null, grok: null, cost });
+      return;
+    }
+    const r = store.upsertItem(eventCard(bot(), msgs, deps.sourceInfo(last), mode, tz), { asServer: true });
+    if (r.ignored || !r.created) return;
+    store.addTriage({
+      source: last.source, thread: last.thread, messageIds: ids, decidedAt: store.now(), answers: { event: answers.event },
+      level: Math.max(level, 0), need: mode, route: "calendar", itemId: r.item.id, grok: mode === "auto" ? "queued" : null,
+      cardKey: r.item.key, cost,
+    });
+  }
+
+  /** Bursts that get no other decision still get the calendar question. */
+  async function eventsOnly(fresh: InboxMessage[], route: "replied" | "active") {
+    const last = fresh.at(-1)!;
+    const ids = fresh.map((m) => m.id);
+    const context = store.threadMessages(last.source, last.thread, 40).filter((m) => m.at < fresh[0].at).slice(-8);
+    const state = stateFor(fresh, context, deps.sourceInfo(last), settings.str("triageAbout"), store.now(), tz);
+    const result = await askJev(settings.str("openrouterKey"), settings.str("jevModel") || "typesafe/jev-1.14", state, EVENT_QUESTIONS, fetchImpl);
+    store.tx(() => {
+      if (route === "replied" && active()) replied(fresh);
+      store.addTriage({ source: last.source, thread: last.thread, messageIds: ids, decidedAt: store.now(), answers: {}, level: -1, need: route, route, itemId: null, grok: null, cost: result.cost });
+      calendarize(fresh, result.answers, -1, 0);
+      store.markTriaged(ids);
+    });
+  }
+
   async function handle(fresh: InboxMessage[]): Promise<number> {
     const last = fresh.at(-1)!;
     const ids = fresh.map((m) => m.id);
     if (last.fromMe) {
-      if (active()) replied(fresh);
-      store.addTriage({ source: last.source, thread: last.thread, messageIds: ids, decidedAt: store.now(), answers: {}, level: -1, need: "replied", route: "replied", itemId: null, grok: null, cost: 0 });
-      store.markTriaged(ids);
+      await eventsOnly(fresh, "replied");
       return 0;
     }
-    // You wrote here moments before: you're in the conversation and see it anyway. No decision, no cost.
+    // You wrote here moments before: you're in the conversation and see it anyway. Only the calendar is asked.
     const mine = store.threadMessages(last.source, last.thread, 60).filter((m) => m.fromMe && m.at <= fresh[0].at).at(-1);
     if (mine && fresh[0].at - mine.at <= ACTIVE_MS) {
-      store.addTriage({ source: last.source, thread: last.thread, messageIds: ids, decidedAt: store.now(), answers: {}, level: -1, need: "active", route: "active", itemId: null, grok: null, cost: 0 });
-      store.markTriaged(ids);
+      await eventsOnly(fresh, "active");
       return 0;
     }
     // Messages still waiting for Grok in this chat are judged again together with the new ones,
@@ -391,6 +505,7 @@ export function createTriage(deps: TriageDeps): Triage {
         answers: { ...result.answers, model: result.model, doubtful: d.doubtful, automated: d.automated, shadow: true },
         level: d.level, need: d.need, route, itemId: null, grok: null, cost: result.cost,
       });
+      calendarize(fresh, result.answers, d.level, 0);
       store.markTriaged(ids);
       return 0;
     }
@@ -425,6 +540,7 @@ export function createTriage(deps: TriageDeps): Triage {
         level: d.level, need: d.need, route, itemId, grok: forGrokNow ? "queued" : null,
         queuedAt: forGrokNow ? pending?.queuedAt ?? store.now() : null, cost: result.cost,
       });
+      calendarize(fresh, result.answers, d.level, 0);
       store.markTriaged(ids);
     });
     if (route === "skip") updateSkipped();
@@ -530,7 +646,7 @@ export function createTriage(deps: TriageDeps): Triage {
     ack(key) {
       // Handed-out chats, and ones queued again after their lease ran out, are done once Grok writes the card.
       const handedOut = [...store.sentToGrok(), ...store.grokQueue().filter((t) => t.attempts > 0)];
-      for (const t of handedOut) if (cardKey(t.source, t.thread, "needs") === key) store.setGrok(t.id, "done");
+      for (const t of handedOut) if ((t.cardKey ?? cardKey(t.source, t.thread, "needs")) === key) store.setGrok(t.id, "done");
     },
     waiting: () => store.grokQueue().length,
     runsToday() {
@@ -544,10 +660,13 @@ export function createTriage(deps: TriageDeps): Triage {
           { group: "Phone pings", on: false, ok: true, text: "Off" },
         ];
       }
-      const today = store.triageSince(dayStart()).filter((t) => t.route !== "replied" && t.route !== "active");
-      const cents = today.reduce((s, t) => s + t.cost, 0) * 100;
+      const all = store.triageSince(dayStart());
+      const cal = all.filter((t) => t.route === "calendar");
+      const today = all.filter((t) => t.route !== "replied" && t.route !== "active" && t.route !== "calendar");
+      const cents = all.reduce((s, t) => s + t.cost, 0) * 100;
       const waiting = store.grokQueue().length;
-      const sorted = `${today.length} chat${today.length === 1 ? "" : "s"} sorted today for ${cents < 0.1 && cents > 0 ? "under 0.1" : cents.toFixed(1)}¢`;
+      const events = cal.length ? `; calendar: ${cal.filter((t) => t.need === "auto").length} to add, ${cal.filter((t) => t.need === "ask").length} offered` : "";
+      const sorted = `${today.length} chat${today.length === 1 ? "" : "s"} sorted today for ${cents < 0.1 && cents > 0 ? "under 0.1" : cents.toFixed(1)}¢${events}`;
       if (!active()) {
         const count = (r: string) => today.filter((t) => t.route === r).length;
         const would = `Would have: ${count("wake")} Grok wakes, ${count("ride")} queued for Grok, ${count("card")} cards, ${count("catchup")} catch-up lines, ${count("skip")} filtered`;
