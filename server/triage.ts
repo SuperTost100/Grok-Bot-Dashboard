@@ -19,24 +19,32 @@ export const TODAY = 3;
 export const QUESTIONS: Record<string, Question> = {
   when: {
     type: "score",
-    instructions: "How soon does the user need to see the new messages?",
+    instructions: "If the user only looks at the new messages tonight, what would that cost them?",
     criteria: [
-      "Never: spam, ads, or an automatic notice of no consequence to the user.",
-      "Whenever: nice to know, no rush. A glance once a week is enough.",
-      "This week: it matters in the next few days.",
-      "Today: the user should see it today.",
-      "Now: it needs the user within about two hours, like someone waiting on them right now, a meeting soon, or a deadline today.",
+      "Nothing at all: spam, ads, or an automatic notice of no consequence.",
+      "Nothing: nice to know some day.",
+      "Little: it matters this week.",
+      "Something: it matters today, so it's worth seeing before tonight.",
+      "A real problem: within two hours a deadline passes, a meeting starts, or someone stays stuck waiting for the user personally. Casual chatting is never this.",
     ],
   },
   need: {
     type: "choice",
-    instructions: "What do the new messages need from the user?",
+    instructions: "What do the new messages need from the user personally?",
     criteria: {
-      reply: "Someone wrote to the user personally and expects an answer from them.",
-      decision: "The user has to choose or approve something: a poll, a date, a yes or no, a payment.",
-      task: "The user has to do something themselves that isn't a reply: bring, pay, sign up, go somewhere.",
-      info: "Useful information for the user that needs no action.",
-      nothing: "Chatter, noise, or something that's already handled.",
+      reply: "Someone is waiting for an answer from the user: a question to them in a private chat, or in a group a question that names them or asks them directly. Banter that can go on without the user is not this.",
+      decision: "The user personally has to choose or approve something: a poll they're asked to vote in, a date, a yes or no, a payment.",
+      task: "The user has to do something themselves that isn't a reply: bring, pay, sign up, go somewhere, enter a code.",
+      info: "Information that's useful to the user and needs no action.",
+      nothing: "Chatter, jokes, reactions, thanks, or something already handled. Most group chat messages are this.",
+    },
+  },
+  addressed: {
+    type: "noul",
+    instructions: "Is one of the new messages addressed to the user personally?",
+    criteria: {
+      true: "It names the user, asks or answers them directly, or it's a private chat where the other person talks to the user.",
+      false: "It's addressed to a whole group, to someone else, or to nobody in particular.",
     },
   },
   automated: {
@@ -53,42 +61,62 @@ export type Need = "reply" | "decision" | "task" | "info" | "nothing";
 export type Route = "wake" | "ride" | "card" | "catchup" | "skip";
 
 export interface Decision {
+  /** How soon: 4 now, 3 today, 2 or less can wait. */
   level: number;
   need: Need;
   /** Needs Grok: a reply to write or an answer to give on the user's behalf. */
   actionable: boolean;
+  /** A reply is possible but Jev isn't sure enough to spend a Grok run: you get a plain card. */
+  doubtful: boolean;
   automated: boolean;
-  unsure: boolean;
+  /** Where the messages are: a private chat, a group chat or an email thread. */
+  chat: "private" | "group" | "email";
 }
 
+const prob = (a: { probabilities?: Record<string, number> } | undefined, k: string) => a?.probabilities?.[k] ?? 0;
+
 /**
- * Jev's answers as one decision. When Jev is unsure, the message counts as more urgent and,
- * if a reply is at all likely, as needing one: a doubt costs a card, not a missed message.
+ * Jev's answers as one decision, from its probabilities rather than its single best guess.
+ * Grok only gets a chat when Jev is at least `replyPct` sure it needs the user's reply or decision
+ * (in a group, also that it's addressed to the user). Between 35% and that, a doubt costs a card.
+ * Calibrated on 165 real decisions: Jev rates almost any live chat message "now" or "today",
+ * so how soon only counts when it's clear-cut.
  */
-export function decide(answers: JevResult["answers"], unsurePct: number, automatedHint: boolean): Decision {
+export function decide(answers: JevResult["answers"], replyPct: number, automatedHint: boolean, chat: Decision["chat"] = "private"): Decision {
+  const group = chat === "group";
   const when = answers.when as ScoreAnswer;
   const need = answers.need as ChoiceAnswer;
   const auto = answers.automated as NoulAnswer;
-  const unsureAt = unsurePct / 100;
-  const whenUnsure = (when.confidence ?? 1) < unsureAt;
-  const needUnsure = (need.confidence ?? 1) < unsureAt;
-  const score = Math.max(0, Math.min(NOW, when.score));
-  const level = whenUnsure ? Math.ceil(score) : Math.round(score);
-  const p = need.probabilities ?? {};
-  const replyLikely = (p.reply ?? 0) + (p.decision ?? 0) >= 0.35;
-  const actionable = need.choice === "reply" || need.choice === "decision" || (needUnsure && replyLikely);
-  let picked = need.choice as Need;
-  if (actionable && picked !== "reply" && picked !== "decision") picked = (p.decision ?? 0) > (p.reply ?? 0) ? "decision" : "reply";
+  const addressed = (answers.addressed as NoulAnswer | undefined)?.noul ?? (group ? 0 : 1);
+  const pNow = prob(when, "4");
+  const pToday = pNow + prob(when, "3");
+  const level = pNow >= 0.6 ? 4 : pToday >= 0.6 ? 3 : Math.min(2, Math.round(Math.max(0, when.score)));
   const automated = auto.noul >= 0.7 || (automatedHint && auto.noul >= 0.4);
-  return { level, need: picked, actionable, automated, unsure: whenUnsure || needUnsure };
+  const pReply = prob(need, "reply");
+  const pDecision = prob(need, "decision");
+  const pAct = pReply + pDecision;
+  // In a group, a question only needs the user when it's put to them, or when they're asked to decide.
+  const forUser = !group || addressed >= 0.5 || pDecision >= replyPct / 100;
+  const actionable = !automated && forUser && pAct >= replyPct / 100;
+  const doubtful = !actionable && !automated && forUser && pAct >= 0.35;
+  let picked = need.choice as Need;
+  if (actionable || doubtful) picked = pDecision > pReply ? "decision" : "reply";
+  return { level, need: picked, actionable, doubtful, automated, chat };
 }
 
 /** Where a decision sends the messages. The table in the README matches this. */
 export function routeFor(d: Decision): Route {
-  if (d.actionable && !(d.automated && d.level <= 1)) return d.level >= NOW ? "wake" : "ride";
-  if (d.level >= TODAY) return "card";
-  if (d.need === "task" && d.level >= 2) return "card";
-  if (d.need === "nothing" || d.level === 0 || d.automated) return "skip";
+  if (d.actionable) return d.level >= NOW ? "wake" : "ride";
+  if (d.doubtful) return "card";
+  if (d.level === 0) return "skip";
+  const group = d.chat === "group";
+  if (d.need === "task" && d.level >= 2) return group && d.level < TODAY ? "catchup" : "card";
+  // Time-critical alerts (a security alert, a login code) get a card even from a machine.
+  if (d.need === "info" && d.level >= NOW) return "card";
+  // A person writing to you privately gets a card unless it's chatter: your glance is cheap.
+  if (d.chat === "private" && !d.automated && d.need !== "nothing" && d.level >= 2) return "card";
+  if (d.need === "info" && d.level >= TODAY && !group && !d.automated) return "card";
+  if (d.automated) return "skip";
   return "catchup";
 }
 
@@ -121,6 +149,7 @@ export function stateFor(
     now: new Date(now).toLocaleString("en-GB", { timeZone: tz, weekday: "long", day: "numeric", month: "long", hour: "2-digit", minute: "2-digit" }),
     about_the_user: about || "No details given.",
     where: info.where,
+    chat_type: first.source.startsWith("mail:") ? "email" : first.isGroup ? "group chat" : "private chat",
     ...(first.subject ? { subject: first.subject } : {}),
     // The newest 15 new messages; a long burst keeps its end, which is usually where the question is.
     new_messages: msgs.slice(-15).map((m) => line(m, 1500)),
@@ -188,9 +217,11 @@ export function digestCard(bot: string, recent: InboxMessage[], info: SourceInfo
 // ---------- The loop ----------
 
 /** Wait for a chat to go quiet this long, so a burst of messages is one decision. */
-const QUIET_MS = 60_000;
+const QUIET_MS = 2 * 60_000;
 /** But not longer than this for a chat that never stops. */
-const MAX_WAIT_MS = 3 * 60_000;
+const MAX_WAIT_MS = 5 * 60_000;
+/** You wrote in a chat this recently: you're in the conversation, so new messages there need no decision. */
+const ACTIVE_MS = 15 * 60_000;
 /** Messages older than this when triage first sees them (it was off, or the server was down) are filed without a decision. */
 const STALE_MS = 6 * 3_600_000;
 const GROUPS_PER_RUN = 15;
@@ -332,6 +363,13 @@ export function createTriage(deps: TriageDeps): Triage {
       store.markTriaged(ids);
       return 0;
     }
+    // You wrote here moments before: you're in the conversation and see it anyway. No decision, no cost.
+    const mine = store.threadMessages(last.source, last.thread, 60).filter((m) => m.fromMe && m.at <= fresh[0].at).at(-1);
+    if (mine && fresh[0].at - mine.at <= ACTIVE_MS) {
+      store.addTriage({ source: last.source, thread: last.thread, messageIds: ids, decidedAt: store.now(), answers: {}, level: -1, need: "active", route: "active", itemId: null, grok: null, cost: 0 });
+      store.markTriaged(ids);
+      return 0;
+    }
     // Messages still waiting for Grok in this chat are judged again together with the new ones,
     // so a later "never mind" can take the chat off Grok's list, and the chat stays one entry.
     const pending = active() ? store.outstandingFor(last.source, last.thread) : null;
@@ -341,15 +379,16 @@ export function createTriage(deps: TriageDeps): Triage {
     const info = deps.sourceInfo(last);
     const context = store.threadMessages(last.source, last.thread, 40).filter((m) => m.at < msgs[0].at || (m.at === msgs[0].at && m.id < msgs[0].id));
     const state = stateFor(msgs, context, info, settings.str("triageAbout"), store.now(), tz);
-    const result = await askJev(settings.str("openrouterKey"), settings.str("jevModel") || "typesafe/jev-1.13", state, QUESTIONS, fetchImpl);
-    const d = decide(result.answers, settings.int("triageUnsure"), msgs.some((m) => m.automated));
+    const result = await askJev(settings.str("openrouterKey"), settings.str("jevModel") || "typesafe/jev-1.14", state, QUESTIONS, fetchImpl);
+    const chat = last.source.startsWith("mail:") ? "email" : last.isGroup ? "group" : "private";
+    const d = decide(result.answers, settings.int("triageReplyAt"), msgs.some((m) => m.automated), chat);
     let route = routeFor(d);
     // The mode may have changed while Jev answered: act on the mode as it is now.
     if (!active()) {
       // Shadow: remember what triage would have done, and change nothing.
       store.addTriage({
         source: last.source, thread: last.thread, messageIds: ids, decidedAt: store.now(),
-        answers: { ...result.answers, model: result.model, unsure: d.unsure, automated: d.automated, shadow: true },
+        answers: { ...result.answers, model: result.model, doubtful: d.doubtful, automated: d.automated, shadow: true },
         level: d.level, need: d.need, route, itemId: null, grok: null, cost: result.cost,
       });
       store.markTriaged(ids);
@@ -382,7 +421,7 @@ export function createTriage(deps: TriageDeps): Triage {
       store.dropFromGrokQueue(last.source, last.thread);
       store.addTriage({
         source: last.source, thread: last.thread, messageIds: forGrokNow ? allIds : ids, decidedAt: store.now(),
-        answers: { ...result.answers, model: result.model, unsure: d.unsure, automated: d.automated },
+        answers: { ...result.answers, model: result.model, doubtful: d.doubtful, automated: d.automated },
         level: d.level, need: d.need, route, itemId, grok: forGrokNow ? "queued" : null,
         queuedAt: forGrokNow ? pending?.queuedAt ?? store.now() : null, cost: result.cost,
       });
@@ -505,7 +544,7 @@ export function createTriage(deps: TriageDeps): Triage {
           { group: "Phone pings", on: false, ok: true, text: "Off" },
         ];
       }
-      const today = store.triageSince(dayStart()).filter((t) => t.route !== "replied");
+      const today = store.triageSince(dayStart()).filter((t) => t.route !== "replied" && t.route !== "active");
       const cents = today.reduce((s, t) => s + t.cost, 0) * 100;
       const waiting = store.grokQueue().length;
       const sorted = `${today.length} chat${today.length === 1 ? "" : "s"} sorted today for ${cents < 0.1 && cents > 0 ? "under 0.1" : cents.toFixed(1)}¢`;

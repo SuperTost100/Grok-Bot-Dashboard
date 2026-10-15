@@ -19,6 +19,10 @@ export interface WaStatus {
   status: string;
   /** The linked phone number, once linked. */
   me: string;
+  /** Your own WhatsApp LID: groups write mentions of you as @<lid>. */
+  lid?: string;
+  /** Your WhatsApp profile name. */
+  name?: string;
 }
 
 interface ChatSummary {
@@ -69,9 +73,9 @@ export class Waha {
   }
 
   async status(): Promise<WaStatus> {
-    const s = (await this.call("GET", `/api/sessions/${SESSION}`)) as { status: string; me?: { id?: string } | null } | null;
+    const s = (await this.call("GET", `/api/sessions/${SESSION}`)) as { status: string; me?: { id?: string; lid?: string; pushName?: string } | null } | null;
     if (!s) return { status: "MISSING", me: "" };
-    return { status: s.status, me: (s.me?.id ?? "").replace(/@.*/, "") };
+    return { status: s.status, me: (s.me?.id ?? "").replace(/@.*/, ""), lid: (s.me?.lid ?? "").replace(/@.*/, ""), name: s.me?.pushName ?? "" };
   }
 
   /**
@@ -122,11 +126,19 @@ const isGroup = (id: string) => id.endsWith("@g.us");
 // Status updates and broadcast lists aren't conversations.
 const skipChat = (id: string) => id === "status@broadcast" || id.endsWith("@broadcast");
 
-export function toInbox(chat: ChatSummary, m: WaMessage, source = "whatsapp:1"): InboxInput {
+/** Mentions of you show as @<your LID or number>; they become @<your name>, so cards and triage can tell. */
+export function mentionsOfYou(text: string, you: { me: string; lid?: string; name?: string }): string {
+  const ids = [you.me, you.lid].filter((x): x is string => Boolean(x && /^\d+$/.test(x)));
+  if (!ids.length) return text;
+  return text.replace(new RegExp(`@(${ids.join("|")})\\b`, "g"), `@${you.name || "you"}`);
+}
+
+export function toInbox(chat: ChatSummary, m: WaMessage, source = "whatsapp:1", you?: { me: string; lid?: string; name?: string }): InboxInput {
   const group = isGroup(chat.id);
   const name = chat.name || chat.id.replace(/@.*/, "");
   const who = m.fromMe ? "You" : m._data?.verifiedBizName || m._data?.pushName || (group ? (m.participant ?? "").replace(/@.*/, "") : name) || name;
   let text = (m.body ?? "").trim();
+  if (you) text = mentionsOfYou(text, you);
   if (!text && m.hasMedia) text = "[media]";
   if (text.length > MAX_TEXT) text = text.slice(0, MAX_TEXT - 1).trimEnd() + "…";
   return {
@@ -188,7 +200,7 @@ export async function readWhatsApp(
     let offset = resume[chat.id]?.offset ?? 0;
     for (let p = 0; ; p++, offset += PAGE) {
       const page = await waha.messagesSince(chat.id, from, offset);
-      for (const m of page) if (m.id && m.timestamp) found.push(toInbox(chat, m, source));
+      for (const m of page) if (m.id && m.timestamp) found.push(toInbox(chat, m, source, session));
       if (page.length < PAGE) break;
       if (p + 1 >= MAX_PAGES) {
         next[chat.id] = { name: chat.name ?? "", since: from, offset: offset + PAGE };
