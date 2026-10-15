@@ -14,38 +14,63 @@ const env = { OWNER_LOGIN: "o@x.com", BOT_TOKEN: "test-token-123", TZ };
 
 // ---------- Decisions ----------
 
-function answers(level: number, need: string, opts: { whenConf?: number; needConf?: number; probs?: Record<string, number>; auto?: number } = {}): JevResult["answers"] {
+/** Jev's answers with its weight on one "how soon" level and one need. */
+function answers(
+  level: number,
+  need: string,
+  opts: { when?: Record<string, number>; probs?: Record<string, number>; auto?: number; addressed?: number } = {},
+): JevResult["answers"] {
   return {
-    when: { type: "score", score: level, confidence: opts.whenConf ?? 0.9 },
-    need: { type: "choice", choice: need, confidence: opts.needConf ?? 0.9, probabilities: opts.probs ?? { [need]: 0.9 } },
+    when: { type: "score", score: level, confidence: 0.5, probabilities: opts.when ?? { [String(Math.round(level))]: 0.9 } },
+    need: { type: "choice", choice: need, confidence: 0.5, probabilities: opts.probs ?? { [need]: 0.9 } },
+    addressed: { type: "noul", noul: opts.addressed ?? 0.9 },
     automated: { type: "noul", noul: opts.auto ?? 0.1 },
   };
 }
 
-test("a sure answer is taken as it is", () => {
-  const d = decide(answers(2.4, "info"), 60, false);
-  assert.deepEqual([d.level, d.need, d.actionable, d.unsure], [2, "info", false, false]);
+test("how soon counts only when Jev is clear about it", () => {
+  assert.equal(decide(answers(3.4, "info", { when: { "3": 0.45, "4": 0.45 } }), 60, false).level, 3, "today or now, but not clearly now");
+  assert.equal(decide(answers(3.6, "info", { when: { "3": 0.3, "4": 0.65 } }), 60, false).level, 4);
+  assert.equal(decide(answers(2.9, "info", { when: { "2": 0.5, "3": 0.3, "4": 0.2 } }), 60, false).level, 2, "chat that leans today without being sure stays below today");
 });
 
-test("when Jev is unsure, the message counts as more urgent and as needing a reply if one is likely", () => {
-  const d = decide(answers(2.3, "info", { whenConf: 0.4, needConf: 0.4, probs: { info: 0.5, reply: 0.4, decision: 0.1 } }), 60, false);
-  assert.deepEqual([d.level, d.need, d.actionable, d.unsure], [3, "reply", true, true]);
+test("Grok gets a chat only when a reply or decision is likely enough; a doubt costs a card", () => {
+  const sure = decide(answers(3, "reply", { probs: { reply: 0.7, nothing: 0.3 } }), 60, false);
+  assert.deepEqual([sure.actionable, sure.doubtful, sure.need], [true, false, "reply"]);
+  const maybe = decide(answers(3, "nothing", { probs: { reply: 0.25, decision: 0.15, nothing: 0.6 } }), 60, false);
+  assert.deepEqual([maybe.actionable, maybe.doubtful, maybe.need, routeFor(maybe)], [false, true, "reply", "card"]);
+  const no = decide(answers(3, "nothing", { probs: { reply: 0.2, nothing: 0.8 } }), 60, false);
+  assert.deepEqual([no.actionable, no.doubtful], [false, false]);
+});
+
+test("in a group, a question needs you only when it's put to you or asks you to decide", () => {
+  const toAll = decide(answers(3, "reply", { probs: { reply: 0.8 }, addressed: 0.2 }), 60, false, "group");
+  assert.deepEqual([toAll.actionable, toAll.doubtful, routeFor(toAll)], [false, false, "catchup"]);
+  const toYou = decide(answers(3, "reply", { probs: { reply: 0.8 }, addressed: 0.8 }), 60, false, "group");
+  assert.equal(routeFor(toYou), "ride");
+  const vote = decide(answers(3, "decision", { probs: { decision: 0.7 }, addressed: 0.1 }), 60, false, "group");
+  assert.equal(routeFor(vote), "ride");
 });
 
 test("routes follow the table", () => {
-  const r = (level: number, need: Decision["need"], actionable = false, automated = false) => routeFor({ level, need, actionable, automated, unsure: false });
-  assert.equal(r(4, "reply", true), "wake");
-  assert.equal(r(3, "decision", true), "ride");
-  assert.equal(r(1, "reply", true), "ride");
+  const r = (level: number, need: Decision["need"], o: Partial<Decision> = {}) =>
+    routeFor({ level, need, actionable: false, doubtful: false, automated: false, chat: "private", ...o });
+  assert.equal(r(4, "reply", { actionable: true }), "wake");
+  assert.equal(r(3, "decision", { actionable: true }), "ride");
+  assert.equal(r(1, "reply", { actionable: true }), "ride");
+  assert.equal(r(2, "reply", { doubtful: true }), "card");
   assert.equal(r(2, "task"), "card");
+  assert.equal(r(2, "task", { chat: "group" }), "catchup");
   assert.equal(r(1, "task"), "catchup");
-  assert.equal(r(3, "info"), "card");
-  assert.equal(r(4, "info", false, true), "card", "an urgent automatic alert still gets a card");
-  assert.equal(r(2, "info"), "catchup");
-  assert.equal(r(2, "info", false, true), "skip");
+  assert.equal(r(4, "info", { automated: true, chat: "email" }), "card", "an urgent automatic alert still gets a card");
+  assert.equal(r(3, "info", { chat: "email" }), "card");
+  assert.equal(r(2, "info", { chat: "email" }), "catchup");
+  assert.equal(r(2, "info"), "card", "a person writing to you privately gets a card");
+  assert.equal(r(3, "info", { chat: "group" }), "catchup");
+  assert.equal(r(2, "info", { automated: true, chat: "email" }), "skip");
   assert.equal(r(0, "info"), "skip");
-  assert.equal(r(3, "nothing"), "card", "today beats nothing");
-  assert.equal(r(1, "nothing"), "skip");
+  assert.equal(r(4, "nothing"), "catchup", "chatter never makes a card, however recent");
+  assert.equal(r(3, "nothing", { chat: "email", automated: true }), "skip");
 });
 
 // ---------- The loop, with a pretend Jev ----------
@@ -131,8 +156,8 @@ test("a chat that's still typing waits; a burst is one decision", async () => {
   try {
     t.store.addInbox([t.msg("1@c.us", "hey", { at: t.now() - 10_000 })]);
     await t.triage.tick();
-    assert.equal(t.jevCalls.length, 0, "under a minute of quiet: wait");
-    t.advance(60_000);
+    assert.equal(t.jevCalls.length, 0, "under two minutes of quiet: wait");
+    t.advance(120_000);
     await t.triage.tick();
     assert.equal(t.jevCalls.length, 1);
   } finally {
@@ -638,6 +663,25 @@ test("chats left over after Grok's 30 per run wake it again", async () => {
     assert.equal((await t.bot("/api/bot/actions")).inbox.length, 30);
     t.advance(50 * 60_000);
     assert.equal(t.triage.wakeDue(), true, "Grok answered the last wake, so the 31st gets one");
+  } finally {
+    t.stop();
+  }
+});
+
+test("while you're chatting in a chat yourself, its new messages need no decision", async () => {
+  const t = await setup({ reply: () => answers(4, "reply") });
+  try {
+    t.store.addInbox([t.msg("1@c.us", "my turn", { fromMe: true, sender: "You", at: t.now() - 10 * 60_000 })]);
+    await t.triage.tick();
+    t.store.addInbox([t.msg("1@c.us", "ahah true", { at: t.now() - 5 * 60_000 })]);
+    await t.triage.tick();
+    assert.equal(t.jevCalls.length, 0);
+    assert.equal(t.store.grokQueue().length, 0);
+    assert.equal(t.store.triageSince(0).at(-1)!.route, "active");
+    t.store.addInbox([t.msg("1@c.us", "are you there? need an answer", { at: t.now() + 30 * 60_000 })]);
+    t.advance(33 * 60_000);
+    await t.triage.tick();
+    assert.equal(t.jevCalls.length, 1, "once you've been quiet a while, it's decided again");
   } finally {
     t.stop();
   }

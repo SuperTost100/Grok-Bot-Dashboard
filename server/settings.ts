@@ -53,7 +53,7 @@ export const DEFS: SettingDef[] = [
     label: "Mode", help: "Shadow: Jev sorts and logs, but the page and Grok work as before, so you can check its choices first. On: triage makes the cards and wakes Grok.",
   },
   {
-    key: "jevModel", env: "JEV_MODEL", group: "Triage", type: "text", fallback: "typesafe/jev-1.13", placeholder: "typesafe/jev-1.13",
+    key: "jevModel", env: "JEV_MODEL", group: "Triage", type: "text", fallback: "typesafe/jev-1.14", placeholder: "typesafe/jev-1.14",
     label: "Jev model", help: "The OpenRouter model id. A pinned version keeps decisions steady.",
   },
   {
@@ -62,8 +62,8 @@ export const DEFS: SettingDef[] = [
     label: "About you", help: "A sentence or two Jev reads with every message: who you are, and the people or topics that always matter.",
   },
   {
-    key: "triageUnsure", env: "TRIAGE_UNSURE", group: "Triage", type: "int", min: 0, max: 100, unit: "%", fallback: 60,
-    label: "Unsure below", help: "When Jev is less sure than this, a message counts as more urgent, so a doubt costs a card, not a missed message.",
+    key: "triageReplyAt", env: "TRIAGE_REPLY_AT", group: "Triage", type: "int", min: 35, max: 100, unit: "%", fallback: 60,
+    label: "Grok works on a chat at", help: "How sure Jev must be that a chat needs your reply or decision before Grok drafts it. Below that, down to 35%, you get a plain card instead.",
   },
   {
     key: "grokBot", env: "GROK_BOT", group: "Grok wakes", type: "text", fallback: "dashboard", placeholder: "dashboard",

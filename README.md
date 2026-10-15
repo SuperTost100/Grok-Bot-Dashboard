@@ -144,19 +144,22 @@ The first time a mailbox or WhatsApp is read, the dashboard looks back 3 days. M
 
 ## Triage with Jev
 
-With WhatsApp or mail connected, the dashboard can sort new messages itself, so the Grok Bot only runs when something needs a reply or an answer. The sorting is done by [Jev](https://openrouter.ai/docs/guides/community/jev), a decision model on OpenRouter that answers questions with probabilities instead of text. It costs $0.042 per million input tokens; one decision is about 500 tokens. Add an OpenRouter API key under Settings, Triage.
+With WhatsApp or mail connected, the dashboard can sort new messages itself, so the Grok Bot only runs when something needs a reply or an answer. The sorting is done by [Jev](https://openrouter.ai/docs/guides/community/jev), a decision model on OpenRouter that answers questions with probabilities instead of text. It costs $0.042 per million input tokens; one decision is about 1,000 tokens, so 160 decisions cost under 1¢. Add an OpenRouter API key under Settings, Triage.
 
-Each burst of new messages in a chat or mail thread is one decision. Jev answers three questions: how soon you need to see it (never, whenever, this week, today, now), what it needs from you (a reply, a decision, a task, information, nothing), and whether a machine sent it. Then:
+Each burst of new messages in a chat or mail thread is one decision. Jev answers four questions: what it would cost you to look only tonight, what it needs from you (a reply, a decision, a task, information, nothing), whether it's addressed to you personally, and whether a machine sent it. The dashboard acts on Jev's probabilities, not on its single best guess:
 
-| Jev says                          | What happens                                         | Grok runs?      |
-| --------------------------------- | ---------------------------------------------------- | --------------- |
-| Reply or decision, needed now     | Urgent card and a phone ping; Grok drafts the answer | Yes, right away |
-| Reply or decision, later          | A card now; Grok writes the answer at its next run   | Later           |
-| A task for you, or news for today | A card made from the message                         | No              |
-| Information that can wait         | A line in Catch up                                   | No              |
-| Noise or automatic mail           | Listed under "Filtered out today" in Catch up        | No              |
+| Jev says                                                          | What happens                                         | Grok runs?      |
+| ----------------------------------------------------------------- | ---------------------------------------------------- | --------------- |
+| Likely needs your reply or decision, clearly urgent               | Urgent card and a phone ping; Grok drafts the answer | Yes, right away |
+| Likely needs your reply or decision                               | A card now; Grok writes the answer at its next run   | Later           |
+| Might need a reply (35% to the "Grok works on a chat at" setting) | A card made from the message                         | No              |
+| A task, news for today, or a person writing to you privately      | A card made from the message                         | No              |
+| Group chatter, or information that can wait                       | A line in Catch up                                   | No              |
+| Noise or automatic mail                                           | Listed under "Filtered out today" in Catch up        | No              |
 
-When Jev is unsure, the message counts as more urgent, so a doubt costs a card rather than a missed message. When you reply from your phone, the chat's card closes.
+In a group, a question needs you only when it names you or asks you to decide; mentions of you are rewritten as @your-name so Jev can tell. While you're chatting in a chat yourself (you wrote there in the last 15 minutes), its new messages need no decision. When you reply from your phone, the chat's card closes.
+
+These rules were tuned on 165 real decisions against the cards the Grok bot made for the same messages: Jev rates almost any live chat message as urgent, so urgency only counts when it's clear-cut.
 
 Grok wakes for chats that need it at most once every 45 minutes and takes everything waiting in one run. Chats due today wake it when 3 are waiting or the oldest has waited 2 hours, and anything left waits at most a day. After 10 Grok runs in a day, message wakes stop until the next day; your taps always go through. The footer counts Grok runs. All these numbers are on the Settings page.
 

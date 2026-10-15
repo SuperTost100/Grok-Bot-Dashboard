@@ -10,7 +10,7 @@ import { Settings } from "../server/settings.ts";
 import { loadConfig } from "../server/config.ts";
 import { cleanText, parseHost, readFolder, toInbox as mailToInbox } from "../server/sources/mail.ts";
 import type { ImapFlow } from "imapflow";
-import { Waha, readWhatsApp } from "../server/sources/whatsapp.ts";
+import { Waha, readWhatsApp, mentionsOfYou } from "../server/sources/whatsapp.ts";
 import { eventsFromIcs, readCalendars, calendarUrls, CALENDAR_OWNER } from "../server/sources/calendar.ts";
 import { createSources, plainError } from "../server/sources/index.ts";
 
@@ -427,7 +427,7 @@ test("Settings offers a new QR code once the old one expired, and asks WhatsApp 
   f.set("FAILED");
   const env = { OWNER_LOGIN: "o@x.com", BOT_TOKEN: "test-token-123", TZ: "Europe/Rome" };
   const config = { ...loadConfig(env), publicDir: new URL("../public", import.meta.url).pathname.replace(/\/$/, "") };
-  const store = new Store(":memory:");
+  const store = new Store(":memory:", () => Date.parse("2026-10-12T11:00:00Z"));
   const settings = new Settings(store, config, env);
   const realFetch = globalThis.fetch;
   globalThis.fetch = ((input: URL | RequestInfo, init?: RequestInit) => (String(input).startsWith("http://waha2:3000") ? f.waha.fetch(input, init) : realFetch(input, init))) as typeof fetch;
@@ -459,4 +459,11 @@ test("Settings offers a new QR code once the old one expired, and asks WhatsApp 
     server.close();
     store.close();
   }
+});
+
+test("whatsapp: mentions of you become your name, so triage can tell a question is for you", () => {
+  const you = { me: "393331112222", lid: "188411675705560", name: "Tost" };
+  assert.equal(mentionsOfYou("@188411675705560 chiamiamo noi ora?", you), "@Tost chiamiamo noi ora?");
+  assert.equal(mentionsOfYou("ciao @393331112222 e @555", you), "ciao @Tost e @555");
+  assert.equal(mentionsOfYou("@1884116757055601 not you", you), "@1884116757055601 not you");
 });
