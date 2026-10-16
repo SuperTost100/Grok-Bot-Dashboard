@@ -520,6 +520,13 @@ function renderSettingsBots() {
   el.innerHTML = bots.length ? bots.map((b) => `<div class="setting bot-row">
     <div class="s-text"><p class="s-label">${avatar(b.slug)} ${esc(b.name)}</p>
       <p class="help">${b.hasWebhook ? "Has a webhook: the dashboard can wake it." : "No webhook yet: it only sees taps when it runs on its own."}</p>
+      <form class="hook" data-hook="${esc(b.slug)}">
+        <label class="sr-only" for="hu-${esc(b.slug)}">Webhook address for ${esc(b.name)}</label>
+        <input id="hu-${esc(b.slug)}" name="url" type="url" autocomplete="off" placeholder="${b.hasWebhook ? "Webhook set. Paste a new address to replace it." : "Webhook address (POST to)"}">
+        <label class="sr-only" for="hk-${esc(b.slug)}">Webhook key for ${esc(b.name)}</label>
+        <input id="hk-${esc(b.slug)}" name="key" type="password" autocomplete="off" placeholder="Key">
+        <button class="btn" type="submit">Save</button>
+      </form>
       <fieldset class="reads"><legend>May also read</legend>${[["agenda", "Agenda"], ["todos", "To-dos"], ["cards", "Every card"]].map(([k, l]) => `<label><input type="checkbox" data-act="bot-read" data-slug="${esc(b.slug)}" data-read="${k}"${b.reads.includes(k) ? " checked" : ""}> ${l}</label>`).join("")}</fieldset>
     </div>
     <div class="s-control"><label class="sw"><span>Shown</span><input type="checkbox" class="switch" data-act="bot-shown" data-slug="${esc(b.slug)}"${b.shown ? " checked" : ""} aria-label="Show ${esc(b.name)} on the Bots page"></label></div>
@@ -1247,6 +1254,17 @@ async function openInstall(key, source) {
 
 document.addEventListener("submit", async (e) => {
   const f = e.target;
+  if (f.matches("[data-hook]")) {
+    e.preventDefault();
+    const url = f.url.value.trim();
+    const key = f.key.value.trim();
+    if (!url) return f.url.focus();
+    if (await run("PUT", `/api/ui/bots/${encodeURIComponent(f.dataset.hook)}`, { webhookUrl: url, webhookToken: key })) {
+      toast("Webhook saved. The dashboard can wake this bot now.");
+      f.reset();
+    }
+    return;
+  }
   if (f.matches("[data-addon-form]")) {
     e.preventDefault();
     const id = f.dataset.addonForm;

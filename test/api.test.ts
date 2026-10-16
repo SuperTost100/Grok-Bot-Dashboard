@@ -850,3 +850,14 @@ test("the Calendar add-on replaces the bots' agenda; other add-ons add their eve
   assert.equal(s.store.listTodos().find((t) => t.content === "Fix shutters")!.duration, 90);
   assert.equal((await bot("PUT", "/api/bot/todos", { todos: [{ id: "1", content: "x", duration: -5 }] }, "todolist")).status, 400);
 });
+
+test("a bot's webhook can be pasted on the page; the key never comes back", async () => {
+  await bot("POST", "/api/bot/register", { name: "Comprato" }, "comprato-hook");
+  assert.equal((await call("PUT", "/api/ui/bots/comprato-hook", { webhookUrl: "http://127.0.0.1/x" })).status, 400, "private or plain http refused");
+  const ok = await call("PUT", "/api/ui/bots/comprato-hook", { webhookUrl: "https://api2.cursor.sh/automations/webhook/abc", webhookToken: "Bearer crsr_secret123" });
+  assert.equal(ok.status, 200);
+  assert.ok(!JSON.stringify(ok.body).includes("crsr_secret123"));
+  const b = s.store.getBot("comprato-hook")!;
+  assert.deepEqual([b.webhookUrl, b.webhookToken], ["https://api2.cursor.sh/automations/webhook/abc", "crsr_secret123"]);
+  assert.equal((await state()).bots.find((x: { slug: string }) => x.slug === "comprato-hook").hasWebhook, true);
+});

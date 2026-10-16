@@ -938,10 +938,19 @@ export function createApp(deps: AppDeps) {
       if (!Array.isArray(b.reads) || !b.reads.every((r) => READ_SCOPES.includes(r as ReadScope))) throw bad(`"reads" must be a list of ${READ_SCOPES.join(", ")}`);
       reads = [...new Set(b.reads as ReadScope[])];
     }
+    let webhookUrl: string | undefined;
+    if (b.webhookUrl !== undefined) {
+      webhookUrl = text(b.webhookUrl, "webhookUrl", 2000);
+      const problem = webhookUrl ? checkWebhookUrl(webhookUrl, config.webhookAllowPrivate) : "";
+      if (problem) throw bad(problem);
+    }
     store.configureBot(bot.slug, {
       shown: b.shown === undefined ? undefined : b.shown === true,
       reads,
       role: b.role === undefined ? undefined : text(b.role, "role", 120),
+      webhookUrl,
+      // Pasted from the routine panel; "Bearer " in front is dropped, since the dashboard adds it.
+      webhookToken: b.webhookToken === undefined ? undefined : text(b.webhookToken, "webhookToken", 500).replace(/^Bearer\s+/i, ""),
     });
     return { ok: true, state: await state() };
   });

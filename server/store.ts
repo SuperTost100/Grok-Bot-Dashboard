@@ -932,8 +932,15 @@ export class Store {
   }
 
   /** Your choices about a bot from the page: these never count as the bot checking in. */
-  configureBot(slug: string, patch: { shown?: boolean; reads?: ReadScope[]; role?: string; kind?: BotKind; name?: string; color?: string }) {
+  configureBot(slug: string, patch: { shown?: boolean; reads?: ReadScope[]; role?: string; kind?: BotKind; name?: string; color?: string; webhookUrl?: string; webhookToken?: string }) {
     this.ensureBot(slug);
+    if (patch.webhookUrl !== undefined) {
+      const before = this.getBot(slug)!;
+      this.db.prepare("UPDATE bots SET webhook_url = ? WHERE slug = ?").run(patch.webhookUrl, slug);
+      // A key belongs to one destination: never send the old key to a new URL.
+      if (patch.webhookUrl !== before.webhookUrl && patch.webhookToken === undefined) this.db.prepare("UPDATE bots SET webhook_token = '' WHERE slug = ?").run(slug);
+    }
+    if (patch.webhookToken !== undefined) this.db.prepare("UPDATE bots SET webhook_token = ? WHERE slug = ?").run(patch.webhookToken, slug);
     if (patch.shown !== undefined) this.db.prepare("UPDATE bots SET shown = ? WHERE slug = ?").run(patch.shown ? 1 : 0, slug);
     if (patch.reads !== undefined) this.db.prepare("UPDATE bots SET reads = ? WHERE slug = ?").run(JSON.stringify(patch.reads), slug);
     if (patch.role !== undefined) this.db.prepare("UPDATE bots SET role = ? WHERE slug = ?").run(patch.role, slug);
