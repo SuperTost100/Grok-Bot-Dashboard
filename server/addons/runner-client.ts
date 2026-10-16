@@ -1,14 +1,15 @@
 // The dashboard's side of the runner (runner/server.mjs), which starts apps' containers.
 
+import fs from "node:fs";
 import type { Runner } from "./manager.ts";
-import { runnerToken } from "../../runner/validate.mjs";
 
-export async function createRunnerClient(base: string, botToken: string, fetchImpl: typeof fetch = fetch): Promise<Runner> {
-  const auth = `Bearer ${await runnerToken(botToken)}`;
+/** The runner writes its key into a volume only it and the dashboard mount; read it when needed. */
+export function createRunnerClient(base: string, keyFile: string, fetchImpl: typeof fetch = fetch): Runner {
+  const auth = () => `Bearer ${fs.readFileSync(keyFile, "utf8").trim()}`;
   async function call(method: string, path: string, body?: unknown, timeoutMs = 20 * 60_000): Promise<string> {
     const res = await fetchImpl(base.replace(/\/+$/, "") + path, {
       method,
-      headers: { Authorization: auth, ...(body ? { "Content-Type": "application/json" } : {}) },
+      headers: { Authorization: auth(), ...(body ? { "Content-Type": "application/json" } : {}) },
       body: body ? JSON.stringify(body) : undefined,
       signal: AbortSignal.timeout(timeoutMs),
     });

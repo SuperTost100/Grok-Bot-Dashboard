@@ -188,7 +188,8 @@ export function parseItem(raw: unknown, i = 0, tz = "UTC"): ItemInput {
     section,
     kind,
     title: text(b.title, at("title"), 200, true),
-    body: text(b.body, at("body"), 2000),
+    // Long enough for an exam timetable from PoliTO; the page scrolls long tables inside the card.
+    body: text(b.body, at("body"), 10_000),
     context: text(b.context, at("context"), 1000),
     source: text(b.source, at("source"), 120),
     app: app(b.app),
@@ -213,6 +214,37 @@ const MIME: Record<string, string> = {
   ".svg": "image/svg+xml",
   ".ico": "image/x-icon",
 };
+
+/**
+ * The gateway address of every network this container is on (Docker gives each bridge network's gateway
+ * the subnet's first address). Read from /proc/net/route, refreshed every minute.
+ */
+let gatewayCache: { at: number; set: Set<string> } | null = null;
+export function gateways(routeTable?: string): Set<string> {
+  if (!routeTable && gatewayCache && Date.now() - gatewayCache.at < 60_000) return gatewayCache.set;
+  let table = routeTable ?? "";
+  if (!routeTable) {
+    try {
+      table = fs.readFileSync("/proc/net/route", "utf8");
+    } catch {
+      table = "";
+    }
+  }
+  const ip = (hex: string) => [0, 1, 2, 3].map((i) => parseInt(hex.slice(6 - i * 2, 8 - i * 2), 16)).join(".");
+  const set = new Set<string>();
+  for (const line of table.split("\n").slice(1)) {
+    const [, dest, gw, , , , , mask] = line.trim().split(/\s+/);
+    if (!dest || !mask) continue;
+    if (gw && gw !== "00000000") set.add(ip(gw));
+    if (mask !== "00000000") {
+      const base = (parseInt(dest, 16) & parseInt(mask, 16)) >>> 0;
+      // Little-endian: the first address of the subnet adds 1 to the lowest-addressed byte, the last one here.
+      set.add(ip(((base + 0x01000000) >>> 0).toString(16).padStart(8, "0")));
+    }
+  }
+  if (!routeTable) gatewayCache = { at: Date.now(), set };
+  return set;
+}
 
 const SECURITY_HEADERS = {
   "X-Content-Type-Options": "nosniff",
@@ -530,7 +562,7 @@ export function createApp(deps: AppDeps) {
           key: "stable id of the decision, like wa:<chat id>:<message id>. Up to 200 chars.",
           kind: "choice | draft | reminder (section needs), digest (section catchup)",
           title: "required, up to 200 chars, what's needed",
-          body: "up to 2000 chars", context: "up to 1000 chars", source: "label like 'WhatsApp · Lab group', up to 120 chars",
+          body: "up to 10000 chars", context: "up to 1000 chars", source: "label like 'WhatsApp · Lab group', up to 120 chars",
           app: "whatsapp, gmail, googlecalendar, mail, github, todoist, subito, vinted, telegram... (shows the logo)",
           link: "http(s) link to the original", urgent: "deadline words like 'answer by 14:00', up to 60 chars",
           options: "choice only: 1 to 4 of {label (up to 60 chars), instruction (up to 1000)}. The instruction must do exactly what the label says.",
@@ -587,7 +619,7 @@ export function createApp(deps: AppDeps) {
     const batch = Array.isArray(b.items);
     const list = batch ? (b.items as unknown[]) : [b];
     if (list.length > 50) throw bad("Send at most 50 items per call.");
-    const parsed = list.map((x, i) => parseItem(x && typeof x === "object" && !Array.isArray(x) ? { bot: b.bot, ...x } : x, batch ? i : 0, tz));
+    const parsed = list.map((x, i) => parseItem(x && typeof x === "object" && !Array.isArray(x) ? { ...x, bot: b.bot } : x, batch ? i : 0, tz));
     const keys = parsed.map((p) => p.key).filter(Boolean);
     if (new Set(keys).size !== keys.length) throw bad("Two items in this call share a key. Send each key once.");
     const results = parsed.map((p) => {
@@ -1093,6 +1125,7 @@ export function createApp(deps: AppDeps) {
 
   function isOwner(req: http.IncomingMessage) {
     if (config.authMode === "none") return true;
+    if (config.ownerVia === "gateway" && !gateways().has(String(req.socket.remoteAddress ?? "").replace(/^::ffff:/, ""))) return false;
     const login = String(req.headers["tailscale-user-login"] ?? "").toLowerCase();
     return login === config.ownerLogin;
   }

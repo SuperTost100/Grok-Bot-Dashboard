@@ -161,7 +161,9 @@ const addons = createAddons({
   store, dataDir: config.dataDir, tz: config.tz, log,
   localUrl: `http://127.0.0.1:${config.port}`,
   appUrl: process.env.DASHBOARD_URL_FOR_APPS ?? "http://dashboard:8787",
-  runner: runnerUrl ? await createRunnerClient(runnerUrl, config.botToken) : null,
+  runner: runnerUrl ? createRunnerClient(runnerUrl, process.env.RUNNER_KEY_FILE ?? "/run/runner/runner.key") : null,
+  untrustedSafe: config.ownerVia === "gateway" || config.authMode === "none",
+  reserved: () => [settings.str("grokBot")],
 });
 const deps: AppDeps = { config, store, settings, todoist: makeTodoist(), polito, sources, triage, phone, addons, notify, lastPing: (bot) => lastPing.get(bot), log };
 settings.onChange((keys) => {
@@ -276,16 +278,17 @@ server.listen(config.port, config.host, () => {
   log(`Grok Bot Dashboard on http://${config.host}:${config.port} (auth: ${config.authMode}, to-dos: ${deps.todoist ? "Todoist" : "from bots"}, PoliTO: ${polito ? "on" : "off"}, time zone: ${config.tz})`);
 });
 
-function shutdown() {
-  void addons.stopAll();
+async function shutdown() {
   clearInterval(tick);
   clearInterval(housekeeping);
   for (const t of deferred.values()) clearTimeout(t);
+  // Add-on processes go first, while the database can still revoke their tokens.
+  setTimeout(() => process.exit(0), 8000).unref();
+  await addons.stopAll().catch(() => {});
   server.close(() => {
     store.close();
     process.exit(0);
   });
-  setTimeout(() => process.exit(0), 3000).unref();
 }
-process.on("SIGTERM", shutdown);
-process.on("SIGINT", shutdown);
+process.on("SIGTERM", () => void shutdown());
+process.on("SIGINT", () => void shutdown());

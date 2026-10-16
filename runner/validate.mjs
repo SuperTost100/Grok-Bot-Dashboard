@@ -10,6 +10,28 @@ const SERVICE_KEYS = new Set([
 const NAME = /^[a-z][a-z0-9_-]{0,40}$/;
 const MAX_MEM = 2 * 1024 ** 3;
 
+/**
+ * Environment and build arguments with a value for every name. A name without one would make Compose
+ * take it from the runner's own environment.
+ */
+function values(v, what) {
+  const list = Array.isArray(v)
+    ? v.map((e) => {
+        const i = typeof e === "string" ? e.indexOf("=") : -1;
+        if (i < 1) throw new Error(`${what}: write "NAME=value", got ${JSON.stringify(e)}.`);
+        return [e.slice(0, i), e.slice(i + 1)];
+      })
+    : v && typeof v === "object" ? Object.entries(v) : null;
+  if (!list) throw new Error(`${what} must be an object or a list.`);
+  const out = {};
+  for (const [k, val] of list) {
+    if (!/^[A-Za-z_][A-Za-z0-9_]*$/.test(k)) throw new Error(`${what}: "${k}" isn't a valid name.`);
+    if (!["string", "number", "boolean"].includes(typeof val)) throw new Error(`${what}: "${k}" needs a value.`);
+    out[k] = String(val);
+  }
+  return out;
+}
+
 function bytes(v) {
   const m = /^(\d+(?:\.\d+)?)\s*([kmg]?)b?$/i.exec(String(v));
   if (!m) return NaN;
@@ -37,19 +59,27 @@ export function checkCompose(compose, { id, network, env }) {
   for (const name of Object.keys(volumes)) out.volumes[name] = {};
   for (const [name, svc] of Object.entries(services)) {
     if (!NAME.test(name)) throw new Error(`Service name "${name}" isn't allowed.`);
+    // Service names are addresses on the shared network: an app may only use names it owns,
+    // so it can't answer for "dashboard", "runner" or another app's services.
+    if (name !== id && !name.startsWith(`${id}-`)) throw new Error(`Service "${name}" must be named "${id}" or start with "${id}-".`);
     if (!svc || typeof svc !== "object") throw new Error(`Service "${name}" must be an object.`);
     for (const k of Object.keys(svc)) if (!SERVICE_KEYS.has(k)) throw new Error(`Service "${name}" can't set "${k}".`);
     if (!svc.image && !svc.build) throw new Error(`Service "${name}" needs an image or a build.`);
     if (svc.image && (typeof svc.image !== "string" || !/^[\w./:@-]+$/.test(svc.image))) throw new Error(`Service "${name}" has a strange image name.`);
+    let build;
     if (svc.build !== undefined) {
-      const ctx = typeof svc.build === "string" ? svc.build : svc.build?.context;
-      // Its own folder, or a public GitHub repo. Never a path elsewhere on this machine.
-      if (typeof ctx !== "string" || !(ctx === "." || /^\.\/[\w.-]+$/.test(ctx) || /^https:\/\/github\.com\/[\w.-]+\/[\w.-]+\.git(#[\w./-]+)?$/.test(ctx))) {
-        throw new Error(`Service "${name}" may only build from its own folder or a github.com repo.`);
+      const b = typeof svc.build === "string" ? { context: svc.build } : svc.build;
+      if (!b || typeof b !== "object") throw new Error(`Service "${name}": "build" must be a folder or an object.`);
+      for (const k of Object.keys(b)) if (!["context", "dockerfile", "args"].includes(k)) throw new Error(`Service "${name}" can't set build.${k}.`);
+      // Its own folder (or a folder in it), or a public GitHub repo. Never a path elsewhere on this machine.
+      const ctx = b.context;
+      const local = typeof ctx === "string" && /^\.(\/[\w-][\w.-]*)*$/.test(ctx) && !ctx.split("/").includes("..");
+      const git = typeof ctx === "string" && /^https:\/\/github\.com\/[\w.-]+\/[\w.-]+\.git(#[\w./-]+)?$/.test(ctx) && !ctx.includes("..");
+      if (!local && !git) throw new Error(`Service "${name}" may only build from its own folder or a github.com repo.`);
+      if (b.dockerfile !== undefined && (typeof b.dockerfile !== "string" || !/^[\w-][\w.-]*$/.test(b.dockerfile))) {
+        throw new Error(`Service "${name}": build.dockerfile must be a file name inside the build folder.`);
       }
-      if (typeof svc.build === "object") {
-        for (const k of Object.keys(svc.build)) if (!["context", "dockerfile", "args"].includes(k)) throw new Error(`Service "${name}" can't set build.${k}.`);
-      }
+      build = { context: ctx, ...(b.dockerfile ? { dockerfile: b.dockerfile } : {}), ...(b.args !== undefined ? { args: values(b.args, `Service "${name}" build.args`) } : {}) };
     }
     // Written out in Compose's long form, so nothing is left to interpretation.
     const mounts = (svc.volumes ?? []).map((v) => {
@@ -64,42 +94,37 @@ export function checkCompose(compose, { id, network, env }) {
     if (svc.cpus !== undefined && !(Number(svc.cpus) > 0 && Number(svc.cpus) <= 2)) throw new Error(`Service "${name}": cpus must be at most 2.`);
     if (svc.user !== undefined && /^(0|root)(:|$)/.test(String(svc.user))) throw new Error(`Service "${name}" can't run as root by choice.`);
     const { "x-dashboard": wantsDash, ...rest } = svc;
-    const environment = Array.isArray(rest.environment)
-      ? Object.fromEntries(rest.environment.map((e) => { const i = String(e).indexOf("="); return i === -1 ? [e, ""] : [e.slice(0, i), e.slice(i + 1)]; }))
-      : { ...(rest.environment ?? {}) };
+    const environment = rest.environment === undefined ? {} : values(rest.environment, `Service "${name}" environment`);
     // The dashboard's address and the app's token only go where the app asks for them.
     if (wantsDash === true) Object.assign(environment, env);
     out.services[name] = {
       ...rest,
+      // A build gets a tag the runner picks, so an app can't overwrite another image on this machine.
+      ...(build ? { build, image: `gd-${id}-${name}:latest` } : {}),
       volumes: mounts,
       environment,
       mem_limit: mem,
       restart: rest.restart ?? "unless-stopped",
       networks: ["dashboard"],
       security_opt: ["no-new-privileges:true"],
-      cap_drop: rest.user === undefined ? undefined : ["ALL"],
+      // Raw sockets would let a container forge packets on the dashboard's network.
+      cap_drop: rest.user === undefined ? ["NET_RAW"] : ["ALL"],
       labels: { ...(rest.labels ?? {}), "grokdash.app": id },
     };
-    if (out.services[name].cap_drop === undefined) delete out.services[name].cap_drop;
   }
   return out;
 }
 
 /**
- * Fill ${NAME} placeholders from the app's settings and the dashboard's values, and escape every
- * other "$" so Compose doesn't fill anything in from the runner's own environment.
+ * Fill ${SETTING_X} placeholders with the app's own settings, and escape every other "$" so Compose
+ * fills nothing in from the runner's environment. "$$" (Compose's own escape) stays as it is.
+ * The dashboard's address and token are never placeholders: they only reach "x-dashboard" services.
  */
 export function fillVars(value, env) {
   if (typeof value === "string") {
-    return value.replace(/\$\{([A-Z][A-Z0-9_]*)\}|\$/g, (m, name) => (name ? (env[name] ?? "").replaceAll("$", "$$$$") : "$$"));
+    return value.replace(/\$\$|\$\{(SETTING_[A-Z0-9_]+)\}|\$/g, (m, name) => (m === "$$" ? "$$" : name ? (env[name] ?? "").replaceAll("$", "$$$$") : "$$"));
   }
   if (Array.isArray(value)) return value.map((v) => fillVars(v, env));
   if (value && typeof value === "object") return Object.fromEntries(Object.entries(value).map(([k, v]) => [k, fillVars(v, env)]));
   return value;
-}
-
-/** The token the dashboard and the runner share, derived from the bot token both already have. */
-export async function runnerToken(botToken) {
-  const { createHash } = await import("node:crypto");
-  return createHash("sha256").update(`grokdash-runner:${botToken}`).digest("hex");
 }

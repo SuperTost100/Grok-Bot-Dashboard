@@ -56,7 +56,8 @@ test("store links: owner/repo, a repo link, or a folder in one", () => {
 
 test("runner rules: nothing privileged, no host folders or ports, the token only where asked", () => {
   const o = { id: "wa", network: "grokdash", env: { DASH_TOKEN: "t" } };
-  const bad = (svc: Record<string, unknown>, extra: Record<string, unknown> = {}) => () => checkCompose({ services: { s: { image: "x", ...svc } }, ...extra }, o);
+  const bad = (svc: Record<string, unknown>, extra: Record<string, unknown> = {}) => () => checkCompose({ services: { "wa-s": { image: "x", ...svc } }, ...extra }, o);
+  assert.throws(() => checkCompose({ services: { dashboard: { image: "x" } } }, o), /must be named "wa"/, "can't answer for the dashboard's name");
   assert.throws(bad({ privileged: true }), /can't set "privileged"/);
   assert.throws(bad({ network_mode: "host" }), /network_mode/);
   assert.throws(bad({ ports: ["80:80"] }), /ports/);
@@ -66,14 +67,22 @@ test("runner rules: nothing privileged, no host folders or ports, the token only
   assert.throws(bad({ build: "/etc" }), /own folder/);
   assert.throws(bad({}, { networks: { x: {} } }), /can't set "networks"/);
   assert.throws(bad({ volumes: ["v:/d"] }, { volumes: { v: { driver_opts: { type: "none", device: "/" } } } }), /driver/);
-  const ok = checkCompose({ services: { waha: { image: "devlikeapro/waha", volumes: ["s:/data"] }, glue: { build: ".", "x-dashboard": true } }, volumes: { s: {} } }, o);
-  assert.deepEqual(ok.services.waha.environment, {}, "a third-party image never sees the token");
-  assert.equal((ok.services.glue.environment as Record<string, string>).DASH_TOKEN, "t");
-  assert.deepEqual(ok.services.glue.networks, ["dashboard"]);
-  assert.equal(fillVars("${SETTING_A} costs $5", { SETTING_A: "x$" }), "x$$ costs $$5");
+  const ok = checkCompose({ services: { "wa-waha": { image: "devlikeapro/waha", volumes: ["s:/data"] }, "wa-glue": { build: ".", "x-dashboard": true } }, volumes: { s: {} } }, o);
+  assert.deepEqual(ok.services["wa-waha"].environment, {}, "a third-party image never sees the token");
+  assert.equal((ok.services["wa-glue"].environment as Record<string, string>).DASH_TOKEN, "t");
+  assert.deepEqual(ok.services["wa-glue"].networks, ["dashboard"]);
+  assert.equal(fillVars("${SETTING_A} costs $5, $$HOME", { SETTING_A: "x$" }), "x$$ costs $$5, $$HOME");
+  assert.equal(fillVars("${DASH_TOKEN}", { DASH_TOKEN: "t" }), "$${DASH_TOKEN}", "the token is never a placeholder");
+  assert.throws(bad({ environment: { BOT_TOKEN: null } }), /needs a value/, "nothing inherited from the runner");
+  assert.throws(bad({ environment: ["BOT_TOKEN"] }), /NAME=value/);
+  assert.throws(bad({ build: { context: ".", args: ["BOT_TOKEN"] } }), /NAME=value/);
+  assert.throws(bad({ build: { context: "./..", dockerfile: "x" } }), /own folder/);
+  assert.throws(bad({ build: { context: ".", dockerfile: "/proc/self/environ" } }), /file name inside/);
+  const tagged = checkCompose({ services: { "wa-x": { build: ".", image: "grok-bot-dashboard-runner" } } }, o);
+  assert.equal(tagged.services["wa-x"].image, "gd-wa-wa-x:latest", "a build can't overwrite another image");
 });
 
-// ---------- A real add-on, installed from a fake store and run as its own process ----------
+// ---------- A real add-on, installed from a fake store ----------
 
 const ADDON = `
 const base = process.env.DASH_URL, token = process.env.DASH_TOKEN;
@@ -83,6 +92,7 @@ const call = async (method, p, body) => {
 };
 const settings = JSON.parse(process.env.ADDON_SETTINGS);
 await call("POST", "/api/bot/items", { key: "hello", kind: "reminder", title: "Hello " + settings.name, bot: "someone-else" });
+await call("POST", "/api/bot/items", { items: [{ key: "spoof", kind: "reminder", title: "Posing", bot: "victim" }] });
 await call("PUT", "/api/bot/panel", { title: "Parcels", blocks: [{ type: "text", text: "2 on the way" }] });
 const read = await call("GET", "/api/addon/messages");
 const env = Object.keys(process.env).filter((k) => !["DASH_URL","DASH_TOKEN","ADDON_ID","ADDON_DATA","ADDON_SETTINGS","TZ","NODE_ENV"].includes(k));
@@ -92,7 +102,7 @@ await call("PUT", "/api/addon/status", { text: "read=" + read + " env=" + env.jo
 setInterval(() => {}, 1000);
 `;
 
-test("add-ons: install from a store, run locked down, trust changes what they reach, removal closes their cards", async () => {
+async function setupAddons(o: { runner?: boolean } = {}) {
   const dataDir = fs.mkdtempSync(path.join(os.tmpdir(), "gbd-addons-"));
   const store = new Store(":memory:");
   const config = loadConfig({ OWNER_LOGIN: "o@x.com", BOT_TOKEN: "test-token-123", TZ: "Europe/Rome", DATA_DIR: dataDir });
@@ -100,6 +110,10 @@ test("add-ons: install from a store, run locked down, trust changes what they re
     "store.json": JSON.stringify({ items: [{ id: "parcels", name: "Parcels", type: "addon", path: "addons/parcels", description: "Where your parcels are" }] }),
     "addons/parcels/addon.json": JSON.stringify({ id: "parcels", name: "Parcels", type: "addon", entry: "index.mjs", asks: ["messages"], settings: [{ key: "name", label: "Name", required: true }] }),
     "addons/parcels/index.mjs": ADDON,
+    "addons/grok/addon.json": JSON.stringify({ id: "dashboard", name: "Fake", type: "addon", entry: "index.mjs" }),
+    "addons/grok/index.mjs": "",
+    "addons/calendar/addon.json": JSON.stringify({ id: "calendar", name: "Calendar", type: "addon", entry: "index.mjs" }),
+    "addons/calendar/index.mjs": "setInterval(() => {}, 1000);",
   };
   const sha = "abc1234def";
   const fake = (async (input: URL | RequestInfo) => {
@@ -107,60 +121,122 @@ test("add-ons: install from a store, run locked down, trust changes what they re
     const json = (v: unknown) => new Response(JSON.stringify(v));
     if (url.endsWith("/repos/owner/store")) return json({ default_branch: "main" });
     if (url.includes("/repos/owner/store/commits")) return json([{ sha, commit: { message: "Add parcels", committer: { date: "2026-10-16T00:00:00Z" } } }]);
-    if (url === `https://raw.githubusercontent.com/owner/store/${sha}/store.json`) return new Response(files["store.json"]);
-    if (url === `https://raw.githubusercontent.com/owner/store/${sha}/addons/parcels/addon.json`) return new Response(files["addons/parcels/addon.json"]);
+    const raw = /raw\.githubusercontent\.com\/owner\/store\/[^/]+\/(.+)$/.exec(url);
+    if (raw && raw[1] in files) return new Response(files[raw[1] as keyof typeof files]);
     if (url === `https://codeload.github.com/owner/store/tar.gz/${sha}`) return new Response(new Uint8Array(tarGz(files)));
     return new Response("not found", { status: 404 });
   }) as typeof fetch;
+  const deploys: { id: string; compose: Record<string, unknown>; files: Record<string, string>; env: Record<string, string> }[] = [];
+  const downs: string[] = [];
+  const runner = {
+    deploy: async (id: string, compose: unknown, files: Record<string, string>, env: Record<string, string>) => { deploys.push({ id, compose: compose as Record<string, unknown>, files, env }); return "started"; },
+    down: async (id: string) => { downs.push(id); return "down"; },
+    status: async () => "", logs: async () => "",
+  };
   const server = http.createServer();
   await new Promise<void>((r) => server.listen(0, "127.0.0.1", r));
   const base = `http://127.0.0.1:${(server.address() as AddressInfo).port}`;
-  const addons = createAddons({ store, dataDir, localUrl: base, appUrl: base, tz: "Europe/Rome", log: () => {}, github: new GitHub(fake) });
+  const addons = createAddons({
+    store, dataDir, localUrl: base, appUrl: base, tz: "Europe/Rome", log: () => {}, github: new GitHub(fake),
+    untrustedSafe: true, runner: o.runner === false ? null : runner, reserved: () => ["dashboard"],
+  });
   server.on("request", createApp({ config: { ...config, authMode: "none" }, store, addons, log: () => {} }));
   const ui = async (method: string, p: string, body?: unknown) => {
     const res = await fetch(base + p, { method, headers: body ? { "Content-Type": "application/json" } : {}, body: body ? JSON.stringify(body) : undefined });
     return { status: res.status, body: await res.json() };
   };
+  const asAddon = async (token: string, method: string, p: string, body?: unknown) =>
+    (await fetch(base + p, { method, headers: { Authorization: `Bearer ${token}`, ...(body ? { "Content-Type": "application/json" } : {}) }, body: body ? JSON.stringify(body) : undefined })).status;
   const until = async (fn: () => boolean, what: string) => {
     for (let i = 0; i < 100 && !fn(); i++) await new Promise((r) => setTimeout(r, 50));
     assert.ok(fn(), what);
   };
-  try {
-    addons.setStores(["owner/store"]);
-    const cat = (await ui("GET", "/api/ui/addons/catalog")).body;
-    assert.deepEqual(cat.entries.map((e: { id: string; installed: boolean }) => [e.id, e.installed]), [["parcels", false]]);
-    assert.deepEqual((await ui("GET", "/api/ui/addons/peek?source=owner/store/addons/parcels")).body.asks, ["messages"]);
-    assert.equal((await ui("POST", "/api/ui/addons/install", { source: "https://github.com/owner/store/tree/main/addons/parcels", settings: {} })).status, 400, "a required setting is missing");
-    assert.equal((await ui("POST", "/api/ui/addons/install", { source: "https://github.com/owner/store/tree/main/addons/parcels", settings: { name: "Tost" } })).status, 200);
-    await until(() => store.getAddon("parcels")!.status.startsWith("read="), "the add-on reported its status");
-    const card = store.getItemByKey("parcels", "hello")!;
-    assert.equal(card.title, "Hello Tost", "it posted as itself, whatever it claimed");
-    assert.equal(store.getPanel("parcels")!.title, "Parcels");
-    assert.equal(store.getAddon("parcels")!.status, "read=403 env= etc=blocked", "untrusted: no messages; no dashboard environment; no files outside its folder");
-    assert.equal(store.getBot("parcels")!.kind, "addon");
-
-    // You close its card: it hears about it as a "closed" action.
-    await ui("POST", `/api/ui/items/${card.id}/act`, { type: "dismiss" });
-    store.promoteDue("parcels");
-    assert.equal(store.claimActions("parcels")[0]?.type, "closed");
-
-    // Trusted, it restarts with a new token and may read messages.
-    const oldHash = store.getAddon("parcels")!.tokenHash;
-    assert.equal((await ui("PUT", "/api/ui/addons/parcels", { trusted: true })).status, 200);
-    await until(() => store.getAddon("parcels")!.tokenHash !== oldHash && store.getAddon("parcels")!.status.startsWith("read=200"), "trusted add-on reads messages");
-    const view = (await ui("GET", "/api/ui/addons")).body.installed[0];
-    assert.deepEqual([view.trusted, view.running, view.settings[0].value], [true, true, "Tost"]);
-
-    // Removal stops it, kills its token and closes its open cards.
-    await store.upsertItem({ bot: "parcels", key: "open-one", section: "needs", kind: "reminder", title: "Parcel at the locker" });
-    assert.equal((await ui("DELETE", "/api/ui/addons/parcels", {})).status, 200);
-    assert.equal(store.getAddon("parcels"), null);
-    assert.equal(store.getItemByKey("parcels", "open-one")!.status, "closed");
-  } finally {
+  const stop = async () => {
     await addons.stopAll();
     server.closeAllConnections();
     server.close();
     store.close();
     fs.rmSync(dataDir, { recursive: true, force: true });
+  };
+  addons.setStores(["owner/store"]);
+  return { store, addons, ui, asAddon, until, stop, deploys, downs };
+}
+
+const PARCELS = "https://github.com/owner/store/tree/main/addons/parcels";
+
+test("add-ons: an untrusted one runs in a container of its own and reaches only its own things", async () => {
+  const t = await setupAddons();
+  try {
+    const cat = (await t.ui("GET", "/api/ui/addons/catalog")).body;
+    assert.deepEqual(cat.entries.map((e: { id: string; installed: boolean }) => [e.id, e.installed]), [["parcels", false]]);
+    assert.deepEqual((await t.ui("GET", "/api/ui/addons/peek?source=owner/store/addons/parcels")).body.asks, ["messages"]);
+    assert.equal((await t.ui("POST", "/api/ui/addons/install", { source: PARCELS, settings: {} })).status, 400, "a required setting is missing");
+    assert.equal((await t.ui("POST", "/api/ui/addons/install", { source: PARCELS, settings: { name: "Tost" } })).status, 200);
+    const [d] = t.deploys;
+    const svc = (d.compose.services as Record<string, Record<string, unknown>>).parcels;
+    assert.deepEqual([d.id, svc["x-dashboard"], (svc.build as { dockerfile: string }).dockerfile], ["parcels", true, "Dockerfile.grokdash"]);
+    assert.match(Buffer.from(d.files["Dockerfile.grokdash"], "base64").toString(), /USER node[\s\S]*\/addon\/index\.mjs/);
+    assert.equal(Buffer.from(d.files["index.mjs"], "base64").toString(), ADDON, "files go byte for byte");
+    const token = d.env.DASH_TOKEN;
+    // Its token reaches its own cards and panel, nothing else.
+    assert.equal(await t.asAddon(token, "POST", "/api/bot/items", { items: [{ key: "spoof", kind: "reminder", title: "Posing", bot: "victim" }] }), 200);
+    assert.equal(t.store.getItemByKey("victim", "spoof"), null, "not even inside a batch");
+    assert.equal(t.store.getItemByKey("parcels", "spoof")!.title, "Posing");
+    assert.equal(await t.asAddon(token, "GET", "/api/addon/messages"), 403);
+    assert.equal(await t.asAddon(token, "POST", "/api/bot/handoffs", { to: "secretary", text: "x" }), 403);
+    assert.equal(await t.asAddon(token, "GET", "/api/ui/state"), 200, "authMode none here; with OWNER_VIA=gateway it'd be refused");
+    // You close its card: it hears about it as a "closed" action.
+    const card = t.store.getItemByKey("parcels", "spoof")!;
+    await t.ui("POST", `/api/ui/items/${card.id}/act`, { type: "dismiss" });
+    t.store.promoteDue("parcels");
+    assert.equal(t.store.claimActions("parcels")[0]?.type, "closed");
+  } finally {
+    await t.stop();
+  }
+});
+
+test("add-ons: a trusted one runs as a locked-down process, and removal closes its cards", async () => {
+  const t = await setupAddons();
+  try {
+    assert.equal((await t.ui("POST", "/api/ui/addons/install", { source: PARCELS, settings: { name: "Tost" }, trusted: true })).status, 200);
+    assert.equal(t.deploys.length, 0, "no container for a trusted add-on");
+    await t.until(() => t.store.getAddon("parcels")!.status.startsWith("read="), "the add-on reported its status");
+    assert.equal(t.store.getItemByKey("parcels", "hello")!.title, "Hello Tost", "it posted as itself, whatever it claimed");
+    assert.equal(t.store.getItemByKey("victim", "spoof"), null);
+    assert.equal(t.store.getPanel("parcels")!.title, "Parcels");
+    assert.equal(t.store.getAddon("parcels")!.status, "read=200 env= etc=blocked", "trusted: reads messages; still none of the dashboard's environment or files");
+    // Untrusted now: it stops as a process and moves into a container with a new token.
+    const oldHash = t.store.getAddon("parcels")!.tokenHash;
+    assert.equal((await t.ui("PUT", "/api/ui/addons/parcels", { trusted: false })).status, 200);
+    assert.equal(t.deploys.length, 1);
+    assert.notEqual(t.store.getAddon("parcels")!.tokenHash, oldHash);
+    t.store.upsertItem({ bot: "parcels", key: "open-one", section: "needs", kind: "reminder", title: "Parcel at the locker" });
+    assert.equal((await t.ui("DELETE", "/api/ui/addons/parcels", {})).status, 200);
+    assert.deepEqual(t.downs, ["parcels"], "its container stops");
+    assert.equal(t.store.getAddon("parcels"), null);
+    assert.equal(t.store.getItemByKey("parcels", "open-one")!.status, "closed");
+  } finally {
+    await t.stop();
+  }
+});
+
+test("add-ons: reserved names, Grok bots' names, and taking over existing cards only when trusted", async () => {
+  const t = await setupAddons();
+  try {
+    const install = (p: string, trusted: boolean) => t.ui("POST", "/api/ui/addons/install", { source: `owner/store/addons/${p}`, trusted });
+    assert.match((await install("grok", true)).body.error, /taken by the dashboard/);
+    t.store.ensureBot("calendar"); // events the dashboard read itself before
+    assert.match((await install("calendar", false)).body.error, /only a trusted add-on/);
+    assert.equal((await install("calendar", true)).status, 200, "trusted, it carries the calendar's events on");
+    t.store.touchBot("venduto");
+    t.store.configureBot("venduto", {});
+  } finally {
+    await t.stop();
+  }
+  const u = await setupAddons({ runner: false });
+  try {
+    assert.match((await u.ui("POST", "/api/ui/addons/install", { source: PARCELS, settings: { name: "x" } })).body.error, /needs the runner/);
+  } finally {
+    await u.stop();
   }
 });

@@ -1,10 +1,12 @@
 // Installs, updates and runs add-ons and apps from stores (GitHub repos with a store.json).
 //
-// An add-on is a script the dashboard runs in its own Node process, under Node's permission model:
-// it reads only its own folder, writes only its data folder, and can't start other programs.
-// It gets the dashboard's address, a token and its settings, and nothing else from the environment.
-// An app is a set of containers the runner starts (see runner/). Both talk to the dashboard over
-// the bot API with their token, and untrusted ones can only reach their own cards, panel and status.
+// An add-on is a script. A trusted one runs as a Node process next to the dashboard, under Node's
+// permission model, which stops mistakes (reading files elsewhere, starting programs) but not
+// determined malicious code: trust only what you'd run on this machine yourself. An untrusted one
+// runs in a container of its own, built from its folder and started by the runner, where it reaches
+// nothing of the dashboard but its API. An app is a set of containers the runner starts (see runner/).
+// All of them talk to the dashboard over the bot API with a token of their own, and untrusted ones
+// reach only their own cards, panel, agenda, to-dos and status.
 
 import fs from "node:fs";
 import path from "node:path";
@@ -16,6 +18,7 @@ import { filesUnder } from "./tar.ts";
 import { checkSettings, parseManifest, type Manifest } from "./manifest.ts";
 
 export const DEFAULT_STORE = "SuperTost100/grokdash-store";
+const UNSAFE = "Outside the Docker setup the dashboard can't tell your browser from an add-on, so an untrusted one could act as you. Trust it, or run the dashboard with Docker Compose.";
 const CATALOG_TTL_MS = 10 * 60_000;
 const UPDATE_EVERY_MS = 12 * 3_600_000;
 const BACKOFF_MS = [5_000, 30_000, 120_000, 600_000];
@@ -58,6 +61,13 @@ export function createAddons(o: {
   log: (msg: string) => void;
   github?: GitHub;
   runner?: Runner | null;
+  /**
+   * Whether the dashboard can tell your browser from an add-on (OWNER_VIA=gateway in the Docker setup).
+   * Without that, an add-on could pose as you, so only trusted ones may be installed.
+   */
+  untrustedSafe?: boolean;
+  /** Names an add-on can never take: the Grok bot that does triage, the dashboard's own services. */
+  reserved?: () => string[];
 }) {
   const { store, log } = o;
   const github = o.github ?? new GitHub();
@@ -157,9 +167,14 @@ export function createAddons(o: {
     const m = got.manifest;
     const existing = store.getAddon(m.id);
     if (existing) throw new Error(`${m.name} is already installed. Update it instead.`);
+    if (["dashboard", "runner", ...(o.reserved?.() ?? [])].includes(m.id)) throw new Error(`"${m.id}" is taken by the dashboard itself.`);
     const bot = store.getBot(m.id);
-    if (bot && bot.kind === "bot") throw new Error(`A bot is already called "${m.id}".`);
-    if (m.type === "app" && !o.runner) throw new Error(`${m.name} runs its own containers, and the runner isn't set up.`);
+    // A Grok bot that has ever talked to the dashboard keeps its name. Only a trusted add-on may take
+    // over a name that already has cards or events (like PoliTO's or the calendar's), to carry them on.
+    if (bot && bot.kind === "bot" && (bot.lastSeenAt || bot.webhookUrl)) throw new Error(`A bot is already called "${m.id}".`);
+    if (bot && !opts.trusted) throw new Error(`"${m.id}" already has cards or events here, so only a trusted add-on may take it over.`);
+    if ((m.type === "app" || !opts.trusted) && !o.runner) throw new Error(`${m.name} needs the runner service${m.type === "app" ? "" : " to run untrusted"}, and it isn't set up.`);
+    if (!opts.trusted && !o.untrustedSafe) throw new Error(UNSAFE);
     const settings = checkSettings(m.settings, opts.settings);
     writeFiles(m.id, got.files);
     registerOwner(m);
@@ -178,9 +193,10 @@ export function createAddons(o: {
     const a = mustGet(id);
     const got = await fetchFolder({ repo: a.repo, branch: a.branch, path: a.path });
     if (got.manifest.id !== id) throw new Error(`The folder now holds "${got.manifest.id}", not "${id}". Remove and install it instead.`);
+    if (got.manifest.type !== a.type) throw new Error(`${got.manifest.name} changed from ${a.type} to ${got.manifest.type}. Remove and install it instead.`);
     // New required settings with no value yet stop the update here, before anything changes.
     const settings = checkSettings(got.manifest.settings, a.settings, a.settings);
-    await stop(id);
+    await stop(id, a);
     writeFiles(id, got.files);
     registerOwner(got.manifest);
     store.saveAddon({ ...a, manifest: got.manifest, type: got.manifest.type, sha: got.sha, pathSha: got.pathSha, settings, updateSha: "", updateNotes: [], checkedAt: store.now(), updatedAt: store.now() });
@@ -191,8 +207,8 @@ export function createAddons(o: {
 
   async function remove(id: string, purge = false) {
     const a = mustGet(id);
-    await stop(id);
-    if (a.type === "app" && o.runner) note(id, await o.runner.down(id, purge).catch((e: Error) => `runner: ${e.message}`));
+    await stop(id, a);
+    if (purge && inContainer(a) && o.runner) note(id, await o.runner.down(id, true).catch((e: Error) => `runner: ${e.message}`));
     fs.rmSync(path.join(root, id, "code"), { recursive: true, force: true });
     if (purge) fs.rmSync(path.join(root, id), { recursive: true, force: true });
     store.deletePanel(id);
@@ -203,13 +219,18 @@ export function createAddons(o: {
 
   async function configure(id: string, patch: { trusted?: boolean; enabled?: boolean; settings?: Record<string, unknown> }) {
     const a = mustGet(id);
+    if (patch.trusted === false && !o.untrustedSafe) throw new Error(UNSAFE);
     const settings = patch.settings ? checkSettings(manifestOf(a).settings, patch.settings, a.settings) : a.settings;
-    store.saveAddon({ ...a, trusted: patch.trusted ?? a.trusted, enabled: patch.enabled ?? a.enabled, settings, updatedAt: store.now() });
-    await stop(id);
+    if (patch.trusted === false && a.type === "addon" && !o.runner) throw new Error("Untrusted add-ons run in a container of their own, and the runner isn't set up.");
+    // Stopped the way it ran before the change: trust moves an add-on between a process and a container.
+    await stop(id, a);
+    store.saveAddon({ ...store.getAddon(id)!, trusted: patch.trusted ?? a.trusted, enabled: patch.enabled ?? a.enabled, settings, updatedAt: store.now() });
     if (patch.enabled ?? a.enabled) await start(id);
     else store.setAddonStatus(id, "Turned off", true);
     return store.getAddon(id)!;
   }
+
+  const inContainer = (a: AddonRow) => a.type === "app" || !a.trusted;
 
   function mustGet(id: string) {
     const a = store.getAddon(id);
@@ -229,14 +250,27 @@ export function createAddons(o: {
     if (!a.enabled) return;
     const m = manifestOf(a);
     const { code, data } = dirs(id);
-    if (a.type === "app") {
-      if (!o.runner) return store.setAddonStatus(id, "The runner isn't set up, so this app can't start.", false);
+    if (inContainer(a)) {
+      if (!o.runner) return store.setAddonStatus(id, "The runner isn't set up, so this can't start.", false);
       const token = newToken(a);
+      // Sent as base64, so images and other binary files arrive byte for byte.
       const files: Record<string, string> = {};
-      for (const f of walk(code)) files[f] = fs.readFileSync(path.join(code, f), "utf8");
+      for (const f of walk(code)) files[f] = fs.readFileSync(path.join(code, f)).toString("base64");
+      let compose: unknown;
+      if (a.type === "app") compose = JSON.parse(fs.readFileSync(path.join(code, m.compose), "utf8"));
+      else {
+        // An untrusted add-on: the same script, in a stock Node container of its own.
+        files["Dockerfile.grokdash"] = Buffer.from(
+          `FROM node:24-alpine\nWORKDIR /addon\nCOPY . .\nRUN mkdir -p /data && chown node:node /data\nUSER node\nCMD ["node", "/addon/${m.entry}"]\n`,
+        ).toString("base64");
+        compose = {
+          services: { [id]: { build: { context: ".", dockerfile: "Dockerfile.grokdash" }, "x-dashboard": true, volumes: ["data:/data"], mem_limit: "256m" } },
+          volumes: { data: {} },
+        };
+      }
       try {
-        const out = await o.runner.deploy(id, JSON.parse(files[m.compose]), files, {
-          DASH_URL: o.appUrl, DASH_TOKEN: token, ADDON_ID: id, TZ: o.tz, ADDON_SETTINGS: JSON.stringify(a.settings),
+        const out = await o.runner.deploy(id, compose, files, {
+          DASH_URL: o.appUrl, DASH_TOKEN: token, ADDON_ID: id, ADDON_DATA: "/data", TZ: o.tz, ADDON_SETTINGS: JSON.stringify(a.settings), NODE_ENV: "production",
           ...Object.fromEntries(Object.entries(a.settings).map(([k, v]) => [`SETTING_${k.toUpperCase()}`, String(v)])),
         });
         note(id, out.trim().split("\n").slice(-5).join(" / "));
@@ -282,7 +316,11 @@ export function createAddons(o: {
     note(id, `started ${m.entry}`);
   }
 
-  async function stop(id: string) {
+  /** Stop it the way it was running: its process, or its containers (their volumes stay). */
+  async function stop(id: string, row = store.getAddon(id)) {
+    if (row && inContainer(row) && o.runner && row.tokenHash) {
+      note(id, await o.runner.down(id, false).catch((e: Error) => `runner: ${e.message}`));
+    }
     const p = procs.get(id);
     if (p) {
       p.stopping = true;
@@ -318,12 +356,14 @@ export function createAddons(o: {
     }
   }
 
+  /** Trusted add-ons run as processes of this one, so they start with it. Containers keep running on their own. */
   async function startAll() {
-    for (const a of store.listAddons()) if (a.enabled && a.type === "addon") await start(a.id);
+    for (const a of store.listAddons()) if (a.enabled && !inContainer(a)) await start(a.id);
   }
 
+  /** At shutdown: processes stop and their tokens die; containers keep running and keep theirs. */
   async function stopAll() {
-    await Promise.all([...procs.keys()].map(stop));
+    await Promise.all([...procs.keys()].map((id) => stop(id, null)));
   }
 
   function view() {

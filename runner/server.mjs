@@ -1,27 +1,30 @@
 // The runner: starts, updates and removes apps for the dashboard. It's the only container with the
-// Docker socket. It listens on the dashboard's private network only, answers only the dashboard
-// (a token derived from BOT_TOKEN), and starts nothing that fails validate.mjs.
+// Docker socket. It sits on a network only the dashboard shares, answers only the key it made at its
+// first start (in a volume only the dashboard also mounts), and starts nothing that fails validate.mjs.
 
 import http from "node:http";
 import fs from "node:fs";
 import path from "node:path";
 import { execFile } from "node:child_process";
-import { timingSafeEqual } from "node:crypto";
-import { checkCompose, fillVars, runnerToken } from "./validate.mjs";
+import { randomBytes, timingSafeEqual } from "node:crypto";
+import { checkCompose, fillVars } from "./validate.mjs";
 
 const APPS = process.env.APPS_DIR ?? "/apps";
 const NETWORK = process.env.APP_NETWORK ?? "grokdash";
 const PORT = Number(process.env.PORT ?? 8790);
-if (!process.env.BOT_TOKEN) {
-  console.error("runner: BOT_TOKEN is missing, so the dashboard couldn't prove who it is. Stopping.");
-  process.exit(1);
+const KEY_FILE = process.env.KEY_FILE ?? "/keys/runner.key";
+if (!fs.existsSync(KEY_FILE)) {
+  fs.mkdirSync(path.dirname(KEY_FILE), { recursive: true });
+  fs.writeFileSync(KEY_FILE, randomBytes(32).toString("hex"), { mode: 0o644 });
 }
-const TOKEN = Buffer.from(`Bearer ${await runnerToken(process.env.BOT_TOKEN)}`);
+const TOKEN = Buffer.from(`Bearer ${fs.readFileSync(KEY_FILE, "utf8").trim()}`);
+// Docker and Compose get only what they need, so nothing can be filled in from here.
+const DOCKER_ENV = { PATH: process.env.PATH ?? "/usr/local/bin:/usr/bin:/bin", HOME: "/root" };
 const ID = /^[a-z][a-z0-9-]{1,30}$/;
 
 function docker(args, cwd, timeoutMs = 15 * 60_000) {
   return new Promise((resolve, reject) => {
-    execFile("docker", args, { cwd, timeout: timeoutMs, maxBuffer: 8 * 1024 * 1024 }, (err, stdout, stderr) => {
+    execFile("docker", args, { cwd, env: DOCKER_ENV, timeout: timeoutMs, maxBuffer: 8 * 1024 * 1024 }, (err, stdout, stderr) => {
       const out = `${stdout}${stderr}`.trim();
       if (err) reject(new Error(out.split("\n").slice(-8).join("\n") || err.message));
       else resolve(out);
@@ -37,19 +40,18 @@ async function deploy(id, body) {
   const escaped = Object.fromEntries(Object.entries(env).map(([k, v]) => [k, String(v).replaceAll("$", "$$$$")]));
   const checked = checkCompose(fillVars(body.compose, env), { id, network: NETWORK, env: escaped });
   const dir = path.join(APPS, id);
-  fs.mkdirSync(dir, { recursive: true });
-  // The app's own folder, for builds from ".". Nothing may land outside it.
+  const src = path.join(dir, "src");
+  // A fresh copy of the app's folder each time, so files removed from the repo are gone here too.
+  fs.rmSync(src, { recursive: true, force: true });
+  fs.mkdirSync(src, { recursive: true });
   for (const [rel, content] of Object.entries(body.files ?? {})) {
-    const file = path.resolve(dir, "src", rel);
-    if (!file.startsWith(path.join(dir, "src") + path.sep)) throw new Error(`Refused a file outside the app folder: ${rel}`);
+    const file = path.resolve(src, rel);
+    if (!file.startsWith(src + path.sep)) throw new Error(`Refused a file outside the app folder: ${rel}`);
     fs.mkdirSync(path.dirname(file), { recursive: true });
-    fs.writeFileSync(file, String(content));
+    fs.writeFileSync(file, Buffer.from(String(content), "base64"));
   }
   for (const svc of Object.values(checked.services)) {
-    if (!svc.build) continue;
-    const b = typeof svc.build === "string" ? { context: svc.build } : svc.build;
-    if (!b.context.startsWith("https://")) b.context = path.join("src", b.context);
-    svc.build = b;
+    if (svc.build && !svc.build.context.startsWith("https://")) svc.build.context = path.join("src", svc.build.context);
   }
   fs.writeFileSync(path.join(dir, "compose.json"), JSON.stringify(checked, null, 2));
   return compose(id, "up", "-d", "--build", "--remove-orphans");
