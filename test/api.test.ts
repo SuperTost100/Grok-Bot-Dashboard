@@ -67,7 +67,8 @@ async function call(method: string, path: string, body?: unknown, who: Who = "ow
 
 const bot = (method: string, path: string, body?: unknown, name = "dashboard") => call(method, path, body, { bot: name });
 const state = async () => (await call("GET", "/api/ui/state")).body;
-const card = async (id: number) => (await state()).needs.find((i: { id: number }) => i.id === id);
+// Plain reminders read as catch-up lines; these tests follow a card wherever it shows.
+const card = async (id: number) => { const st = await state(); return [...st.needs, ...st.catchup].find((i: { id: number }) => i.id === id); };
 // Like the page: answers carry the revision of the card on screen.
 const act = (id: number, body: Record<string, unknown>) =>
   call("POST", `/api/ui/items/${id}/act`, ["choose", "send", "write"].includes(String(body.type)) && body.rev === undefined ? { ...body, rev: s.store.getItem(id)?.rev } : body);
@@ -715,5 +716,88 @@ test("direct Todoist: the next occurrence of a recurring task can be completed",
     server.closeAllConnections();
     server.close();
     store.close();
+  }
+});
+
+// ---------- Decluttering ----------
+
+test("Needs you keeps questions, drafts and urgent cards; news reads as catch-up and can be marked read", async () => {
+  const { body: r } = await bot("POST", "/api/bot/items", { items: [
+    { key: "dc-q", kind: "choice", title: "Lunch?", options: ["Yes"] },
+    { key: "dc-news", kind: "reminder", title: "Your parcel shipped" },
+    { key: "dc-urgent", kind: "reminder", title: "Pay the fine today", urgent: "today" },
+  ] });
+  const [q, news, urgent] = r.results.map((x: { id: number }) => x.id);
+  const st = await state();
+  const ids = (l: { id: number }[]) => l.map((i) => i.id);
+  assert.ok(ids(st.needs).includes(q) && ids(st.needs).includes(urgent));
+  assert.ok(!ids(st.needs).includes(news) && ids(st.catchup).includes(news));
+  assert.equal((await act(q, { type: "read" })).status, 400, "questions can't be read away");
+  const read = await call("POST", "/api/ui/read", { ids: [news, q] });
+  assert.equal(read.status, 200);
+  assert.equal(s.store.getItem(news)!.closedReason, "read");
+  assert.equal(s.store.getItem(q)!.status, "open", "the question in the same call is left alone");
+  assert.equal((await call("POST", "/api/ui/read", { ids: ["x"] })).status, 400);
+});
+
+test("expiry counts from when the page showed it, and stops while you're away", async () => {
+  const { body: r } = await bot("POST", "/api/bot/items", { items: [
+    { key: "ex-news", kind: "reminder", title: "Gym closed Monday" },
+    { key: "ex-q", kind: "choice", title: "Dinner Friday?", options: ["Yes"] },
+    { key: "ex-past", kind: "reminder", title: "Concert tonight", expires: "2026-10-12T21:00:00+02:00" },
+  ] });
+  const [news, q, past] = r.results.map((x: { id: number }) => x.id);
+  const start = clock;
+  try {
+    clock += 3 * 86_400_000;
+    await state();
+    assert.equal(s.store.getItem(news)!.status, "open", "never shown: it waits for you");
+    assert.equal(s.store.getItem(past)!.resolution, "Out of date");
+    await call("POST", "/api/ui/seen", { ids: [news, q] });
+    clock += 23 * 3_600_000;
+    await state();
+    assert.equal(s.store.getItem(news)!.status, "open");
+    // Away for a week: nothing goes, and the clock restarts on the way back.
+    await call("PUT", "/api/ui/away", { until: clock + 7 * 86_400_000 });
+    assert.equal((await state()).away.active, true);
+    clock += 7 * 86_400_000 + 1000;
+    const back = await state();
+    assert.deepEqual([back.away.active, back.away.back], [false, true]);
+    assert.equal(s.store.getItem(news)!.status, "open", "back from away: a fresh day");
+    clock += 86_400_000;
+    await state();
+    assert.equal(s.store.getItem(news)!.resolution, "Expired unread");
+    assert.equal(s.store.getItem(q)!.status, "open", "questions get three days");
+    clock += 2 * 86_400_000;
+    await state();
+    assert.equal(s.store.getItem(q)!.resolution, "Expired without an answer");
+    await call("POST", "/api/ui/away/summarized", {});
+    assert.equal((await state()).away.back, false);
+    assert.equal((await call("PUT", "/api/ui/away", { until: clock - 1 })).status, 400);
+    // A day means through the end of that day in the dashboard's time zone.
+    await call("PUT", "/api/ui/away", { until: localStamp(new Date(clock + 2 * 86_400_000), "Europe/Rome").slice(0, 10) });
+    const until = (await state()).away.until;
+    assert.equal(localStamp(new Date(until), "Europe/Rome").slice(11, 16), "00:00");
+    await call("DELETE", "/api/ui/away", {});
+    assert.equal((await state()).away.active, false);
+  } finally {
+    clock = start;
+    s.store.setAway(null);
+  }
+});
+
+test("new content on an expired card brings it back with a fresh clock", async () => {
+  await bot("POST", "/api/bot/items", { key: "ex-again", kind: "digest", title: "Lab group", body: "a" });
+  const id = s.store.getItemByKey("dashboard", "ex-again")!.id;
+  const start = clock;
+  try {
+    await call("POST", "/api/ui/seen", { ids: [id] });
+    clock += 86_400_000 + 1;
+    await state();
+    assert.equal(s.store.getItem(id)!.closedReason, "expired");
+    await bot("POST", "/api/bot/items", { key: "ex-again", kind: "digest", title: "Lab group", body: "b" });
+    assert.deepEqual([s.store.getItem(id)!.status, s.store.getItem(id)!.seenAt], ["open", null]);
+  } finally {
+    clock = start;
   }
 });

@@ -35,6 +35,7 @@ A card is one thing that needs the user (section `needs`) or one catch-up summar
 | `draft`      | for `draft`                | `{"to": "Sam", "channel": "WhatsApp", "text": "..."}`                                                                                                                                                                   |
 | `countLabel` | for `digest`               | Short label like `46 messages`.                                                                                                                                                                                         |
 | `reopen`     | no                         | `true` to bring back a card the user closed. Without it, posting a closed card's key does nothing and returns `"ignored": true`. Catch-up digests reopen on their own when their text changes.                          |
+| `expires`    | no                         | Date or time after which the card is out of date, like `2026-10-16` or `2026-10-16T21:00:00+02:00`. A day means the end of that day. The card goes to the archive then.                                                 |
 
 Response:
 

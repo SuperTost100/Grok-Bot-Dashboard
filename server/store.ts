@@ -44,6 +44,10 @@ export interface Item {
   updatedAt: number;
   closedAt: number | null;
   ackedAt: number | null;
+  /** When the page first showed it. Expiry counts from here, so days you don't look don't count. */
+  seenAt: number | null;
+  /** Past this time it's out of date (an event that happened), so it goes to the archive. */
+  expiresAt: number | null;
 }
 
 /** What the user approved, frozen at tap time. The bot acts on this, never on a newer version of the card. */
@@ -271,6 +275,8 @@ const MIGRATIONS: [string, string, string][] = [
   ["triage", "attempts", "INTEGER NOT NULL DEFAULT 0"],
   ["wakes", "bot", "TEXT NOT NULL DEFAULT ''"],
   ["triage", "card_key", "TEXT"],
+  ["items", "seen_at", "INTEGER"],
+  ["items", "expires_at", "INTEGER"],
 ];
 
 // An event overlaps [from, to) when it starts before `to` and is still going at `from`.
@@ -312,6 +318,8 @@ function toItem(r: Row): Item {
     updatedAt: Number(r.updated_at),
     closedAt: num(r.closed_at),
     ackedAt: num(r.acked_at),
+    seenAt: num(r.seen_at),
+    expiresAt: num(r.expires_at),
   };
 }
 
@@ -424,6 +432,7 @@ export interface ItemInput {
   countLabel?: string;
   options?: Option[];
   draft?: Draft | null;
+  expiresAt?: number | null;
   reopen?: boolean;
 }
 
@@ -640,6 +649,12 @@ export class Store {
   }
 
   /** Chats handed to Grok and not confirmed yet. */
+  /** Cards for chats Grok still has to answer (calendar chores aside): they need you even before Grok writes. */
+  awaitingGrok(): Set<number> {
+    const rows = this.db.prepare("SELECT item_id FROM triage WHERE grok IN ('queued', 'sent') AND route != 'calendar' AND item_id IS NOT NULL").all();
+    return new Set(rows.map((r) => Number((r as Row).item_id)));
+  }
+
   sentToGrok(): TriageRow[] {
     return this.db.prepare("SELECT * FROM triage WHERE grok = 'sent'").all().map((r) => toTriage(r as Row));
   }
@@ -822,17 +837,18 @@ export class Store {
         count_label: input.countLabel ?? "",
         options: JSON.stringify(input.options ?? []),
         draft: input.draft ? JSON.stringify(input.draft) : null,
+        expires_at: input.expiresAt ?? null,
       };
       const existing = input.key ? this.getItemByKey(input.bot, input.key) : null;
       if (!existing) {
         const res = this.db
           .prepare(
-            `INSERT INTO items (bot, key, section, kind, title, body, context, source, app, link, urgent, count_label, options, draft, status, created_at, updated_at)
-             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'open', ?, ?)`,
+            `INSERT INTO items (bot, key, section, kind, title, body, context, source, app, link, urgent, count_label, options, draft, expires_at, status, created_at, updated_at)
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'open', ?, ?)`,
           )
           .run(
             input.bot, input.key ?? null, fields.section, fields.kind, fields.title, fields.body, fields.context,
-            fields.source, fields.app, fields.link, fields.urgent, fields.count_label, fields.options, fields.draft, now, now,
+            fields.source, fields.app, fields.link, fields.urgent, fields.count_label, fields.options, fields.draft, fields.expires_at, now, now,
           );
         return { item: this.getItem(Number(res.lastInsertRowid))!, created: true, reopened: false, ignored: false };
       }
@@ -841,7 +857,7 @@ export class Store {
         existing.body !== fields.body || existing.context !== fields.context || existing.source !== fields.source ||
         existing.app !== fields.app || existing.link !== fields.link || existing.urgent !== fields.urgent ||
         existing.countLabel !== fields.count_label || JSON.stringify(existing.options) !== fields.options ||
-        JSON.stringify(existing.draft) !== (fields.draft ?? "null");
+        JSON.stringify(existing.draft) !== (fields.draft ?? "null") || existing.expiresAt !== fields.expires_at;
       let reopen = false;
       if (existing.status === "closed") {
         reopen = input.reopen === true || (existing.section === "catchup" && changed);
@@ -851,18 +867,18 @@ export class Store {
         this.db
           .prepare(
             `UPDATE items SET section = ?, kind = ?, title = ?, body = ?, context = ?, source = ?, app = ?, link = ?, urgent = ?,
-               count_label = ?, options = ?, draft = ?, rev = rev + 1, updated_at = ?
+               count_label = ?, options = ?, draft = ?, expires_at = ?, rev = rev + 1, updated_at = ?, seen_at = NULL
              WHERE id = ?`,
           )
           .run(
             fields.section, fields.kind, fields.title, fields.body, fields.context, fields.source, fields.app, fields.link,
-            fields.urgent, fields.count_label, fields.options, fields.draft, now, existing.id,
+            fields.urgent, fields.count_label, fields.options, fields.draft, fields.expires_at, now, existing.id,
           );
       }
       if (reopen) {
         this.db
           .prepare(
-            "UPDATE items SET status = 'open', closed_at = NULL, closed_reason = '', resolution = '', error = '', acked_at = NULL, snoozed_until = NULL, updated_at = ? WHERE id = ?",
+            "UPDATE items SET status = 'open', closed_at = NULL, closed_reason = '', resolution = '', error = '', acked_at = NULL, snoozed_until = NULL, seen_at = NULL, updated_at = ? WHERE id = ?",
           )
           .run(now, existing.id);
       }
@@ -897,7 +913,7 @@ export class Store {
   reopenItem(id: number, error = "") {
     this.db
       .prepare(
-        "UPDATE items SET status = 'open', snoozed_until = NULL, closed_at = NULL, closed_reason = '', resolution = '', error = ?, acked_at = NULL WHERE id = ?",
+        "UPDATE items SET status = 'open', snoozed_until = NULL, closed_at = NULL, closed_reason = '', resolution = '', error = ?, acked_at = NULL, seen_at = NULL WHERE id = ?",
       )
       .run(error, id);
     return this.getItem(id);
@@ -907,10 +923,53 @@ export class Store {
     this.db.prepare("UPDATE items SET acked_at = ? WHERE id = ?").run(this.now(), id);
   }
 
+  /** The page showed these: their expiry clock starts now, unless it already started. */
+  markSeen(ids: number[]) {
+    const stmt = this.db.prepare("UPDATE items SET seen_at = ? WHERE id = ? AND seen_at IS NULL AND status = 'open'");
+    this.tx(() => { for (const id of ids) stmt.run(this.now(), id); });
+  }
+
+  /**
+   * File what you've had on screen long enough without acting on it, and what's out of date.
+   * The clock starts when the page first showed an item, or when you came back from Away, whichever is later.
+   */
+  expireStale(o: { infoMs: number; cardMs: number; clockFrom: number }): number {
+    const now = this.now();
+    const ids = this.db
+      .prepare(
+        `SELECT id FROM items WHERE status = 'open' AND (
+           (expires_at IS NOT NULL AND expires_at <= ?)
+           OR (seen_at IS NOT NULL AND max(seen_at, ?) <= ? - CASE WHEN kind IN ('choice', 'draft') THEN ? ELSE ? END))`,
+      )
+      .all(now, o.clockFrom, now, o.cardMs, o.infoMs)
+      .map((r) => Number((r as Row).id));
+    for (const id of ids) {
+      const item = this.getItem(id)!;
+      const past = item.expiresAt != null && item.expiresAt <= now;
+      this.closeItem(id, "expired", past ? "Out of date" : item.kind === "choice" || item.kind === "draft" ? "Expired without an answer" : "Expired unread");
+    }
+    return ids.length;
+  }
+
+  /** Away mode: from and until (epoch ms), and whether you've seen the summary since coming back. */
+  getAway(): { from: number; until: number; summarized: boolean } | null {
+    const raw = this.getState("away");
+    return raw ? JSON.parse(raw) : null;
+  }
+
+  setAway(away: { from: number; until: number; summarized: boolean } | null) {
+    this.setState("away", away ? JSON.stringify(away) : null);
+  }
+
+  isAway(): boolean {
+    const a = this.getAway();
+    return Boolean(a && a.from <= this.now() && this.now() < a.until);
+  }
+
   /** Bring snoozed items back once their time has come. */
   wakeSnoozed(): number {
     const res = this.db
-      .prepare("UPDATE items SET status = 'open', snoozed_until = NULL WHERE status = 'snoozed' AND snoozed_until <= ?")
+      .prepare("UPDATE items SET status = 'open', snoozed_until = NULL, seen_at = NULL WHERE status = 'snoozed' AND snoozed_until <= ?")
       .run(this.now());
     return Number(res.changes);
   }
@@ -939,7 +998,7 @@ export class Store {
         `SELECT * FROM items
          WHERE status IN ('open', 'pending')
             OR (status = 'closed' AND closed_reason = 'action' AND closed_at >= ? AND acked_at IS NULL)
-            OR (section = 'catchup' AND status = 'closed' AND closed_reason = 'read' AND closed_at >= ?)
+            OR (status = 'closed' AND closed_reason = 'read' AND closed_at >= ?)
          ORDER BY (urgent != '') DESC, updated_at DESC, id DESC`,
       )
       .all(since, since)

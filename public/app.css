@@ -201,7 +201,7 @@ textarea.draft-edit {
   .title-btn:focus-visible { outline: 2px solid var(--focus); outline-offset: 2px; }
   .title-btn .more { display: block; color: var(--muted); margin-top: 2px; transition: transform 150ms ease-out; }
   .card.open .title-btn .more { transform: rotate(90deg); }
-  .card:not(.open) .detail, .card:not(.open) .draft-label { display: none; }
+  .card:not(.open) .detail, .card:not(.open) .draft-label, .card:not(.open) .answers { display: none; }
   .card .detail { margin-top: 4px; }
   .card:not(.open) .draft { display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden; margin-top: 8px; }
   .card .actions { margin-top: 10px; }
@@ -457,3 +457,46 @@ details.arch + details.arch { border-top: 1px solid var(--border); }
 .qr ol { margin: 0; padding-left: 20px; font-size: 15px; line-height: 1.6; }
 .qr-expired { justify-content: space-between; }
 .qr-expired p { margin: 0; flex: 1 1 260px; font-size: 15px; color: var(--muted); }
+
+/* Declutter: a few cards at a time, one catch-up line per chat or sender */
+.more-btn { width: 100%; color: var(--muted); }
+.list-foot .btn.ghost { min-height: 32px; padding: 0 6px; font-size: 13px; }
+.sec-head .note .btn.ghost { min-height: 28px; padding: 0 8px; font-size: 13px; }
+.sec-head .note .btn.ghost svg { width: 15px; height: 15px; }
+.catch-item { margin: 10px 0 0 36px; }
+.catch-item + .catch-item { padding-top: 10px; border-top: 1px solid var(--border); }
+.catch-item .gist { margin: 0; overflow-wrap: anywhere; white-space: pre-line; }
+.catch-item .gist-title { margin: 0 0 2px; font-size: 15px; font-weight: 600; overflow-wrap: anywhere; }
+.catch-item .gist.ctx { margin-top: 4px; font-size: 14px; color: var(--muted); }
+.catch-item .actions { margin: 6px 0 0; }
+.catch-item .actions .btn.ghost { min-height: 34px; }
+.catch-item .catch-pending { margin: 8px 0 0; }
+.catch.skipped { border-top: 1px solid var(--border); }
+.catch.skipped .ttl { color: var(--muted); font-weight: 400; }
+.away-sum {
+  padding: 12px 14px; margin-bottom: 10px; border: 1px solid var(--border); border-radius: var(--radius); background: var(--surface);
+}
+.away-sum p { margin: 0; font-size: 15px; }
+.away-sum .actions { margin-top: 10px; }
+.away-sum + .list { margin-bottom: 10px; }
+
+/* Away mode */
+.away-btn.on { background: var(--primary); color: var(--on-primary); border-color: var(--primary); }
+.away-menu, .away-bar {
+  max-width: 1200px; margin: 12px max(16px, calc((100% - 1200px) / 2)) 0; padding: 12px 14px;
+  border: 1px solid var(--border); border-radius: var(--radius); background: var(--surface); font-size: 15px;
+}
+.away-menu[hidden], .away-bar[hidden] { display: none; }
+.away-menu p { margin: 0 0 10px; color: var(--muted); }
+.away-menu p strong { color: var(--text); }
+.away-pick { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; }
+.away-date { display: inline-flex; align-items: center; gap: 8px; font-size: 14px; color: var(--muted); }
+.away-date input {
+  min-height: 40px; padding: 0 10px; border-radius: 10px; border: 1px solid var(--border-strong); background: var(--surface); font-size: 16px; color: var(--text);
+}
+.away-bar { display: flex; align-items: center; gap: 12px; flex-wrap: wrap; }
+.away-bar span { flex: 1 1 240px; }
+@media (max-width: 999px) {
+  .away-btn { width: 44px; height: 44px; padding: 0; justify-content: center; }
+  .away-btn .lbl { display: none; }
+}

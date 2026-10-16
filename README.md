@@ -33,7 +33,9 @@ There's no account to create and nothing to pay for beyond the Grok Bot subscrip
 
 ## What it does
 
-**Collect what needs you.** Your bots post cards: a question with suggested answers, a reply they drafted, a yes/no approval, a reminder. Urgent ones sort first with their deadline.
+**Collect what needs you.** Your bots post cards: a question with suggested answers, a reply they drafted, a yes/no approval. Urgent ones sort first with their deadline. Needs you shows a few cards at a time, and news and reminders go to Catch up as one line per chat or sender.
+
+**Stay small.** What you've seen and left alone moves to the archive: news after a day, questions after three. The clock only runs while the page has shown it to you. Going hiking? Switch on Away, and nothing expires and your phone stays quiet until you're back. Then everything that came in folds into one "While you were away" line.
 
 **Answer in one tap.** Pick an answer, send or edit a draft, snooze, or write the bot an instruction. Anything that reaches other people waits 5 seconds with Undo, then goes to the bot that posted the card.
 

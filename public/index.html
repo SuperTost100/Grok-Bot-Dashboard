@@ -31,6 +31,7 @@
   <symbol id="i-bell" viewBox="0 0 24 24"><path d="M6 16V11a6 6 0 0 1 12 0v5l1.5 2h-15z"/><path d="M10 20.5a2 2 0 0 0 4 0"/></symbol>
   <symbol id="i-x" viewBox="0 0 24 24"><path d="M6 6l12 12M18 6L6 18"/></symbol>
   <symbol id="i-sliders" viewBox="0 0 24 24"><path d="M4 7h9M17 7h3M4 17h3M11 17h9"/><circle cx="15" cy="7" r="2"/><circle cx="9" cy="17" r="2"/></symbol>
+  <symbol id="i-away" viewBox="0 0 24 24"><path d="M3 19l6.5-10 4 6 2.5-3.5L21 19z"/><circle cx="17" cy="6" r="2"/></symbol>
   <symbol id="i-msg" viewBox="0 0 24 24"><path d="M5 18.5V7a2 2 0 0 1 2-2h10a2 2 0 0 1 2 2v7a2 2 0 0 1-2 2H8z"/></symbol>
 </svg>
 
@@ -47,6 +48,9 @@
         <button role="tab" aria-selected="false" data-tab="archive">Archive</button>
         <button role="tab" aria-selected="false" data-tab="settings">Settings</button>
       </div>
+      <button class="refresh away-btn" id="away-btn" type="button" aria-expanded="false" aria-controls="away-menu" aria-label="Away mode">
+        <svg class="i" aria-hidden="true"><use href="#i-away"/></svg><span class="lbl">Away</span>
+      </button>
       <button class="refresh" id="refresh" type="button" aria-label="Ask the bots for a fresh scan">
         <svg class="i" aria-hidden="true"><use href="#i-refresh"/></svg><span id="refresh-label">Loading</span>
       </button>
@@ -57,6 +61,17 @@
 
 <div class="banner" id="banner" role="alert" hidden></div>
 <div class="banner" id="offline" role="status" hidden></div>
+<form class="away-menu" id="away-menu" hidden>
+  <p><strong>Going away?</strong> Until you're back nothing on the page expires, and your phone gets no pings.</p>
+  <div class="away-pick">
+    <button class="btn suggest" type="button" data-away-days="1">Until tomorrow</button>
+    <button class="btn suggest" type="button" data-away-days="3">3 days</button>
+    <button class="btn suggest" type="button" data-away-days="7">A week</button>
+    <label class="away-date"><span>Back on</span><input type="date" id="away-until" required></label>
+  </div>
+  <div class="actions"><button class="btn primary" type="submit">Go away</button><button class="btn ghost" type="button" id="away-cancel">Cancel</button></div>
+</form>
+<div class="away-bar" id="away-bar" role="status" hidden></div>
 
 <main>
   <div class="view" id="view-today">
@@ -67,7 +82,7 @@
           <div class="stack" id="needs"><div class="skeleton" aria-label="Loading"><div></div><div></div><div></div></div></div>
         </section>
         <section class="s-catch" aria-labelledby="h-catch">
-          <div class="sec-head"><h2 id="h-catch">Catch up</h2><span class="count num" id="catch-count"></span><span class="note">Nothing here needs an answer</span></div>
+          <div class="sec-head"><h2 id="h-catch">Catch up</h2><span class="count num" id="catch-count"></span><span class="note" id="catch-note"></span></div>
           <div class="list" id="catchup"></div>
         </section>
       </div>

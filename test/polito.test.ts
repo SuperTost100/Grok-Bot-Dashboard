@@ -84,7 +84,7 @@ test("PoliTO: unread avvisi become cards in their own language, deadlines go on 
     t.fake.deadlines = [{ id: "deadline:a", title: "Pagamento seconda rata", date: "2026-10-14", course: null, type: "Tasse", url: null }];
     await t.polito.sync();
     const state = (await t.ui("GET", "/api/ui/state")).body;
-    const a = state.needs.find((c: { key: string }) => c.key === "notification:1");
+    const a = state.catchup.find((c: { key: string }) => c.key === "notification:1");
     assert.equal(a.bot, POLITO_BOT);
     assert.equal(a.title, "mercoledì 14 ottobre la lezione è spostata in aula 7T.", "skips the greeting");
     assert.equal(a.body, "A presto", "doesn't repeat the title");
@@ -97,7 +97,7 @@ test("PoliTO: unread avvisi become cards in their own language, deadlines go on 
     assert.deepEqual(state.agenda.map((e: { title: string; start: string; allDay: boolean }) => [e.title, e.start, e.allDay]), [["Pagamento seconda rata", "2026-10-14", true]]);
     assert.equal(state.bots.find((b: { slug: string }) => b.slug === POLITO_BOT).name, "PoliTO");
     assert.equal(state.polito.error, "");
-    assert.deepEqual(state.needs.map((c: { key: string }) => c.key), ["message:9", "notification:1"], "urgent first, then newest");
+    assert.deepEqual([state.needs.map((c: { key: string }) => c.key), state.catchup.map((c: { key: string }) => c.key)], [["message:9"], ["notification:1"]], "urgent notices need you, the rest read as catch-up");
     assert.ok(t.fake.auth.every((h) => h === "Bearer secret"));
   } finally {
     t.close();
@@ -244,7 +244,7 @@ test("PoliTO: when areadidattica fails, cards stay, the page says why, and Refre
     await flush();
     const state = (await t.ui("GET", "/api/ui/state")).body;
     assert.match(state.polito.error, /areadidattica answered 502 .*PoliTO login paused/);
-    assert.equal(state.needs.length, 1);
+    assert.equal(state.catchup.length, 1);
     assert.equal(state.bots.find((b: { slug: string }) => b.slug === POLITO_BOT).refreshRequestedAt, null);
     t.fake.down = false;
     await t.polito.sync();
