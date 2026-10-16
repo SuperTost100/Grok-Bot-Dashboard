@@ -398,11 +398,18 @@ export function createApp(deps: AppDeps) {
     };
   }
 
-  /** With iCal addresses set, the agenda comes from them and PoliTO; what bots send is left out. */
   function agenda(day: string) {
     const events = store.listEvents(day, addDays(day, 2));
-    if (!deps.sources?.calendarOn()) return events.filter((e) => e.bot !== CALENDAR_OWNER);
-    return events.filter((e) => e.bot === CALENDAR_OWNER || e.bot === POLITO_BOT);
+    // A calendar reader (the built-in one, or the Calendar add-on) replaces what Grok bots send.
+    // Add-ons, apps and PoliTO always add their own events, like deadlines.
+    const calendarRead = Boolean(deps.sources?.calendarOn() || store.getAddon(CALENDAR_OWNER)?.enabled);
+    const kinds = new Map(store.listBots().map((b) => [b.slug, b.kind]));
+    return events.filter((e) => {
+      if (e.bot === CALENDAR_OWNER) return calendarRead;
+      if (e.bot === POLITO_BOT) return true;
+      if ((kinds.get(e.bot) ?? "bot") !== "bot") return true;
+      return !calendarRead;
+    });
   }
 
   function itemOr404(id: string) {
@@ -686,6 +693,7 @@ export function createApp(deps: AppDeps) {
       const t = obj(raw, `todos[${i}]`);
       const priority = Number(String(t.priority ?? "p4").toLowerCase().replace(/^p/, ""));
       if (![1, 2, 3, 4].includes(priority)) throw bad(`todos[${i}].priority must be p1, p2, p3 or p4`);
+      if (t.duration !== undefined && !(Number(t.duration) >= 0 && Number(t.duration) <= 1440)) throw bad(`todos[${i}].duration must be minutes, 0 to 1440`);
       return {
         id: text(String(t.id ?? ""), `todos[${i}].id`, 100, true),
         content: text(t.content, `todos[${i}].content`, 300, true),
@@ -696,6 +704,7 @@ export function createApp(deps: AppDeps) {
         project: text(t.project, `todos[${i}].project`, 80),
         url: url(t.url, `todos[${i}].url`),
         app: app(t.app ?? b.app),
+        duration: t.duration === undefined ? 0 : Math.round(Number(t.duration)),
       };
     });
     if (new Set(todos.map((t) => t.id)).size !== todos.length) throw bad("Two to-dos share an id. Send each id once.");

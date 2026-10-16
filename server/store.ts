@@ -191,6 +191,8 @@ export interface BotTodo {
   project: string;
   url: string;
   app: string;
+  /** How long it takes, in minutes, when the list knows (Todoist's duration). 0 when it doesn't. */
+  duration: number;
   completedAt: number | null;
 }
 
@@ -394,6 +396,7 @@ const MIGRATIONS: [string, string, string][] = [
   ["bots", "shown", "INTEGER NOT NULL DEFAULT 0"],
   ["bots", "reads", "TEXT NOT NULL DEFAULT '[]'"],
   ["bots", "role", "TEXT NOT NULL DEFAULT ''"],
+  ["todos", "duration", "INTEGER NOT NULL DEFAULT 0"],
 ];
 
 // An event overlaps [from, to) when it starts before `to` and is still going at `from`.
@@ -511,6 +514,7 @@ function toTodo(row: Row): BotTodo {
     project: str(row.project),
     url: str(row.url),
     app: str(row.app),
+    duration: Number(row.duration ?? 0),
     completedAt: num(row.completed_at),
   };
 }
@@ -1558,7 +1562,7 @@ export class Store {
 
   // To-dos sent by a bot, for people without a direct Todoist link
 
-  replaceTodos(bot: string, todos: Omit<BotTodo, "bot" | "completedAt">[]) {
+  replaceTodos(bot: string, todos: (Omit<BotTodo, "bot" | "completedAt" | "duration"> & { duration?: number })[]) {
     this.tx(() => {
       this.touchBot(bot);
       // A local completion survives the bot's next snapshot only for the same occurrence.
@@ -1569,12 +1573,12 @@ export class Store {
       );
       this.db.prepare("DELETE FROM todos WHERE bot = ?").run(bot);
       const ins = this.db.prepare(
-        "INSERT INTO todos (id, bot, content, priority, due, due_string, deadline, project, url, app, completed_at, completed_due) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+        "INSERT INTO todos (id, bot, content, priority, due, due_string, deadline, project, url, app, duration, completed_at, completed_due) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
       );
       for (const t of todos) {
         const d = done.get(t.id);
         const keep = d && d.due === t.due;
-        ins.run(t.id, bot, t.content, t.priority, t.due, t.dueString, t.deadline, t.project, t.url, t.app, keep ? d.at : null, keep ? d.due : null);
+        ins.run(t.id, bot, t.content, t.priority, t.due, t.dueString, t.deadline, t.project, t.url, t.app, t.duration ?? 0, keep ? d.at : null, keep ? d.due : null);
       }
     });
   }

@@ -906,3 +906,29 @@ test("in the Docker setup, your login only counts when it comes through the brid
     server.close();
   }
 });
+
+test("the Calendar add-on replaces the bots' agenda; other add-ons add their events; to-dos keep their duration", async () => {
+  const day = localStamp(new Date(clock), "Europe/Rome").slice(0, 10);
+  const ev = (title: string) => [{ title, start: `${day}T09:00:00`, end: "", location: "", allDay: false, app: "" }];
+  s.store.replaceEvents("dashboard", day, day, []);
+  s.store.replaceEvents("grokbot-agenda", day, `${day}`, []);
+  s.store.replaceEvents("someone", day, localStamp(new Date(clock + 86_400_000), "Europe/Rome").slice(0, 10), ev("From a Grok bot"));
+  s.store.replaceEvents("calendar", day, localStamp(new Date(clock + 86_400_000), "Europe/Rome").slice(0, 10), ev("From the Calendar add-on"), false);
+  s.store.replaceEvents("parcels2", day, localStamp(new Date(clock + 86_400_000), "Europe/Rome").slice(0, 10), ev("Parcel pickup"));
+  s.store.configureBot("parcels2", { kind: "addon" });
+  const titles = async () => (await state()).agenda.map((e: { title: string }) => e.title).sort();
+  assert.ok((await titles()).includes("From a Grok bot") && !(await titles()).includes("From the Calendar add-on"));
+  s.store.saveAddon({
+    id: "calendar", type: "addon", manifest: { id: "calendar", name: "Calendar", type: "addon", entry: "i.mjs", settings: [], asks: [] }, repo: "o/r", branch: "main", path: "addons/calendar",
+    sha: "x", pathSha: "x", trusted: true, enabled: true, settings: {}, tokenHash: "", status: "", statusOk: true, updateSha: "", updateNotes: [], checkedAt: null, installedAt: clock, updatedAt: clock,
+  });
+  try {
+    const t = await titles();
+    assert.ok(t.includes("From the Calendar add-on") && t.includes("Parcel pickup") && !t.includes("From a Grok bot"), JSON.stringify(t));
+  } finally {
+    s.store.deleteAddon("calendar");
+  }
+  assert.equal((await bot("PUT", "/api/bot/todos", { todos: [{ id: "1", content: "Fix shutters", priority: "p2", duration: 90 }] }, "todolist")).status, 200);
+  assert.equal(s.store.listTodos().find((t) => t.content === "Fix shutters")!.duration, 90);
+  assert.equal((await bot("PUT", "/api/bot/todos", { todos: [{ id: "1", content: "x", duration: -5 }] }, "todolist")).status, 400);
+});
