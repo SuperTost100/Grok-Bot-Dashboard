@@ -153,6 +153,12 @@ Only used when the server has no `TODOIST_TOKEN`. `PUT /api/bot/todos` replaces 
 
 Add `"app": "todoist"` to show its logo. The page shows what's overdue, due or with a deadline in the next 7 days, plus anything `p1` or `p2`.
 
+## Handoffs between bots
+
+A bot can leave work for another bot with `POST /api/bot/handoffs {"to": "venduto", "text": "List the old monitor on Vinted", "urgent": false}`. The receiver gets it in `handoffs` on its next `GET /api/bot/actions`, and the dashboard wakes it on the rules in [Triage](triage.md#when-grok-wakes). The receiver reports with `POST /api/bot/handoffs/<id> {"ok": true, "result": "Listed at €90"}`. The sender finds the answer once in `handoffResults` on its next `GET /api/bot/actions`. A handoff that's taken but never reported goes out once more after 30 minutes, then fails.
+
+With `grokdash`: `grokdash --bot secretary handoff venduto "List the old monitor" [--urgent]`, then `grokdash --bot venduto handed ID "Listed at €90"`.
+
 ## Panels
 
 A bot shows what it keeps track of in a panel: on its section of the Bots page, and on Today when the user pins it. `PUT /api/bot/panel` replaces the panel, `DELETE /api/bot/panel` removes it. Update it during a run you'd make anyway; a panel never needs a run of its own.

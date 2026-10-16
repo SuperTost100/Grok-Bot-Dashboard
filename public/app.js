@@ -262,7 +262,7 @@ function renderHeader() {
   const hooks = s.bots.filter((b) => b.hasWebhook).length;
   // PoliTO has a filter chip like a bot, but no bot behind it.
   const real = s.bots.filter((b) => b.slug !== "polito").length;
-  const runs = s.grokRunsToday == null ? "" : ` Grok runs today: ${s.grokRunsToday}.`;
+  const runs = s.runs ? ` Bot runs this week: ${s.runs.week} of ${s.runs.cap}.` : "";
   $("#foot").textContent = (real
     ? `${real} bot${real > 1 ? "s" : ""} connected. ${hooks ? "Taps reach the bots within seconds." : "No bot has a webhook yet, so taps wait for the next scheduled scan."}`
     : "No bot has posted yet. Set up the Dashboard bot from bot/README.md in the repo.") + runs;
@@ -485,6 +485,7 @@ async function loadBots() {
 }
 
 const kindWord = { choice: "Question", draft: "Draft", reminder: "Reminder", digest: "Summary" };
+const handoffWord = { queued: "Waiting", sent: "Taken", done: "Done", failed: "Failed", cancelled: "Cancelled" };
 
 function renderBots() {
   if (!ui.bots) return;
@@ -498,6 +499,7 @@ function renderBots() {
     return `<section class="bot-page" id="bot-${esc(b.slug)}" aria-labelledby="bh-${esc(b.slug)}">
       <div class="bot-head">${avatar(b.slug)}<div><h2 id="bh-${esc(b.slug)}">${esc(b.name)}</h2>${b.role ? `<p class="role">${esc(b.role)}</p>` : ""}<p class="facts${b.status === "offline" ? " bad" : ""}">${esc(facts.join(" · "))}</p></div><span class="spacer"></span>${pin}</div>
       ${b.panel?.blocks?.length ? `${b.panel.title ? `<h3 class="pn-title">${esc(b.panel.title)}</h3>` : ""}${renderPanel(b.panel)}` : `<p class="empty-row">No panel yet. ${esc(b.name)} sends one when it runs.</p>`}
+      ${b.handoffs.length ? `<h3 class="pn-title">Handoffs today</h3><ul class="pn-list">${b.handoffs.map((h) => `<li><div class="pn-li"><span class="pn-t">${h.from === b.slug ? `To ${esc(botOf(h.to).name)}` : `From ${esc(botOf(h.from).name)}`}: ${esc(h.text)}</span><span class="pn-badge">${esc(handoffWord[h.status])}</span></div>${h.result ? `<div class="pn-sub">${esc(h.result)}</div>` : ""}</li>`).join("")}</ul>` : ""}
       ${b.cards.length ? `<h3 class="pn-title">Its cards</h3><ul class="pn-list">${b.cards.map((c) => `<li><div class="pn-li"><span class="pn-t">${esc(c.title)}</span><span class="pn-badge">${esc(c.urgent || kindWord[c.kind] || c.kind)}</span></div></li>`).join("")}</ul>` : ""}
     </section>`;
   }).join("") : `<div class="empty"><strong>No bots on this page yet</strong>Pick the bots that belong here under Settings, Bots.</div>`) +

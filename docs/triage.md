@@ -30,7 +30,15 @@ An open invitation gets a card with an "Add to calendar" button, and Grok runs o
 
 ## When Grok wakes
 
-Grok wakes for chats that need it at most once every 45 minutes and takes everything waiting in one run. Chats due today wake it when 3 are waiting or the oldest has waited 2 hours, and anything left waits at most a day. After 10 Grok runs in a day, message wakes stop until the next day. Your taps always go through. The footer counts Grok runs. All these numbers are on the Settings page.
+Every bot runs on its own clock, and these rules decide when the dashboard wakes it for chats triage queued or for handoffs other bots left:
+
+- **Urgent work** waits 3 minutes for anything else to arrive, then the bot runs once with everything queued for it, urgent or not.
+- **Right after a run,** urgent work waits until 15 minutes have passed, so several urgent messages in a row cost one or two runs, not one each.
+- **Other work** goes out together once the oldest piece has waited an hour and the bot hasn't run for an hour either.
+- **A wake the bot never answered** isn't repeated until something new arrives.
+- **Past 70 runs in a week,** counting every bot, only urgent work wakes a bot until Monday.
+
+Your taps don't wait for any of this: they reach the bot once their undo window is over. The footer counts this week's runs. All these numbers are under Settings, Wakes.
 
 ## Turning it on
 

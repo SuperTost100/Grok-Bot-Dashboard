@@ -9,6 +9,7 @@ import { Todoist, pickTodos } from "../server/todoist.ts";
 import { loadConfig, type Config } from "../server/config.ts";
 import { parseWhen, snoozeChoices, localStamp } from "../server/time.ts";
 import { checkWebhookUrl, isPrivateAddress, missedRun, retryDue, RETRY_GAP } from "../server/webhook.ts";
+import { dueAt } from "../server/wakes.ts";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
@@ -848,4 +849,46 @@ test("bots: shown or behind the scenes, and reads only what you allow", async ()
   const page = (await call("GET", "/api/ui/bots")).body.bots.find((b: { slug: string }) => b.slug === "secretary");
   assert.deepEqual([page.shown, page.cards.length, page.runsThisWeek], [true, 1, 0]);
   assert.equal((await call("PUT", "/api/ui/bots/nobody", { shown: true })).status, 404);
+});
+
+// ---------- Handoffs and wake rules ----------
+
+test("handoffs: one bot leaves work for another, the answer comes back once", async () => {
+  await bot("POST", "/api/bot/register", { name: "Venduto" }, "venduto");
+  assert.equal((await bot("POST", "/api/bot/handoffs", { to: "nobody-here", text: "x" }, "secretary")).status, 404);
+  assert.equal((await bot("POST", "/api/bot/handoffs", { to: "secretary", text: "x" }, "secretary")).status, 400);
+  const sent = await bot("POST", "/api/bot/handoffs", { to: "venduto", text: "List the old monitor on Vinted", urgent: false }, "secretary");
+  assert.equal(sent.status, 200);
+  const got = (await bot("GET", "/api/bot/actions", undefined, "venduto")).body.handoffs;
+  assert.deepEqual(got.map((h: { from: string; text: string }) => [h.from, h.text]), [["secretary", "List the old monitor on Vinted"]]);
+  assert.equal((await bot("GET", "/api/bot/actions", undefined, "venduto")).body.handoffs.length, 0, "handed out once");
+  assert.equal((await bot("POST", `/api/bot/handoffs/${got[0].id}`, { ok: true, result: "Listed at €90" }, "comprato")).status, 404, "only the receiver reports");
+  assert.equal((await bot("POST", `/api/bot/handoffs/${got[0].id}`, { ok: true, result: "Listed at €90" }, "venduto")).status, 200);
+  const back = (await bot("GET", "/api/bot/actions", undefined, "secretary")).body.handoffResults;
+  assert.deepEqual(back.map((h: { ok: boolean; result: string }) => [h.ok, h.result]), [[true, "Listed at €90"]]);
+  assert.equal((await bot("GET", "/api/bot/actions", undefined, "secretary")).body.handoffResults.length, 0);
+});
+
+test("handoffs nobody reports go out once more, then fail", () => {
+  const h = s.store.addHandoff("secretary", "venduto", "Check offers", false);
+  s.store.claimHandoffs("venduto");
+  clock += 31 * 60_000;
+  s.store.expireHandoffClaims(clock - 30 * 60_000);
+  assert.equal(s.store.getHandoff(h.id)!.status, "queued");
+  s.store.claimHandoffs("venduto");
+  clock += 31 * 60_000;
+  s.store.expireHandoffClaims(clock - 30 * 60_000);
+  assert.deepEqual([s.store.getHandoff(h.id)!.status, s.store.getHandoff(h.id)!.result], ["failed", "Never reported back"]);
+});
+
+test("wake rules: urgent gathers then merges, other work waits, the cap only stops what can wait", () => {
+  const r = { gatherMs: 3 * 60_000, mergeMs: 15 * 60_000, waitMs: 60 * 60_000, overCap: false };
+  const w = (urgent: boolean, since: number) => ({ urgent, since, fresh: since });
+  assert.equal(dueAt([], 0, 0, r), null);
+  assert.equal(dueAt([w(false, 1000)], 0, 0, r), 1000 + 3_600_000);
+  assert.equal(dueAt([w(false, 1000), w(true, 5000)], 0, 0, r), 5000 + 180_000, "urgent takes the calm work along");
+  assert.equal(dueAt([w(true, 10_000)], 9_000, 9_500, r), 9_000 + 900_000, "right after a run, urgent waits for the merge window");
+  assert.equal(dueAt([w(true, 1_000)], 9_000, 0, r), null, "the bot never came for the last wake and nothing is new");
+  assert.equal(dueAt([w(false, 1000)], 0, 0, { ...r, overCap: true }), null);
+  assert.equal(dueAt([w(true, 1000)], 0, 0, { ...r, overCap: true }), 1000 + 180_000);
 });

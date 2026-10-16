@@ -111,6 +111,21 @@ export type BotKind = "bot" | "addon" | "app" | "source";
 export const READ_SCOPES = ["agenda", "todos", "cards"] as const;
 export type ReadScope = (typeof READ_SCOPES)[number];
 
+/** Work one bot (or add-on) leaves for another, delivered with the receiver's next run. */
+export interface Handoff {
+  id: number;
+  from: string;
+  to: string;
+  text: string;
+  urgent: boolean;
+  status: "queued" | "sent" | "done" | "failed" | "cancelled";
+  attempts: number;
+  result: string;
+  createdAt: number;
+  sentAt: number | null;
+  doneAt: number | null;
+}
+
 /** What a bot, add-on or app shows on its page and, when pinned, on Today. */
 export interface Panel {
   owner: string;
@@ -283,6 +298,21 @@ CREATE TABLE IF NOT EXISTS triage (
   cost REAL NOT NULL DEFAULT 0
 );
 CREATE INDEX IF NOT EXISTS triage_grok ON triage (grok, level);
+CREATE TABLE IF NOT EXISTS handoffs (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  from_bot TEXT NOT NULL,
+  to_bot TEXT NOT NULL,
+  text TEXT NOT NULL,
+  urgent INTEGER NOT NULL DEFAULT 0,
+  status TEXT NOT NULL DEFAULT 'queued',
+  attempts INTEGER NOT NULL DEFAULT 0,
+  result TEXT NOT NULL DEFAULT '',
+  created_at INTEGER NOT NULL,
+  sent_at INTEGER,
+  done_at INTEGER,
+  delivered_at INTEGER
+);
+CREATE INDEX IF NOT EXISTS handoffs_to ON handoffs (to_bot, status);
 CREATE TABLE IF NOT EXISTS panels (
   owner TEXT PRIMARY KEY,
   title TEXT NOT NULL DEFAULT '',
@@ -398,6 +428,14 @@ function toBot(r: Row): Bot {
     shown: Boolean(r.shown),
     reads: JSON.parse(str(r.reads) || "[]"),
     role: str(r.role),
+  };
+}
+
+function toHandoff(r: Row): Handoff {
+  return {
+    id: Number(r.id), from: str(r.from_bot), to: str(r.to_bot), text: str(r.text), urgent: Boolean(r.urgent),
+    status: str(r.status) as Handoff["status"], attempts: Number(r.attempts), result: str(r.result),
+    createdAt: Number(r.created_at), sentAt: num(r.sent_at), doneAt: num(r.done_at),
   };
 }
 
@@ -837,6 +875,75 @@ export class Store {
     return this.getBot(slug)!;
   }
 
+  // Handoffs
+
+  addHandoff(from: string, to: string, text: string, urgent: boolean): Handoff {
+    const res = this.db
+      .prepare("INSERT INTO handoffs (from_bot, to_bot, text, urgent, created_at) VALUES (?, ?, ?, ?, ?)")
+      .run(from, to, text, urgent ? 1 : 0, this.now());
+    return this.getHandoff(Number(res.lastInsertRowid))!;
+  }
+
+  getHandoff(id: number): Handoff | null {
+    const r = this.db.prepare("SELECT * FROM handoffs WHERE id = ?").get(id) as Row | undefined;
+    return r ? toHandoff(r) : null;
+  }
+
+  queuedHandoffs(to: string): Handoff[] {
+    return this.db.prepare("SELECT * FROM handoffs WHERE to_bot = ? AND status = 'queued' ORDER BY id").all(to).map((r) => toHandoff(r as Row));
+  }
+
+  /** Bots with handoffs waiting, for the wake loop. */
+  botsWithHandoffs(): string[] {
+    return this.db.prepare("SELECT DISTINCT to_bot FROM handoffs WHERE status = 'queued'").all().map((r) => str((r as Row).to_bot));
+  }
+
+  /** The receiver takes its waiting handoffs. Each is handed out at most twice before it fails. */
+  claimHandoffs(to: string): Handoff[] {
+    return this.tx(() => {
+      const list = this.queuedHandoffs(to);
+      const stmt = this.db.prepare("UPDATE handoffs SET status = 'sent', sent_at = ?, attempts = attempts + 1 WHERE id = ?");
+      for (const h of list) stmt.run(this.now(), h.id);
+      return list.map((h) => ({ ...h, status: "sent" as const, sentAt: this.now(), attempts: h.attempts + 1 }));
+    });
+  }
+
+  finishHandoff(id: number, to: string, ok: boolean, result: string): Handoff | null {
+    const h = this.getHandoff(id);
+    if (!h || h.to !== to || h.status !== "sent") return null;
+    this.db.prepare("UPDATE handoffs SET status = ?, result = ?, done_at = ? WHERE id = ?").run(ok ? "done" : "failed", result, this.now(), id);
+    return this.getHandoff(id);
+  }
+
+  /** Handed out but never reported: back in line, or failed after the second try. */
+  expireHandoffClaims(before: number, maxAttempts = 2) {
+    this.db.prepare("UPDATE handoffs SET status = 'failed', result = 'Never reported back', done_at = ? WHERE status = 'sent' AND sent_at < ? AND attempts >= ?").run(this.now(), before, maxAttempts);
+    this.db.prepare("UPDATE handoffs SET status = 'queued' WHERE status = 'sent' AND sent_at < ?").run(before);
+  }
+
+  /** Finished handoffs the sender hasn't seen yet. Reading them marks them seen. */
+  takeHandoffResults(from: string): Handoff[] {
+    return this.tx(() => {
+      const list = this.db.prepare("SELECT * FROM handoffs WHERE from_bot = ? AND status IN ('done', 'failed') AND delivered_at IS NULL ORDER BY id").all(from).map((r) => toHandoff(r as Row));
+      const stmt = this.db.prepare("UPDATE handoffs SET delivered_at = ? WHERE id = ?");
+      for (const h of list) stmt.run(this.now(), h.id);
+      return list;
+    });
+  }
+
+  /** Handoffs to or from a bot since a time, newest first, for its page. */
+  handoffsOf(bot: string, since: number): Handoff[] {
+    return this.db
+      .prepare("SELECT * FROM handoffs WHERE (from_bot = ? OR to_bot = ?) AND created_at >= ? ORDER BY id DESC LIMIT 20")
+      .all(bot, bot, since)
+      .map((r) => toHandoff(r as Row));
+  }
+
+  /** Every bot's runs since a time: the weekly cap counts them all. */
+  allWakesSince(since: number): number {
+    return Number((this.db.prepare("SELECT count(*) AS n FROM wakes WHERE at >= ?").get(since) as Row).n);
+  }
+
   // Panels
 
   setPanel(owner: string, title: string, blocks: PanelBlock[]): Panel {
@@ -1127,6 +1234,7 @@ export class Store {
     this.db.prepare("DELETE FROM actions WHERE finished_at IS NOT NULL AND finished_at < ?").run(before);
     this.db.prepare("DELETE FROM triage WHERE decided_at < ?").run(before);
     this.db.prepare("DELETE FROM wakes WHERE at < ?").run(before);
+    this.db.prepare("DELETE FROM handoffs WHERE created_at < ? AND status NOT IN ('queued', 'sent')").run(before);
     return Number(res.changes);
   }
 

@@ -28,7 +28,7 @@ export interface SettingDef {
 export const MAIL_SLOTS = [1, 2, 3] as const;
 export const WHATSAPP_SLOTS = [1, 2] as const;
 
-export const GROUPS = ["General", "Triage", "Grok wakes", "Phone pings", ...WHATSAPP_SLOTS.map((n) => `WhatsApp ${n}`), ...MAIL_SLOTS.map((n) => `Mail ${n}`), "Calendar", "Todoist", "PoliTO"];
+export const GROUPS = ["General", "Triage", "Wakes", "Phone pings", ...WHATSAPP_SLOTS.map((n) => `WhatsApp ${n}`), ...MAIL_SLOTS.map((n) => `Mail ${n}`), "Calendar", "Todoist", "PoliTO"];
 
 export const DEFS: SettingDef[] = [
   {
@@ -66,24 +66,24 @@ export const DEFS: SettingDef[] = [
     label: "Grok works on a chat at", help: "How sure Jev must be that a chat needs your reply or decision before Grok drafts it. Below that, down to 35%, you get a plain card instead.",
   },
   {
-    key: "grokBot", env: "GROK_BOT", group: "Grok wakes", type: "text", fallback: "dashboard", placeholder: "dashboard",
+    key: "grokBot", env: "GROK_BOT", group: "Wakes", type: "text", fallback: "dashboard", placeholder: "dashboard",
     label: "Grok bot", help: "The bot that drafts replies and answers, by its grokdash id (BOT= in its config).",
   },
   {
-    key: "wakeCooldown", env: "WAKE_COOLDOWN", group: "Grok wakes", type: "int", min: 5, max: 600, unit: "minutes", fallback: 45,
-    label: "Wait between wakes", help: "Grok wakes at most this often for messages, and takes everything waiting in one run. Your taps always go through.",
+    key: "wakeWait", env: "WAKE_WAIT", group: "Wakes", type: "int", min: 10, max: 1440, unit: "minutes", fallback: 60,
+    label: "Other work waits", help: "Work that isn't urgent goes to a bot in one run once the oldest piece has waited this long, and the bot hasn't run for this long either.",
   },
   {
-    key: "wakeCeiling", env: "WAKE_CEILING", group: "Grok wakes", type: "int", min: 0, max: 100, unit: "per day", fallback: 10,
-    label: "Daily ceiling", help: "No more message wakes after this many Grok runs in a day; the rest waits for tomorrow. 0 never wakes Grok for messages.",
+    key: "wakeGather", env: "WAKE_GATHER", group: "Wakes", type: "int", min: 0, max: 30, unit: "minutes", fallback: 3,
+    label: "Urgent work gathers for", help: "Urgent work waits this long for more to arrive, then the bot runs once with everything queued for it, urgent or not.",
   },
   {
-    key: "wakeBatch", env: "WAKE_BATCH", group: "Grok wakes", type: "int", min: 1, max: 50, unit: "chats", fallback: 3,
-    label: "Wake for", help: "Chats that need an answer today wake Grok once this many are waiting.",
+    key: "wakeMerge", env: "WAKE_MERGE", group: "Wakes", type: "int", min: 0, max: 120, unit: "minutes", fallback: 15,
+    label: "After a run, urgent work waits", help: "So several urgent messages in a row cost one or two runs, not one each. Your taps never wait for this.",
   },
   {
-    key: "wakeBatchHours", env: "WAKE_BATCH_HOURS", group: "Grok wakes", type: "int", min: 1, max: 24, unit: "hours", fallback: 2,
-    label: "Or after", help: "Or once the oldest of them has waited this long.",
+    key: "weeklyRuns", env: "WEEKLY_RUNS", group: "Wakes", type: "int", min: 0, max: 1000, unit: "per week", fallback: 70,
+    label: "Weekly runs", help: "Every bot's runs together, Monday to Sunday. Past this, only urgent work wakes a bot.",
   },
   {
     key: "ntfyTopic", env: "NTFY_TOPIC", group: "Phone pings", type: "secret", fallback: "",

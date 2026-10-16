@@ -1,12 +1,13 @@
 // Triage: Jev reads each burst of new messages in a chat or mail thread and decides what happens.
 // Most messages become cards built from the message itself, a line in catch-up, or nothing.
-// Only replies and decisions need Grok, and Grok wakes for them under a cooldown and a daily ceiling.
+// Only replies and decisions need Grok, and Grok wakes for them on the rules in wakes.ts.
 // None of Jev's labels show on the page; they only decide where a message goes.
 
 import type { InboxMessage, ItemInput, Store, TriageRow } from "./store.ts";
 import type { Settings } from "./settings.ts";
 import { askJev, JevError, type ChoiceAnswer, type JevResult, type NoulAnswer, type Question, type ScoreAnswer } from "./jev.ts";
 import { localStamp, zonedToEpoch } from "./time.ts";
+import { answeredAt, dueAt, handoffWork, lastWakeOf, rules, triageWork, weekStart } from "./wakes.ts";
 
 type Fetch = typeof fetch;
 
@@ -301,8 +302,6 @@ const ACTIVE_MS = 15 * 60_000;
 /** Messages older than this when triage first sees them (it was off, or the server was down) are filed without a decision. */
 const STALE_MS = 6 * 3_600_000;
 const GROUPS_PER_RUN = 15;
-/** A chat that needs Grok but isn't urgent still gets a wake after a day. */
-const MAX_QUEUE_AGE_MS = 24 * 3_600_000;
 /** Grok took chats but never wrote or closed their cards in this long: hand them out again. */
 const CLAIM_LEASE_MS = 30 * 60_000;
 /** Hand-outs per chat before giving up on Grok for it. The card stays for you. */
@@ -318,7 +317,7 @@ export interface Triage {
   tick(): Promise<void>;
   /** Whether Grok should be woken for waiting chats now. */
   wakeDue(): boolean;
-  /** Record that a wake was sent, so the cooldown starts. */
+  /** Record that a wake was sent, so the bot's clock restarts. */
   woke(): void;
   /** The chats waiting for Grok, handed to it with its actions. */
   claimForGrok(): ReturnType<typeof forGrok>[];
@@ -327,7 +326,8 @@ export interface Triage {
   /** Chats waiting for Grok. */
   waiting(): number;
   status(): TriageStatus[];
-  runsToday(): number;
+  /** Every bot's runs this week, for the weekly cap. */
+  runsThisWeek(): number;
 }
 
 export interface TriageDeps {
@@ -592,28 +592,13 @@ export function createTriage(deps: TriageDeps): Triage {
     },
     wakeDue() {
       if (!active()) return false;
-      const now = store.now();
       const grok = bot();
-      const cooldown = settings.int("wakeCooldown") * 60_000;
-      if (now - lastAttempt < cooldown) return false;
-      if (store.wakesSince(now - cooldown, grok).length) return false;
-      if (store.wakesSince(dayStart(), grok).length >= settings.int("wakeCeiling")) return false;
-      const queue = store.grokQueue();
-      if (!queue.length) return false;
-      // A wake that Grok never answered isn't repeated for the same chats: only a new decision wakes it
-      // again. Unanswered chats go along with that wake, a tap, or Refresh.
-      const lastWake = Math.max(lastAttempt, store.wakesSince(0, grok).filter((w) => w.reason === "inbox").at(-1)?.at ?? 0);
+      // The chats triage queued, and any handoffs other bots left for Grok, go in the same run.
+      const work = [...store.grokQueue().map((t) => triageWork(t, NOW)), ...handoffWork(store, grok)];
       // Grok came for its work after the last wake, so what's left (more than one run takes) is fair game.
-      const answered = Number(store.getState("triage:lastClaim") ?? 0) > lastWake;
-      if (!answered && !queue.some((t) => t.decidedAt > lastWake || (t.attempts > 0 && (t.queuedAt ?? 0) > lastWake))) return false;
-      const waitedSince = (t: TriageRow) => t.queuedAt ?? t.decidedAt;
-      const today = queue.filter((t) => t.level >= TODAY);
-      return (
-        queue.some((t) => t.level >= NOW) ||
-        today.length >= settings.int("wakeBatch") ||
-        (today.length > 0 && now - Math.min(...today.map(waitedSince)) >= settings.int("wakeBatchHours") * 3_600_000) ||
-        now - Math.min(...queue.map(waitedSince)) >= MAX_QUEUE_AGE_MS
-      );
+      const answered = Math.max(answeredAt(store, grok), Number(store.getState("triage:lastClaim") ?? 0));
+      const due = dueAt(work, lastWakeOf(store, grok, lastAttempt), answered, rules(store, settings, tz));
+      return due !== null && due <= store.now();
     },
     woke() {
       lastAttempt = store.now();
@@ -632,14 +617,14 @@ export function createTriage(deps: TriageDeps): Triage {
       for (const t of handedOut) if ((t.cardKey ?? cardKey(t.source, t.thread, "needs")) === key) store.setGrok(t.id, "done");
     },
     waiting: () => store.grokQueue().length,
-    runsToday() {
-      return store.wakesSince(dayStart(), bot()).length;
+    runsThisWeek() {
+      return store.allWakesSince(weekStart(store.now(), tz));
     },
     status() {
       if (!on()) {
         return [
           { group: "Triage", on: false, ok: true, text: "Off" },
-          { group: "Grok wakes", on: false, ok: true, text: "Off while triage is off" },
+          { group: "Wakes", on: false, ok: true, text: "Off while triage is off" },
           { group: "Phone pings", on: false, ok: true, text: "Off" },
         ];
       }
@@ -655,12 +640,12 @@ export function createTriage(deps: TriageDeps): Triage {
         const would = `Would have: ${count("wake")} Grok wakes, ${count("ride")} queued for Grok, ${count("card")} cards, ${count("catchup")} catch-up lines, ${count("skip")} filtered`;
         return [
           error ? { group: "Triage", on: true, ok: false, text: error } : { group: "Triage", on: true, ok: true, text: `Shadow: ${sorted}. ${would}.` },
-          { group: "Grok wakes", on: false, ok: true, text: "Grok keeps its schedule while triage is in shadow mode" },
+          { group: "Wakes", on: false, ok: true, text: "Grok keeps its schedule while triage is in shadow mode" },
         ];
       }
       return [
         error ? { group: "Triage", on: true, ok: false, text: error } : { group: "Triage", on: true, ok: true, text: sorted },
-        { group: "Grok wakes", on: true, ok: true, text: `${store.wakesSince(dayStart(), bot()).length} Grok runs today, ${waiting} chat${waiting === 1 ? "" : "s"} waiting for Grok` },
+        { group: "Wakes", on: true, ok: true, text: `${store.allWakesSince(weekStart(store.now(), tz))} of ${settings.int("weeklyRuns")} runs this week, ${waiting} chat${waiting === 1 ? "" : "s"} waiting for Grok` },
       ];
     },
   };

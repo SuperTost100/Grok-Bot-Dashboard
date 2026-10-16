@@ -12,6 +12,7 @@ import { GROUPS, SettingError, Settings } from "./settings.ts";
 import type { Sources } from "./sources/index.ts";
 import type { Triage } from "./triage.ts";
 import type { Phone } from "./ntfy.ts";
+import { weekStart } from "./wakes.ts";
 import { CALENDAR_OWNER } from "./sources/calendar.ts";
 
 /** A route result sent as-is instead of as JSON, like an image. */
@@ -225,7 +226,7 @@ export interface AppDeps {
   /** Jev sorting the messages the sources read. */
   triage?: Triage | null;
   phone?: Phone | null;
-  notify?: (bot: string, reason: "actions" | "refresh" | "inbox") => void;
+  notify?: (bot: string, reason: "actions" | "refresh" | "inbox" | "work") => void;
   /** The last webhook ping to a bot and whether its routine accepted it. */
   lastPing?: (bot: string) => { at: number; ok: boolean } | undefined;
   log?: (msg: string) => void;
@@ -307,13 +308,6 @@ export function createApp(deps: AppDeps) {
     return known.length ? Math.max(...known) : null;
   }
 
-  /** Monday 00:00 in the dashboard's time zone: runs are counted per week. */
-  function weekStart() {
-    const day = today();
-    const dow = (new Date(day + "T12:00:00Z").getUTCDay() + 6) % 7;
-    return zonedToEpoch(`${addDays(day, -dow)}T00:00:00`, tz);
-  }
-
   function botView(b: Bot, busy: Set<string>) {
     const offline = offlineSince(b);
     return {
@@ -357,7 +351,7 @@ export function createApp(deps: AppDeps) {
       agenda: agenda(day),
       polito: deps.polito ? { error: deps.polito.error() } : null,
       sourceProblems: deps.sources?.problems() ?? [],
-      grokRunsToday: deps.triage?.active() ? deps.triage.runsToday() : null,
+      runs: { week: store.allWakesSince(weekStart(store.now(), tz)), cap: settings.int("weeklyRuns") },
     };
   }
 
@@ -665,16 +659,40 @@ export function createApp(deps: AppDeps) {
     store.promoteDue(bot);
     const actions = store.claimActions(bot).map(actionForBot);
     const b = store.getBot(bot)!;
+    store.setState(`wake:claim:${bot}`, String(store.now()));
+    // Work other bots left for this one, and answers to what this one asked of others.
+    const handoffs = store.claimHandoffs(bot).map((h) => ({ id: h.id, from: h.from, text: h.text, urgent: h.urgent }));
+    const handoffResults = store.takeHandoffResults(bot).map((h) => ({ id: h.id, to: h.to, text: h.text, ok: h.status === "done", result: h.result }));
     // The chats triage queued for this bot ride along with its actions, whatever woke it.
     const inbox = deps.triage?.active() && bot === settings.str("grokBot") ? deps.triage.claimForGrok() : [];
     return {
       actions,
       inbox,
+      handoffs,
+      handoffResults,
       refreshRequested: Boolean(b.refreshRequestedAt),
       lastScanAt: b.lastScanAt ? localStamp(new Date(b.lastScanAt), tz) : null,
       now: localStamp(new Date(store.now()), tz),
       timeZone: tz,
     };
+  });
+
+  // One bot leaves work for another. It reaches the receiver on its next run, which the wake rules schedule.
+  route("POST", "/api/bot/handoffs", "bot", (_r, _p, _q, b) => {
+    const from = slug(b.bot);
+    const to = slug(b.to);
+    const target = store.getBot(to);
+    if (!target || target.kind === "source") throw new HttpError(404, `No bot called "${to}".`);
+    if (to === from) throw bad("A bot can't hand work to itself.");
+    const h = store.addHandoff(from, to, text(b.text, "text", 4000, true), b.urgent === true);
+    return { id: h.id, to: h.to, status: h.status, canWake: Boolean(target.webhookUrl) };
+  });
+
+  route("POST", "/api/bot/handoffs/:id", "bot", (_r, p, _q, b) => {
+    if (typeof b.ok !== "boolean") throw bad(`"ok" must be true or false`);
+    const h = store.finishHandoff(Number(p[0]), slug(b.bot), b.ok, text(b.result, "result", 2000));
+    if (!h) throw new HttpError(404, "No handoff with that id waiting on this bot.");
+    return { id: h.id, status: h.status };
   });
 
   route("PUT", "/api/bot/panel", "bot", (_r, _p, _q, b) => {
@@ -800,7 +818,7 @@ export function createApp(deps: AppDeps) {
 
   route("GET", "/api/ui/bots", "ui", () => {
     const busy = store.busyBots();
-    const since = weekStart();
+    const since = weekStart(store.now(), tz);
     const items = store.activeItems(0).filter((i) => i.status !== "closed");
     return {
       bots: store.listBots().filter((b) => b.kind === "bot").map((b) => ({
@@ -808,6 +826,7 @@ export function createApp(deps: AppDeps) {
         panel: store.getPanel(b.slug),
         cards: items.filter((i) => i.bot === b.slug).map((i) => ({ id: i.id, title: i.title, kind: i.kind, urgent: i.urgent, status: i.status })),
         runsThisWeek: store.wakesSince(since, b.slug).length,
+        handoffs: store.handoffsOf(b.slug, store.now() - 86_400_000).map((h) => ({ id: h.id, from: h.from, to: h.to, text: h.text, urgent: h.urgent, status: h.status, result: h.result, createdAt: h.createdAt })),
         lastWake: store.wakesSince(since, b.slug).at(-1) ?? null,
       })),
     };

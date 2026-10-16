@@ -20,6 +20,12 @@ if [[ -f "$CONFIG" ]]; then
     esac
   done < "$CONFIG"
 fi
+# Several bots share one machine and one config: each names itself with --bot NAME.
+if [[ "${1:-}" == "--bot" ]]; then
+  [[ $# -ge 2 ]] || { echo "grokdash: --bot needs a name" >&2; exit 2; }
+  GROKDASH_BOT=$2
+  shift 2
+fi
 BOT="${GROKDASH_BOT:-dashboard}"
 
 usage() {
@@ -35,6 +41,11 @@ grokdash: post to and read from the Grok Bot Dashboard.
   grokdash done ID [RESULT]       Report an action as done, with one line on what you did
   grokdash fail ID REASON         Report an action you couldn't do
   grokdash scanned [STARTED_AT]   Say you finished a full scan; pass the "now" that grokdash actions printed when it began
+  grokdash panel [JSON]           Replace your panel (what you show on the Bots page and, pinned, on Today)
+  grokdash read agenda|todos|cards  Read more than your own cards, if the user allowed it
+  grokdash handoff BOT TEXT [--urgent]  Leave work for another bot; it gets it on its next run
+  grokdash handed ID [RESULT]     Report a handoff you were given as done
+  grokdash unhanded ID REASON     Report a handoff you couldn't do
   grokdash register [JSON]        Set your name, color, webhookUrl or webhookToken
   grokdash status                 Whether you missed a scheduled run (for a watchdog; doesn't count as checking in)
   grokdash guide                  Full reference: fields, limits, the server's time zone, examples
@@ -43,6 +54,7 @@ grokdash: post to and read from the Grok Bot Dashboard.
 Card JSON: {"key":"wa:lab-poll","kind":"choice","title":"...","body":"...","source":"WhatsApp · Lab group",
   "urgent":"answer by 14:00","options":[{"label":"Vote Tuesday","instruction":"Vote Tuesday in the poll"}]}
 Kinds: choice (options), draft ("draft":{"to","channel","text"}), reminder, digest ("section":"catchup","countLabel").
+Every bot but the main one starts each command with --bot ITS_ID, like: grokdash --bot venduto actions
 Full reference: grokdash guide
 HELP
 }
@@ -103,6 +115,21 @@ case "$cmd" in
   status) call GET /api/bot/status ;;
   guide) call GET /api/bot/help ;;
   register) call POST /api/bot/register "$(body_arg "$@")" ;;
+  panel) call PUT /api/bot/panel "$(body_arg "$@")" ;;
+  read)
+    [[ $# -ge 1 ]] || die "usage: grokdash read agenda|todos|cards"
+    call GET "/api/bot/read/$1" ;;
+  handoff)
+    [[ $# -ge 2 ]] || die "usage: grokdash handoff BOT TEXT [--urgent]"
+    urgent=false
+    [[ "${3:-}" == "--urgent" ]] && urgent=true
+    call POST /api/bot/handoffs "{\"to\":$(json_str "$1"),\"text\":$(json_str "$2"),\"urgent\":$urgent}" ;;
+  handed)
+    [[ $# -ge 1 ]] || die "usage: grokdash handed ID [RESULT]"
+    call POST "/api/bot/handoffs/$1" "{\"ok\":true,\"result\":$(json_str "${2:-}")}" ;;
+  unhanded)
+    [[ $# -ge 2 ]] || die "usage: grokdash unhanded ID REASON"
+    call POST "/api/bot/handoffs/$1" "{\"ok\":false,\"result\":$(json_str "$2")}" ;;
   raw)
     [[ $# -ge 2 ]] || die "usage: grokdash raw METHOD PATH [JSON]"
     call "$1" "$2" "${3:-}" ;;
