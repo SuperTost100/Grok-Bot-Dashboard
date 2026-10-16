@@ -187,7 +187,8 @@ The server is plain TypeScript run by Node 24 directly, with no build step and n
 | -------------------------------------------------- | ----------------------------------------------------------- |
 | [Set up the bots](bot/README.md)                   | Install `grokdash`, create the Dashboard bot, add a webhook |
 | [Dashboard bot instructions](bot/dashboard-bot.md) | The prompt that makes a Grok Bot keep the page current      |
-| [Secretary changes](bot/secretary.md)              | Turn your current assistant into the urgent-card notifier   |
+| [Shown bots](bot/shown-bot.md)                     | Give a bot its own section, panel and handoffs              |
+| [Secretary changes](bot/secretary.md)              | What your assistant does for Plan my day                    |
 | [Add-ons and apps](docs/addons.md)                 | Install sources from a store, trust, and the runner         |
 | [Triage with Jev](docs/triage.md)                  | How new messages are sorted and when Grok wakes             |
 | [Backups](docs/backups.md)                         | Daily copies, a backup right now, and restoring             |

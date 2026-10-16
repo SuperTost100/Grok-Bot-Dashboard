@@ -1,16 +1,16 @@
 # Set up the Dashboard bot
 
-The dashboard shows what your Grok Bots post. This guide installs the `grokdash` command, creates a "Dashboard" bot that scans your sources and posts cards, and connects your secretary bot for urgent notifications. It takes about 15 minutes once the dashboard itself runs (see the [main README](../README.md)).
+The dashboard shows what your Grok Bots post. This guide installs the `grokdash` command, creates a "Dashboard" bot that writes the cards triage asks for, and gives your other bots a section on the Bots page. It takes about 15 minutes once the dashboard itself runs (see the [main README](../README.md)).
 
 ## How the pieces talk
 
 ```mermaid
 flowchart LR
   B[Dashboard bot] -- "grokdash on your computer" --> D[(Dashboard server)]
-  D -- "webhook when you tap" --> B
-  B -- "urgent cards" --> S[Secretary bot]
-  S -- "notification" --> P[Your phone]
-  P -- "Tailscale" --> D
+  D -- "webhook when there's work" --> B
+  S[Shown bots, like Secretary] -- "grokdash --bot secretary" --> D
+  D -- "webhook for taps and handoffs" --> S
+  P[Your phone] -- "Tailscale" --> D
 ```
 
 Grok Bots run commands on the computer where the Grok Bot desktop app runs. That computer must reach the dashboard over Tailscale, so the bot's token never leaves your own machines.
@@ -92,10 +92,8 @@ bash bot/watchdog/install.sh grok grok-bot
 
 Its log: `journalctl -u grokdash-watchdog`.
 
-## 4. Turn your secretary into the notifier
+## 4. Give your other bots a section
 
-Add the text from [`secretary.md`](secretary.md) to your secretary bot's instructions, and remove its digest routines. From then on it stays quiet unless the Dashboard bot flags something urgent.
+Any bot can use the dashboard with the same `grokdash`, naming itself with `--bot` (like `grokdash --bot venduto actions`). Add the section from [`shown-bot.md`](shown-bot.md) to its instructions with its id and what its panel should show, and give it a webhook routine as in step 2, registered with `grokdash --bot venduto register '{"webhookUrl": "...", "webhookToken": "..."}'`. Then switch it to Shown under Settings, Bots, and tick what it may read beyond its own cards. Bots you don't switch on stay behind the scenes: their cards still reach Today, but they get no section.
 
-## Other bots
-
-Any bot can post cards: give it `grokdash` with its own `BOT=` id (set `GROKDASH_BOT=venduto` in its commands, or a separate config file with `GROKDASH_CONFIG`), and tell it to read `grokdash help`. Its cards get their own filter chip on the page, and taps on them come back to that bot's actions.
+For your secretary, add [`secretary.md`](secretary.md) too: it handles Plan my day and stops sending digests and urgent-card notifications.
