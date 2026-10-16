@@ -170,7 +170,7 @@ Everything lives in one SQLite file, `data/dashboard.db`, readable by your user 
 - **Webhook calls.** When you tap or press refresh, the server calls the webhook URL each bot registered, with no card content in it.
 - **Todoist.** With `TODOIST_TOKEN` set, it reads your active tasks and completes or reopens the ones you tick.
 - **Triage.** With an OpenRouter key set, the text of new messages (up to 15 per decision, cut to 1,500 characters each) goes to OpenRouter and Jev's provider, TypeSafe.
-- **Phone pings.** With an ntfy topic set, urgent cards send a count and a link to that topic.
+- **Phone pings.** With an ntfy topic set, the server tells that topic when a PoliTO deadline is due tomorrow or a reminder you snoozed comes back: a count and a link, never what the card says. It never pings for new messages, because WhatsApp and your mail app already do.
 - **WhatsApp, mail and calendars.** When you set them up, it reads them through WAHA, IMAP and the iCal addresses you gave it, as described in the [sources guide](docs/sources.md).
 - **areadidattica.** With `AREADIDATTICA_URL` set, it asks that local service for unread avvisi and deadlines, and tells it which ones you marked read. areadidattica is the one that talks to PoliTO.
 

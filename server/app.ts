@@ -7,10 +7,11 @@ import type { Store, Item, ItemInput, Kind, Section, Option, Draft, Action, Bot 
 import { Todoist, pickTodos } from "./todoist.ts";
 import { addDays, lastSlot, localStamp, overlaps, parseWhen, snoozeChoices, zonedToEpoch } from "./time.ts";
 import { checkWebhookUrl } from "./webhook.ts";
-import { POLITO_BOT, type PolitoSync } from "./polito.ts";
+import { POLITO_BOT, isDeadlineKey, type PolitoSync } from "./polito.ts";
 import { GROUPS, SettingError, Settings } from "./settings.ts";
 import type { Sources } from "./sources/index.ts";
 import type { Triage } from "./triage.ts";
+import type { Phone } from "./ntfy.ts";
 import { CALENDAR_OWNER } from "./sources/calendar.ts";
 
 /** A route result sent as-is instead of as JSON, like an image. */
@@ -172,6 +173,7 @@ export interface AppDeps {
   sources?: Sources | null;
   /** Jev sorting the messages the sources read. */
   triage?: Triage | null;
+  phone?: Phone | null;
   notify?: (bot: string, reason: "actions" | "refresh" | "inbox") => void;
   /** The last webhook ping to a bot and whether its routine accepted it. */
   lastPing?: (bot: string) => { at: number; ok: boolean } | undefined;
@@ -307,7 +309,7 @@ export function createApp(deps: AppDeps) {
 
   /** Closing a PoliTO card here marks it read there too, so the phone app stops counting it. */
   function readOnPolito(item: Item) {
-    if (deps.polito && item.bot === POLITO_BOT && item.key) void deps.polito.markRead(item.key);
+    if (deps.polito && item.bot === POLITO_BOT && item.key && !isDeadlineKey(item.key)) void deps.polito.markRead(item.key);
   }
 
   async function act(item: Item, b: Record<string, unknown>) {
@@ -713,7 +715,7 @@ export function createApp(deps: AppDeps) {
   const settingsView = () => ({
     groups: GROUPS,
     settings: settings.list(),
-    status: [...(deps.sources?.status() ?? []), ...(deps.triage?.status() ?? [])],
+    status: [...(deps.sources?.status() ?? []), ...(deps.triage?.status() ?? []), ...(deps.phone ? [deps.phone.status()] : [])],
   });
 
   route("GET", "/api/ui/settings", "ui", () => settingsView());

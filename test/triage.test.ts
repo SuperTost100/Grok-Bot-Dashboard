@@ -127,7 +127,7 @@ async function setup(opts: { reply?: (state: Record<string, unknown>) => JevResu
   };
 }
 
-test("a reply needed now: urgent card, one ping without content, Grok woken and handed the chat", async () => {
+test("a reply needed now: urgent card, no phone ping, Grok woken and handed the chat", async () => {
   const t = await setup({ reply: () => answers(4, "reply") });
   try {
     t.store.addInbox([t.msg("393401234567@c.us", "Are you coming to the lab at 11? I need the key"), t.msg("393401234567@c.us", "Please answer")]);
@@ -140,10 +140,7 @@ test("a reply needed now: urgent card, one ping without content, Grok woken and 
     assert.equal((t.jevCalls[0].new_messages as unknown[]).length, 2);
     assert.equal(t.store.getBot("dashboard")!.lastSeenAt, null, "the server's card doesn't count as the bot checking in");
 
-    assert.equal(t.pings.length, 1);
-    assert.equal(t.pings[0].url, "https://ntfy.sh/secret-topic");
-    assert.equal(t.pings[0].body, "1 urgent card on your dashboard");
-    assert.equal(t.pings[0].headers.get("click"), "https://dash.example");
+    assert.equal(t.pings.length, 0, "WhatsApp already told you: the dashboard never pings for a message");
 
     assert.equal(t.triage.wakeDue(), true);
     t.triage.woke();
@@ -774,18 +771,6 @@ test("group talk that isn't for you is archived, never shown", async () => {
   }
 });
 
-test("no phone pings while you're away", async () => {
-  const t = await setup({ reply: () => answers(4, "reply") });
-  try {
-    t.store.setAway({ from: t.now() - 1000, until: t.now() + 86_400_000, summarized: false });
-    t.store.addInbox([t.msg("393401234567@c.us", "Are you coming?")]);
-    await t.triage.tick();
-    assert.equal(t.store.getItemByKey("dashboard", "inbox:whatsapp:393401234567@c.us:needs")!.urgent, "Reply soon");
-    assert.equal(t.pings.length, 0);
-  } finally {
-    t.stop();
-  }
-});
 
 test("a chat waiting for Grok's answer needs you before Grok writes it", async () => {
   const t = await setup({ reply: () => answers(3, "reply") });

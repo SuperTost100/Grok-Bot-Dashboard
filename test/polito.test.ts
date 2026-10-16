@@ -97,7 +97,7 @@ test("PoliTO: unread avvisi become cards in their own language, deadlines go on 
     assert.deepEqual(state.agenda.map((e: { title: string; start: string; allDay: boolean }) => [e.title, e.start, e.allDay]), [["Pagamento seconda rata", "2026-10-14", true]]);
     assert.equal(state.bots.find((b: { slug: string }) => b.slug === POLITO_BOT).name, "PoliTO");
     assert.equal(state.polito.error, "");
-    assert.deepEqual([state.needs.map((c: { key: string }) => c.key), state.catchup.map((c: { key: string }) => c.key)], [["message:9"], ["notification:1"]], "urgent notices need you, the rest read as catch-up");
+    assert.deepEqual([state.needs.map((c: { key: string }) => c.key), state.catchup.map((c: { key: string }) => c.key)], [["deadline-card:deadline:a", "message:9"], ["notification:1"]], "urgent notices and tomorrow's deadline need you, the rest read as catch-up");
     assert.ok(t.fake.auth.every((h) => h === "Bearer secret"));
   } finally {
     t.close();
@@ -318,4 +318,26 @@ test("config: AREADIDATTICA_URL needs a token and a real address", () => {
   assert.throws(() => loadConfig({ ...base, AREADIDATTICA_URL: "http://areadidattica:8789" }), /AREADIDATTICA_TOKEN/);
   assert.throws(() => loadConfig({ ...base, AREADIDATTICA_URL: "areadidattica:8789", AREADIDATTICA_TOKEN: "x" }), /http/);
   assert.equal(loadConfig(base).areadidatticaUrl, "");
+});
+
+test("PoliTO: a deadline in the next three days is an urgent card; nothing is marked read for it, and avvisi syncs leave it", async () => {
+  const t = await setup();
+  try {
+    t.fake.deadlines = [
+      { id: "deadline:a", title: "Consegna laboratorio", date: "2026-10-14", course: "Fisica I", type: "Esercitazione", url: null },
+      { id: "deadline:b", title: "Pagamento seconda rata", date: "2026-10-20", course: null, type: "Tasse", url: null },
+    ];
+    await t.polito.sync();
+    const state = (await t.ui("GET", "/api/ui/state")).body;
+    const card = state.needs.find((c: { title: string }) => c.title === "Consegna laboratorio");
+    assert.deepEqual([card.urgent, card.source], ["Due tomorrow", "PoliTO · Fisica I"]);
+    assert.ok(!state.needs.some((c: { title: string }) => c.title === "Pagamento seconda rata"), "a week away: agenda only");
+    await t.polito.sync();
+    assert.equal(t.store.getItem(card.id)!.status, "open", "an avvisi sync doesn't close it");
+    await t.ui("POST", `/api/ui/items/${card.id}/act`, { type: "done" });
+    await flush();
+    assert.deepEqual(t.fake.reads, []);
+  } finally {
+    t.close();
+  }
 });

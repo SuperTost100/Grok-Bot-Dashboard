@@ -75,6 +75,7 @@
 
 <main>
   <div class="view" id="view-today">
+    <section class="now-next" id="now" aria-label="Now and next"></section>
     <div class="grid">
       <div class="col-main">
         <section class="s-needs" aria-labelledby="h-needs">
@@ -105,6 +106,7 @@
   </div>
 
   <div class="view" id="view-settings" hidden>
+    <section class="s-group" aria-labelledby="g-away"><div class="sec-head"><h2 id="g-away">Away</h2></div><div class="list" id="settings-away"></div></section>
     <div id="settings"><div class="skeleton" aria-label="Loading"><div></div></div></div>
     <p class="settings-note">Your Tailscale login, the bot token, the port and the time zone stay in <code>.env</code>, so a typo here can't lock you out.</p>
   </div>

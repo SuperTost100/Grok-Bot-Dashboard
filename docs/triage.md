@@ -8,7 +8,7 @@ Each burst of new messages in a chat or mail thread is one decision. Jev answers
 
 | Jev says                                                          | What happens                                         | Grok runs?      |
 | ----------------------------------------------------------------- | ---------------------------------------------------- | --------------- |
-| Likely needs your reply or decision, clearly urgent               | Urgent card and a phone ping; Grok drafts the answer | Yes, right away |
+| Likely needs your reply or decision, clearly urgent               | Urgent card; Grok drafts the answer                  | Yes, right away |
 | Likely needs your reply or decision                               | A card now; Grok writes the answer at its next run   | Later           |
 | Might need a reply (35% to the "Grok works on a chat at" setting) | A line in Catch up, made from the message            | No              |
 | A task, news for today, or a person writing to you privately      | A line in Catch up, made from the message            | No              |
@@ -36,4 +36,4 @@ Grok wakes for chats that need it at most once every 45 minutes and takes everyt
 
 Triage starts in Shadow mode: Jev sorts and logs, but the page and Grok work as before, and Settings shows what triage would have done today. Switch Mode to On when its choices look right. Then Refresh only rereads your sources, and the Grok Bot needs the new instructions in [`bot/dashboard-bot.md`](../bot/dashboard-bot.md).
 
-For urgent cards, set an [ntfy](https://ntfy.sh) topic under Phone pings and subscribe to it in the ntfy app. The ping says how many urgent cards wait and links to the dashboard, never what they say.
+Triage never pings your phone: WhatsApp and your mail app already told you about the message. The phone pings under Settings are for things nothing else tells you about, a PoliTO deadline due tomorrow or a snoozed reminder coming back. They say how many and link to the dashboard, never what the card says.
