@@ -13,6 +13,10 @@ import type { Sources } from "./sources/index.ts";
 import type { Triage } from "./triage.ts";
 import type { Phone } from "./ntfy.ts";
 import { weekStart } from "./wakes.ts";
+import { hashToken, type Addons } from "./addons/manager.ts";
+import { ASKS } from "./addons/manifest.ts";
+import { askJev, type Question } from "./jev.ts";
+import type { AddonRow, InboxInput } from "./store.ts";
 import { CALENDAR_OWNER } from "./sources/calendar.ts";
 
 /** A route result sent as-is instead of as JSON, like an image. */
@@ -96,6 +100,12 @@ export function needsYou(i: Item, awaitingGrok: Set<number> = new Set()): boolea
 
 const MAX_IMAGE = 300_000;
 
+/** What an add-on without trust may call: its own cards, panel, actions, agenda, to-dos and status. */
+const UNTRUSTED_OK = [
+  /^\/api\/bot\/(help|items|items\/close|panel|actions|actions\/\d+|agenda|todos)$/,
+  /^\/api\/addon\/status$/,
+];
+
 /** A panel from a bot or add-on: a title and up to 20 blocks the page knows how to draw. */
 export function parsePanel(b: Record<string, unknown>): { title: string; blocks: PanelBlock[] } {
   if (!Array.isArray(b.blocks) || b.blocks.length > 20) throw bad(`"blocks" must be a list of up to 20 blocks`);
@@ -178,7 +188,8 @@ export function parseItem(raw: unknown, i = 0, tz = "UTC"): ItemInput {
     section,
     kind,
     title: text(b.title, at("title"), 200, true),
-    body: text(b.body, at("body"), 2000),
+    // Long enough for an exam timetable from PoliTO; the page scrolls long tables inside the card.
+    body: text(b.body, at("body"), 10_000),
     context: text(b.context, at("context"), 1000),
     source: text(b.source, at("source"), 120),
     app: app(b.app),
@@ -204,6 +215,37 @@ const MIME: Record<string, string> = {
   ".ico": "image/x-icon",
 };
 
+/**
+ * The gateway address of every network this container is on (Docker gives each bridge network's gateway
+ * the subnet's first address). Read from /proc/net/route, refreshed every minute.
+ */
+let gatewayCache: { at: number; set: Set<string> } | null = null;
+export function gateways(routeTable?: string): Set<string> {
+  if (!routeTable && gatewayCache && Date.now() - gatewayCache.at < 60_000) return gatewayCache.set;
+  let table = routeTable ?? "";
+  if (!routeTable) {
+    try {
+      table = fs.readFileSync("/proc/net/route", "utf8");
+    } catch {
+      table = "";
+    }
+  }
+  const ip = (hex: string) => [0, 1, 2, 3].map((i) => parseInt(hex.slice(6 - i * 2, 8 - i * 2), 16)).join(".");
+  const set = new Set<string>();
+  for (const line of table.split("\n").slice(1)) {
+    const [, dest, gw, , , , , mask] = line.trim().split(/\s+/);
+    if (!dest || !mask) continue;
+    if (gw && gw !== "00000000") set.add(ip(gw));
+    if (mask !== "00000000") {
+      const base = (parseInt(dest, 16) & parseInt(mask, 16)) >>> 0;
+      // Little-endian: the first address of the subnet adds 1 to the lowest-addressed byte, the last one here.
+      set.add(ip(((base + 0x01000000) >>> 0).toString(16).padStart(8, "0")));
+    }
+  }
+  if (!routeTable) gatewayCache = { at: Date.now(), set };
+  return set;
+}
+
 const SECURITY_HEADERS = {
   "X-Content-Type-Options": "nosniff",
   "Referrer-Policy": "no-referrer",
@@ -226,6 +268,7 @@ export interface AppDeps {
   /** Jev sorting the messages the sources read. */
   triage?: Triage | null;
   phone?: Phone | null;
+  addons?: Addons | null;
   notify?: (bot: string, reason: "actions" | "refresh" | "inbox" | "work") => void;
   /** The last webhook ping to a bot and whether its routine accepted it. */
   lastPing?: (bot: string) => { at: number; ok: boolean } | undefined;
@@ -374,9 +417,16 @@ export function createApp(deps: AppDeps) {
     if (a?.status === "claimed") throw conflict(`${item.bot} is already doing "${a.label}". Wait for it to finish.`);
   }
 
-  /** Closing a PoliTO card here marks it read there too, so the phone app stops counting it. */
-  function readOnPolito(item: Item) {
+  /**
+   * You closed a card. PoliTO's own reader marks it read there too, so the phone app stops counting it.
+   * An add-on or app that owns the card hears about it as a "closed" action, so it can do the same.
+   */
+  function closedByYou(item: Item, reason: "done" | "dismissed" | "read") {
     if (deps.polito && item.bot === POLITO_BOT && item.key && !isDeadlineKey(item.key)) void deps.polito.markRead(item.key);
+    const owner = store.getBot(item.bot);
+    if (owner && (owner.kind === "addon" || owner.kind === "app")) {
+      store.addAction({ bot: owner.slug, type: "closed", label: reason, text: item.key ?? `#${item.id}`, delayMs: 0 });
+    }
   }
 
   async function act(item: Item, b: Record<string, unknown>) {
@@ -413,15 +463,15 @@ export function createApp(deps: AppDeps) {
       }
       case "done":
         freeFromBot(item);
-        readOnPolito(item);
+        closedByYou(item, "done");
         return { item: store.closeItem(item.id, "done", item.bot === POLITO_BOT ? "Read" : "Marked done") };
       case "dismiss":
         freeFromBot(item);
-        readOnPolito(item);
+        closedByYou(item, "dismissed");
         return { item: store.closeItem(item.id, "dismissed", "Dismissed") };
       case "read":
         if (needsYou(item, store.awaitingGrok())) throw bad("Only catch-up lines can be marked as read.");
-        readOnPolito(item);
+        closedByYou(item, "read");
         return { item: store.closeItem(item.id, "read", "Read") };
       case "snooze": {
         freeFromBot(item);
@@ -487,6 +537,7 @@ export function createApp(deps: AppDeps) {
   }
 
   function actionForBot(a: Action) {
+    if (a.type === "closed") return { id: a.id, type: a.type, key: a.text, reason: a.label };
     return {
       id: a.id,
       type: a.type,
@@ -511,7 +562,7 @@ export function createApp(deps: AppDeps) {
           key: "stable id of the decision, like wa:<chat id>:<message id>. Up to 200 chars.",
           kind: "choice | draft | reminder (section needs), digest (section catchup)",
           title: "required, up to 200 chars, what's needed",
-          body: "up to 2000 chars", context: "up to 1000 chars", source: "label like 'WhatsApp · Lab group', up to 120 chars",
+          body: "up to 10000 chars", context: "up to 1000 chars", source: "label like 'WhatsApp · Lab group', up to 120 chars",
           app: "whatsapp, gmail, googlecalendar, mail, github, todoist, subito, vinted, telegram... (shows the logo)",
           link: "http(s) link to the original", urgent: "deadline words like 'answer by 14:00', up to 60 chars",
           options: "choice only: 1 to 4 of {label (up to 60 chars), instruction (up to 1000)}. The instruction must do exactly what the label says.",
@@ -568,7 +619,7 @@ export function createApp(deps: AppDeps) {
     const batch = Array.isArray(b.items);
     const list = batch ? (b.items as unknown[]) : [b];
     if (list.length > 50) throw bad("Send at most 50 items per call.");
-    const parsed = list.map((x, i) => parseItem(x && typeof x === "object" && !Array.isArray(x) ? { bot: b.bot, ...x } : x, batch ? i : 0, tz));
+    const parsed = list.map((x, i) => parseItem(x && typeof x === "object" && !Array.isArray(x) ? { ...x, bot: b.bot } : x, batch ? i : 0, tz));
     const keys = parsed.map((p) => p.key).filter(Boolean);
     if (new Set(keys).size !== keys.length) throw bad("Two items in this call share a key. Send each key once.");
     const results = parsed.map((p) => {
@@ -695,6 +746,64 @@ export function createApp(deps: AppDeps) {
     return { id: h.id, status: h.status };
   });
 
+  // ----- add-ons and apps (their own token) -----
+
+  route("PUT", "/api/addon/status", "bot", (_r, _p, _q, b) => {
+    store.setAddonStatus(slug(b.bot), text(b.text, "text", 200), b.ok !== false);
+    return { ok: true };
+  });
+
+  // Mail and chat messages as the dashboard received them, after an id the add-on remembers.
+  route("GET", "/api/addon/messages", "bot", (_r, _p, q) => {
+    const after = Math.max(0, Math.floor(Number(q.get("after") ?? 0)) || 0);
+    const limit = Math.min(500, Math.max(1, Math.floor(Number(q.get("limit") ?? 200)) || 200));
+    const messages = store.inboxAfter(after, text(q.get("source"), "source", 40), limit);
+    return { messages, last: messages.at(-1)?.id ?? after };
+  });
+
+  // Messages an add-on or app read (WhatsApp, mail…) go to triage like the dashboard's own.
+  route("POST", "/api/addon/messages", "bot", (_r, _p, _q, b) => {
+    const sources = b.sources === undefined ? [] : (Array.isArray(b.sources) ? b.sources : null);
+    if (!sources || sources.length > 10) throw bad(`"sources" must be a list of up to 10`);
+    for (const [i, raw] of sources.entries()) {
+      const x = obj(raw, `sources[${i}]`);
+      const id = text(x.id, `sources[${i}].id`, 40, true);
+      if (!/^[a-z][a-z0-9-]*(:[\w-]+)?$/.test(id)) throw bad(`sources[${i}].id must look like "whatsapp:1" or "mail:2"`);
+      const kind = x.kind === "mail" ? "mail" : "chat";
+      store.setState(`inbox:source:${id}`, JSON.stringify({ name: text(x.name, `sources[${i}].name`, 40, true), app: app(x.app), kind }));
+    }
+    if (!Array.isArray(b.messages) || b.messages.length > 500) throw bad(`"messages" must be a list of up to 500`);
+    const messages = (b.messages as unknown[]).map((raw, i): InboxInput => {
+      const x = obj(raw, `messages[${i}]`);
+      const f = (k: string, max: number, req = false) => text(x[k] == null ? "" : String(x[k]), `messages[${i}].${k}`, max, req);
+      const source = f("source", 40, true);
+      if (!store.getState(`inbox:source:${source}`)) throw bad(`messages[${i}].source "${source}" isn't described in "sources" yet`);
+      const at = Number(x.at);
+      if (!Number.isFinite(at) || at <= 0) throw bad(`messages[${i}].at must be a time in milliseconds`);
+      return {
+        source, extId: f("extId", 300, true), thread: f("thread", 300, true), threadName: f("threadName", 200), sender: f("sender", 200),
+        fromMe: x.fromMe === true, isGroup: x.isGroup === true, automated: x.automated === true,
+        subject: f("subject", 500), text: f("text", 20_000), link: x.link ? url(x.link, `messages[${i}].link`) : "", at,
+      };
+    });
+    return { added: store.addInbox(messages) };
+  });
+
+  // A typed question for Jev, paid from the dashboard's OpenRouter key.
+  route("POST", "/api/addon/decide", "bot", async (_r, _p, _q, b) => {
+    const key = settings.str("openrouterKey");
+    if (!key) throw conflict("No OpenRouter key on the dashboard, so Jev can't answer.");
+    const questions = obj(b.questions, "questions") as Record<string, Question>;
+    if (Object.keys(questions).length > 10) throw bad("Ask at most 10 questions at a time.");
+    const state = obj(b.state, "state");
+    if (JSON.stringify(state).length > 40_000) throw bad(`"state" is too long`);
+    try {
+      return await askJev(key, settings.str("jevModel"), state, questions);
+    } catch (err) {
+      throw new HttpError(502, `Jev didn't answer: ${(err as Error).message}`);
+    }
+  });
+
   route("PUT", "/api/bot/panel", "bot", (_r, _p, _q, b) => {
     const panel = parsePanel(b);
     const p = store.setPanel(slug(b.bot), panel.title, panel.blocks);
@@ -711,7 +820,7 @@ export function createApp(deps: AppDeps) {
     const what = p[0] as ReadScope;
     if (!READ_SCOPES.includes(what)) throw new HttpError(404, `Readable: ${READ_SCOPES.join(", ")}.`);
     const bot = store.getBot(slug(q.get("bot")));
-    const legacy = bot?.slug === settings.str("grokBot");
+    const legacy = bot?.slug === settings.str("grokBot") || Boolean(store.getAddon(bot?.slug ?? "")?.trusted);
     if (!bot || (!legacy && !bot.reads.includes(what))) throw new HttpError(403, `This bot may not read ${what}. The owner can allow it on the dashboard under Settings, Bots.`);
     if (what === "agenda") return { from: today(), events: agenda(today()) };
     if (what === "todos") return await todosState();
@@ -786,7 +895,7 @@ export function createApp(deps: AppDeps) {
     for (const id of idList(b.ids)) {
       const item = store.getItem(id);
       if (!item || item.status !== "open" || needsYou(item, store.awaitingGrok())) continue;
-      readOnPolito(item);
+      closedByYou(item, "read");
       store.closeItem(item.id, "read", "Read");
     }
     return { ok: true, state: await state() };
@@ -866,6 +975,78 @@ export function createApp(deps: AppDeps) {
     return { action: { id: action.id }, state: await state() };
   });
 
+  // ----- add-ons and apps -----
+
+  const addonsOr404 = () => {
+    if (!deps.addons) throw new HttpError(404, "Add-ons are off on this dashboard.");
+    return deps.addons;
+  };
+  /** Errors from GitHub, a manifest or the runner are the user's to read, not server failures. */
+  const userError = async <T>(fn: () => Promise<T>) => {
+    try {
+      return await fn();
+    } catch (err) {
+      if (err instanceof HttpError) throw err;
+      throw bad((err as Error).message);
+    }
+  };
+  const addonsView = () => {
+    const a = addonsOr404();
+    return { installed: a.view(), stores: a.stores(), runner: a.runnerOn(), asks: ASKS, panels: Object.fromEntries(a.view().map((x) => [x.id, store.getPanel(x.id)])) };
+  };
+
+  route("GET", "/api/ui/addons", "ui", () => addonsView());
+
+  route("GET", "/api/ui/addons/catalog", "ui", async (_r, _p, q) => {
+    const c = await addonsOr404().catalog(q.get("refresh") === "1");
+    const installed = new Set(addonsOr404().view().map((x) => x.id));
+    return { entries: c.entries.map((e) => ({ ...e, installed: installed.has(e.id) })), errors: c.errors };
+  });
+
+  route("GET", "/api/ui/addons/peek", "ui", async (_r, _p, q) => userError(() => addonsOr404().peek(text(q.get("source"), "source", 300, true))));
+
+  route("POST", "/api/ui/addons/install", "ui", async (_r, _p, _q, b) => {
+    const a = addonsOr404();
+    const source = text(b.source, "source", 300, true);
+    const values = b.settings === undefined ? {} : obj(b.settings, "settings");
+    await userError(() => a.install(source, { trusted: b.trusted === true, settings: values }));
+    return { ...addonsView(), state: await state() };
+  });
+
+  route("POST", "/api/ui/addons/:id/update", "ui", async (_r, p) => {
+    await userError(() => addonsOr404().update(p[0]));
+    return addonsView();
+  });
+
+  route("PUT", "/api/ui/addons/:id", "ui", async (_r, p, _q, b) => {
+    await userError(() => addonsOr404().configure(p[0], {
+      trusted: b.trusted === undefined ? undefined : b.trusted === true,
+      enabled: b.enabled === undefined ? undefined : b.enabled === true,
+      settings: b.settings === undefined ? undefined : obj(b.settings, "settings"),
+    }));
+    return addonsView();
+  });
+
+  route("DELETE", "/api/ui/addons/:id", "ui", async (_r, p, _q, b) => {
+    await userError(() => addonsOr404().remove(p[0], b.purge === true));
+    return { ...addonsView(), state: await state() };
+  });
+
+  route("GET", "/api/ui/addons/:id/logs", "ui", (_r, p) => ({ lines: addonsOr404().logs(p[0]) }));
+
+  route("POST", "/api/ui/addons/stores", "ui", async (_r, _p, _q, b) => {
+    const a = addonsOr404();
+    const repo = text(b.repo, "repo", 200, true);
+    if (!/^[\w.-]+\/[\w.-]+$/.test(repo)) throw bad(`A store is a GitHub repo like "owner/repo".`);
+    a.setStores(b.remove === true ? a.stores().filter((x) => x !== repo) : [...a.stores(), repo]);
+    return addonsView();
+  });
+
+  route("POST", "/api/ui/addons/check-updates", "ui", async () => {
+    await addonsOr404().checkUpdates(true);
+    return addonsView();
+  });
+
   route("POST", "/api/ui/actions/:id/undo", "ui", async (_r, p) => {
     if (!store.cancelAction(Number(p[0]))) throw conflict("Too late to undo: the bot already has it.");
     return { ok: true, state: await state() };
@@ -943,9 +1124,16 @@ export function createApp(deps: AppDeps) {
   // ----- auth -----
 
   function isOwner(req: http.IncomingMessage) {
+    // Checked first, so even with AUTH_MODE=none an app can't reach the owner's pages.
+    if (config.ownerVia === "gateway" && !gateways().has(String(req.socket.remoteAddress ?? "").replace(/^::ffff:/, ""))) return false;
     if (config.authMode === "none") return true;
     const login = String(req.headers["tailscale-user-login"] ?? "").toLowerCase();
     return login === config.ownerLogin;
+  }
+
+  function addonFor(req: http.IncomingMessage): AddonRow | null {
+    const m = /^Bearer (\S{20,200})$/.exec(String(req.headers.authorization ?? ""));
+    return m ? store.addonByToken(hashToken(m[1])) : null;
   }
 
   const expected = Buffer.from(`Bearer ${config.botToken}`);
@@ -1023,8 +1211,17 @@ export function createApp(deps: AppDeps) {
       pathname = u.pathname;
       if (pathname === "/healthz") return send(res, 200, { ok: true });
       const isApi = pathname.startsWith("/api/");
-      const scope = pathname.startsWith("/api/bot/") ? "bot" : "ui";
-      if (scope === "bot" && !isBot(req)) throw new HttpError(401, "Missing or wrong bot token (Authorization: Bearer <BOT_TOKEN>).");
+      const scope = pathname.startsWith("/api/bot/") || pathname.startsWith("/api/addon/") ? "bot" : "ui";
+      // Grok bots use the bot token. Add-ons and apps use their own, which ties every call to them.
+      let addon: AddonRow | null = null;
+      if (scope === "bot" && !isBot(req)) {
+        addon = addonFor(req);
+        if (!addon) throw new HttpError(401, "Missing or wrong bot token (Authorization: Bearer <BOT_TOKEN>).");
+        if (!addon.trusted && !UNTRUSTED_OK.some((re) => re.test(pathname))) {
+          throw new HttpError(403, "This add-on isn't trusted, so it can only post its own cards, panel, agenda, to-dos and status. The owner can trust it on the Add-ons page.");
+        }
+      }
+      if (pathname.startsWith("/api/addon/") && !addon) throw new HttpError(403, "These routes are for add-ons and apps, with their own token.");
       if (scope === "ui" && !isOwner(req)) throw new HttpError(403, "This dashboard only opens for its owner's Tailscale account.");
       if (!isApi) {
         if (req.method !== "GET" && req.method !== "HEAD") throw new HttpError(405, "Method not allowed.");
@@ -1041,7 +1238,11 @@ export function createApp(deps: AppDeps) {
         const body = req.method === "GET" ? {} : await readBody(req);
         // Bots can name themselves once in an X-Bot header instead of in every body.
         const headerBot = req.headers["x-bot"];
-        if (scope === "bot" && typeof headerBot === "string") {
+        if (addon) {
+          // An add-on is always itself, whatever it says.
+          body.bot = addon.id;
+          u.searchParams.set("bot", addon.id);
+        } else if (scope === "bot" && typeof headerBot === "string") {
           if (body.bot === undefined) body.bot = headerBot;
           if (!u.searchParams.has("bot")) u.searchParams.set("bot", headerBot);
         }

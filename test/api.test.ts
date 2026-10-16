@@ -892,3 +892,17 @@ test("wake rules: urgent gathers then merges, other work waits, the cap only sto
   assert.equal(dueAt([w(false, 1000)], 0, 0, { ...r, overCap: true }), null);
   assert.equal(dueAt([w(true, 1000)], 0, 0, { ...r, overCap: true }), 1000 + 180_000);
 });
+
+test("in the Docker setup, your login only counts when it comes through the bridge gateway", async () => {
+  const server = http.createServer(createApp({ config: { ...config, ownerVia: "gateway" }, store: s.store, log: () => {} }));
+  await new Promise<void>((r) => server.listen(0, "127.0.0.1", r));
+  try {
+    const base = `http://127.0.0.1:${(server.address() as AddressInfo).port}`;
+    const res = await fetch(base + "/api/ui/state", { headers: { "Tailscale-User-Login": OWNER } });
+    assert.equal(res.status, 403, "an add-on on this machine can't pose as you");
+    assert.equal((await fetch(base + "/healthz")).status, 200);
+  } finally {
+    server.closeAllConnections();
+    server.close();
+  }
+});

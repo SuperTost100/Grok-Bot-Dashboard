@@ -21,6 +21,12 @@ export interface Config {
   webhookAllowPrivate: boolean;
   backupDays: number;
   publicDir: string;
+  /**
+   * "gateway" in the Docker setup: your browser's requests (through Tailscale Serve and Docker's port
+   * mapping) arrive from the bridge gateway, while add-ons and apps arrive from loopback or their own
+   * container. Requests that carry your Tailscale login from anywhere else are refused.
+   */
+  ownerVia?: "gateway";
 }
 
 function int(env: NodeJS.ProcessEnv, name: string, fallback: number, min: number, max: number): number {
@@ -77,5 +83,6 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): Config {
     webhookAllowPrivate: env.WEBHOOK_ALLOW_PRIVATE === "1",
     backupDays: int(env, "BACKUP_DAYS", 7, 0, 90),
     publicDir: path.resolve(import.meta.dirname, "../public"),
+    ownerVia: env.OWNER_VIA === "gateway" ? "gateway" : undefined,
   };
 }
