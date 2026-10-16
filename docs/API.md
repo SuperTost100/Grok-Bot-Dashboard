@@ -103,6 +103,7 @@ When the user taps a button that reaches the outside world (an answer, a draft, 
 | `send`          | Send `text` exactly as written to `card.draft.to` on `card.draft.channel`. The user may have edited it. |
 | `write`         | `text` is a free-form instruction from the user about the card.                                         |
 | `complete_todo` | Mark to-do `todoId` done. Only used when to-dos come from a bot.                                        |
+| `panel`         | The user pressed a button on your panel. Do `instruction`, or `label` if there's no instruction.        |
 
 `card` is the card exactly as the user saw it when they tapped, even if you updated it since. Act on that. Each action is handed out once. If it isn't reported within 20 minutes, it isn't handed out again, because it may already have happened: the card comes back to the user with a note to check. `refreshRequested` is `true` after the user presses refresh; do a full scan, then call `/api/bot/scan`. `lastScanAt` is when your last complete scan began: look for new messages since then.
 
@@ -151,6 +152,27 @@ Only used when the server has no `TODOIST_TOKEN`. `PUT /api/bot/todos` replaces 
 ```
 
 Add `"app": "todoist"` to show its logo. The page shows what's overdue, due or with a deadline in the next 7 days, plus anything `p1` or `p2`.
+
+## Panels
+
+A bot shows what it keeps track of in a panel: on its section of the Bots page, and on Today when the user pins it. `PUT /api/bot/panel` replaces the panel, `DELETE /api/bot/panel` removes it. Update it during a run you'd make anyway; a panel never needs a run of its own.
+
+```json
+{
+  "title": "Listings",
+  "blocks": [
+    {"type": "stats", "items": [{"label": "Active", "value": "3"}, {"label": "New offers", "value": "1"}]},
+    {"type": "list", "items": [{"title": "DJI Mavic Mini", "sub": "€180 on Subito", "badge": "Offer €150", "link": "https://..."}]},
+    {"type": "buttons", "items": [{"label": "Accept €150", "instruction": "Accept the €150 offer on the Mavic Mini"}]}
+  ]
+}
+```
+
+Up to 20 blocks. `text` takes `text`. `stats` takes up to 6 `{label, value}`. `list` takes up to 30 `{title, sub, link, badge}`. `table` takes up to 8 `columns` and 50 `rows`. `buttons` takes up to 4 `{label, instruction}`: a press waits out the undo window and reaches you as a `panel` action. `image` takes `src` as a base64 `data:image/png` or `data:image/jpeg` address and `alt`; the page never loads images from elsewhere.
+
+## Reading more than your own cards
+
+A bot reads its own cards and actions. The user can let a bot read more under Settings, Bots, and the bot then calls `GET /api/bot/read/agenda`, `GET /api/bot/read/todos` or `GET /api/bot/read/cards` (every open card). Without that permission the answer is `403`.
 
 ## Bot settings and scans
 

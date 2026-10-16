@@ -32,6 +32,8 @@
   <symbol id="i-x" viewBox="0 0 24 24"><path d="M6 6l12 12M18 6L6 18"/></symbol>
   <symbol id="i-sliders" viewBox="0 0 24 24"><path d="M4 7h9M17 7h3M4 17h3M11 17h9"/><circle cx="15" cy="7" r="2"/><circle cx="9" cy="17" r="2"/></symbol>
   <symbol id="i-away" viewBox="0 0 24 24"><path d="M3 19l6.5-10 4 6 2.5-3.5L21 19z"/><circle cx="17" cy="6" r="2"/></symbol>
+  <symbol id="i-bot" viewBox="0 0 24 24"><rect x="5" y="7" width="14" height="12" rx="4"/><path d="M12 7V4M9.5 12.5v1M14.5 12.5v1"/></symbol>
+  <symbol id="i-pin" viewBox="0 0 24 24"><path d="M9 4h6l-1 6 3 3H7l3-3zM12 13v7"/></symbol>
   <symbol id="i-msg" viewBox="0 0 24 24"><path d="M5 18.5V7a2 2 0 0 1 2-2h10a2 2 0 0 1 2 2v7a2 2 0 0 1-2 2H8z"/></symbol>
 </svg>
 
@@ -45,6 +47,7 @@
       <div class="spacer"></div>
       <div class="desk-tabs" role="tablist" aria-label="Views">
         <button role="tab" aria-selected="true" data-tab="today">Today</button>
+        <button role="tab" aria-selected="false" data-tab="bots">Bots</button>
         <button role="tab" aria-selected="false" data-tab="archive">Archive</button>
         <button role="tab" aria-selected="false" data-tab="settings">Settings</button>
       </div>
@@ -76,6 +79,7 @@
 <main>
   <div class="view" id="view-today">
     <section class="now-next" id="now" aria-label="Now and next"></section>
+    <div class="bot-strip" id="bot-strip" hidden></div>
     <div class="grid">
       <div class="col-main">
         <section class="s-needs" aria-labelledby="h-needs">
@@ -96,8 +100,13 @@
           <div class="sec-head"><h2 id="h-agenda">Agenda</h2><span class="note" id="agenda-source"></span></div>
           <div id="agenda"></div>
         </section>
+        <div class="s-pinned" id="pinned"></div>
       </div>
     </div>
+  </div>
+
+  <div class="view" id="view-bots" hidden>
+    <div id="bots"><div class="skeleton" aria-label="Loading"><div></div></div></div>
   </div>
 
   <div class="view" id="view-archive" hidden>
@@ -107,6 +116,7 @@
 
   <div class="view" id="view-settings" hidden>
     <section class="s-group" aria-labelledby="g-away"><div class="sec-head"><h2 id="g-away">Away</h2></div><div class="list" id="settings-away"></div></section>
+    <section class="s-group" aria-labelledby="g-bots"><div class="sec-head"><h2 id="g-bots">Bots</h2><span class="note">Shown bots get a page and a line on Today</span></div><div class="list" id="settings-bots"></div></section>
     <div id="settings"><div class="skeleton" aria-label="Loading"><div></div></div></div>
     <p class="settings-note">Your Tailscale login, the bot token, the port and the time zone stay in <code>.env</code>, so a typo here can't lock you out.</p>
   </div>
@@ -118,6 +128,7 @@
 
 <nav class="tabbar" role="tablist" aria-label="Views">
   <button role="tab" aria-selected="true" data-tab="today"><svg class="i" aria-hidden="true"><use href="#i-today"/></svg>Today</button>
+  <button role="tab" aria-selected="false" data-tab="bots"><svg class="i" aria-hidden="true"><use href="#i-bot"/></svg>Bots</button>
   <button role="tab" aria-selected="false" data-tab="archive"><svg class="i" aria-hidden="true"><use href="#i-archive"/></svg>Archive</button>
   <button role="tab" aria-selected="false" data-tab="settings"><svg class="i" aria-hidden="true"><use href="#i-sliders"/></svg>Settings</button>
 </nav>

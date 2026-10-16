@@ -11,7 +11,7 @@ export type ItemStatus = "open" | "pending" | "snoozed" | "closed";
  * unknown: the bot took it but never reported back, so nobody knows if it happened.
  */
 export type ActionStatus = "queued" | "ready" | "claimed" | "unknown" | "done" | "failed" | "cancelled";
-export type ActionType = "choose" | "send" | "write" | "complete_todo";
+export type ActionType = "choose" | "send" | "write" | "complete_todo" | "panel";
 
 export interface Option { label: string; instruction?: string }
 export interface Draft { to: string; channel?: string; text: string }
@@ -97,7 +97,36 @@ export interface Bot {
   refreshRequestedAt: number | null;
   /** Daily scheduled run times ("HH:MM"), so the page can tell when a run never showed up. */
   schedule: string[];
+  /** bot: a Grok bot. addon and app: installed from a store. source: the dashboard's own reader (PoliTO). */
+  kind: BotKind;
+  /** On the Bots page and in the bot strip. Behind-the-scenes bots still post cards that need you. */
+  shown: boolean;
+  /** What a bot may read beyond its own cards: "agenda", "todos", "cards". */
+  reads: ReadScope[];
+  /** One line on what it does, for its page. */
+  role: string;
 }
+
+export type BotKind = "bot" | "addon" | "app" | "source";
+export const READ_SCOPES = ["agenda", "todos", "cards"] as const;
+export type ReadScope = (typeof READ_SCOPES)[number];
+
+/** What a bot, add-on or app shows on its page and, when pinned, on Today. */
+export interface Panel {
+  owner: string;
+  title: string;
+  blocks: PanelBlock[];
+  pinned: boolean;
+  updatedAt: number;
+}
+
+export type PanelBlock =
+  | { type: "text"; text: string }
+  | { type: "stats"; items: { label: string; value: string }[] }
+  | { type: "list"; items: { title: string; sub?: string; link?: string; badge?: string }[] }
+  | { type: "table"; columns: string[]; rows: string[][] }
+  | { type: "buttons"; items: { label: string; instruction?: string }[] }
+  | { type: "image"; src: string; alt: string };
 
 export interface CalEvent {
   id: number;
@@ -254,6 +283,13 @@ CREATE TABLE IF NOT EXISTS triage (
   cost REAL NOT NULL DEFAULT 0
 );
 CREATE INDEX IF NOT EXISTS triage_grok ON triage (grok, level);
+CREATE TABLE IF NOT EXISTS panels (
+  owner TEXT PRIMARY KEY,
+  title TEXT NOT NULL DEFAULT '',
+  blocks TEXT NOT NULL DEFAULT '[]',
+  pinned INTEGER NOT NULL DEFAULT 0,
+  updated_at INTEGER NOT NULL
+);
 CREATE TABLE IF NOT EXISTS wakes (
   at INTEGER NOT NULL,
   reason TEXT NOT NULL,
@@ -277,6 +313,10 @@ const MIGRATIONS: [string, string, string][] = [
   ["triage", "card_key", "TEXT"],
   ["items", "seen_at", "INTEGER"],
   ["items", "expires_at", "INTEGER"],
+  ["bots", "kind", "TEXT NOT NULL DEFAULT 'bot'"],
+  ["bots", "shown", "INTEGER NOT NULL DEFAULT 0"],
+  ["bots", "reads", "TEXT NOT NULL DEFAULT '[]'"],
+  ["bots", "role", "TEXT NOT NULL DEFAULT ''"],
 ];
 
 // An event overlaps [from, to) when it starts before `to` and is still going at `from`.
@@ -354,7 +394,15 @@ function toBot(r: Row): Bot {
     lastScanAt: num(r.last_scan_at),
     refreshRequestedAt: num(r.refresh_requested_at),
     schedule: str(r.schedule).split(" ").filter(Boolean),
+    kind: (str(r.kind) || "bot") as BotKind,
+    shown: Boolean(r.shown),
+    reads: JSON.parse(str(r.reads) || "[]"),
+    role: str(r.role),
   };
+}
+
+function toPanel(r: Row): Panel {
+  return { owner: str(r.owner), title: str(r.title), blocks: JSON.parse(str(r.blocks) || "[]"), pinned: Boolean(r.pinned), updatedAt: Number(r.updated_at) };
 }
 
 function toTodo(row: Row): BotTodo {
@@ -777,6 +825,47 @@ export class Store {
     return this.getBot(slug)!;
   }
 
+  /** Your choices about a bot from the page: these never count as the bot checking in. */
+  configureBot(slug: string, patch: { shown?: boolean; reads?: ReadScope[]; role?: string; kind?: BotKind; name?: string; color?: string }) {
+    this.ensureBot(slug);
+    if (patch.shown !== undefined) this.db.prepare("UPDATE bots SET shown = ? WHERE slug = ?").run(patch.shown ? 1 : 0, slug);
+    if (patch.reads !== undefined) this.db.prepare("UPDATE bots SET reads = ? WHERE slug = ?").run(JSON.stringify(patch.reads), slug);
+    if (patch.role !== undefined) this.db.prepare("UPDATE bots SET role = ? WHERE slug = ?").run(patch.role, slug);
+    if (patch.kind !== undefined) this.db.prepare("UPDATE bots SET kind = ? WHERE slug = ?").run(patch.kind, slug);
+    if (patch.name !== undefined) this.db.prepare("UPDATE bots SET name = ? WHERE slug = ?").run(patch.name, slug);
+    if (patch.color !== undefined) this.db.prepare("UPDATE bots SET color = ? WHERE slug = ?").run(patch.color, slug);
+    return this.getBot(slug)!;
+  }
+
+  // Panels
+
+  setPanel(owner: string, title: string, blocks: PanelBlock[]): Panel {
+    this.db
+      .prepare(
+        `INSERT INTO panels (owner, title, blocks, updated_at) VALUES (?, ?, ?, ?)
+         ON CONFLICT (owner) DO UPDATE SET title = excluded.title, blocks = excluded.blocks, updated_at = excluded.updated_at`,
+      )
+      .run(owner, title, JSON.stringify(blocks), this.now());
+    return this.getPanel(owner)!;
+  }
+
+  getPanel(owner: string): Panel | null {
+    const r = this.db.prepare("SELECT * FROM panels WHERE owner = ?").get(owner) as Row | undefined;
+    return r ? toPanel(r) : null;
+  }
+
+  listPanels(): Panel[] {
+    return this.db.prepare("SELECT * FROM panels ORDER BY owner").all().map((r) => toPanel(r as Row));
+  }
+
+  deletePanel(owner: string) {
+    this.db.prepare("DELETE FROM panels WHERE owner = ?").run(owner);
+  }
+
+  pinPanel(owner: string, pinned: boolean) {
+    this.db.prepare("UPDATE panels SET pinned = ? WHERE owner = ?").run(pinned ? 1 : 0, owner);
+  }
+
   /** Record a complete scan. `startedAt` is when the scan began, so the next one looks back to there. */
   markScan(slug: string, startedAt?: number, schedule?: string[]) {
     this.touchBot(slug);
@@ -1065,6 +1154,16 @@ export class Store {
       if (i) this.db.prepare("UPDATE items SET status = 'pending', error = '' WHERE id = ?").run(i.id);
       return this.getAction(Number(res.lastInsertRowid))!;
     });
+  }
+
+  /** Panel button presses not finished yet, so the page can show them with Undo. */
+  openPanelActions(): Action[] {
+    return this.db.prepare("SELECT * FROM actions WHERE type = 'panel' AND status IN ('queued', 'ready', 'claimed') ORDER BY id").all().map((r) => toAction(r as Row));
+  }
+
+  /** Bots holding taps they took and haven't reported yet: they're working. */
+  busyBots(): Set<string> {
+    return new Set(this.db.prepare("SELECT DISTINCT bot FROM actions WHERE status = 'claimed'").all().map((r) => str((r as Row).bot)));
   }
 
   getAction(id: number): Action | null {

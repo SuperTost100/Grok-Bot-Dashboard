@@ -145,6 +145,8 @@ export interface PolitoSync {
 
 export function createPolitoSync(polito: Polito, store: Store, tz: string, log: (msg: string) => void): PolitoSync {
   store.updateBot(POLITO_BOT, { name: "PoliTO", color: "#014271" });
+  // Not a Grok bot: it never shows on the Bots page or under Settings, Bots.
+  store.configureBot(POLITO_BOT, { kind: "source" });
   let running: Promise<void> | null = null;
   let lastError = "";
 
