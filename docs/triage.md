@@ -1,6 +1,6 @@
 # Triage with Jev
 
-With WhatsApp or mail connected (see [WhatsApp, mail and calendar](sources.md)), the dashboard can sort new messages itself, so the Grok Bot only runs when something needs a reply or an answer. The sorting is done by [Jev](https://openrouter.ai/docs/guides/community/jev), a decision model on OpenRouter that answers questions with probabilities instead of text. It costs $0.042 per million input tokens. One decision is about 1,000 tokens, so 160 decisions cost under 1¢. Add an OpenRouter API key under Settings, Triage.
+With the WhatsApp app or the Mail add-on installed (see [Add-ons and apps](addons.md)), the dashboard can sort new messages itself, so the Grok Bot only runs when something needs a reply or an answer. The sorting is done by [Jev](https://openrouter.ai/docs/guides/community/jev), a decision model on OpenRouter that answers questions with probabilities instead of text. It costs $0.042 per million input tokens. One decision is about 1,000 tokens, so 160 decisions cost under 1¢. Add an OpenRouter API key under Settings, Triage.
 
 ## How a message is sorted
 

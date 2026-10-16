@@ -9,11 +9,6 @@ export interface Config {
   authMode: AuthMode;
   ownerLogin: string;
   botToken: string;
-  todoistToken: string;
-  todoistFilter: string;
-  /** areadidattica, the local PoliTO service. Empty turns PoliTO off. */
-  areadidatticaUrl: string;
-  areadidatticaToken: string;
   undoSeconds: number;
   archiveDays: number;
   tz: string;
@@ -52,14 +47,6 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): Config {
   if (botToken.length < 8) {
     throw new Error("BOT_TOKEN is required (at least 8 characters). Generate one with: openssl rand -hex 24");
   }
-  const areadidatticaUrl = (env.AREADIDATTICA_URL ?? "").trim();
-  const areadidatticaToken = (env.AREADIDATTICA_TOKEN ?? "").trim();
-  if (areadidatticaUrl && !/^https?:\/\/[^\s]+$/i.test(areadidatticaUrl)) {
-    throw new Error(`AREADIDATTICA_URL must be an http:// or https:// address, got "${areadidatticaUrl}"`);
-  }
-  if (areadidatticaUrl && !areadidatticaToken) {
-    throw new Error("AREADIDATTICA_TOKEN is required with AREADIDATTICA_URL. Use the API_TOKEN from areadidattica's .env.");
-  }
   const tz = (env.TZ ?? "").trim() || Intl.DateTimeFormat().resolvedOptions().timeZone;
   try {
     new Intl.DateTimeFormat("en", { timeZone: tz });
@@ -73,10 +60,6 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): Config {
     authMode,
     ownerLogin,
     botToken,
-    todoistToken: (env.TODOIST_TOKEN ?? "").trim(),
-    todoistFilter: (env.TODOIST_FILTER ?? "").trim(),
-    areadidatticaUrl,
-    areadidatticaToken,
     undoSeconds: int(env, "UNDO_SECONDS", 5, 0, 60),
     archiveDays: int(env, "ARCHIVE_DAYS", 30, 1, 365),
     tz,

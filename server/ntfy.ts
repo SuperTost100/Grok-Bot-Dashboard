@@ -6,7 +6,7 @@
 import type { Store } from "./store.ts";
 import type { Settings } from "./settings.ts";
 import { localStamp, zonedToEpoch } from "./time.ts";
-import { POLITO_BOT } from "./polito.ts";
+import { POLITO_BOT } from "./app.ts";
 
 type Fetch = typeof fetch;
 

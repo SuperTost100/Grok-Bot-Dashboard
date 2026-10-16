@@ -8,7 +8,7 @@ import { Settings } from "../server/settings.ts";
 import { loadConfig } from "../server/config.ts";
 
 const OWNER = "owner@example.com";
-const env = { OWNER_LOGIN: OWNER, BOT_TOKEN: "test-token-123", TZ: "Europe/Rome", UNDO_SECONDS: "8", TODOIST_TOKEN: "from-env" };
+const env = { OWNER_LOGIN: OWNER, BOT_TOKEN: "test-token-123", TZ: "Europe/Rome", UNDO_SECONDS: "8", OPENROUTER_API_KEY: "from-env" };
 
 async function start() {
   const config = { ...loadConfig(env), publicDir: new URL("../public", import.meta.url).pathname.replace(/\/$/, "") };
@@ -57,7 +57,7 @@ test("bad values are refused and nothing in the same save is kept", async () => 
     assert.equal(res.status, 400);
     assert.match(res.body.error, /Undo window must be a whole number from 0 to 60/);
     assert.equal((await t.one("archiveDays")).value, 30);
-    assert.equal((await t.call("PUT", "/api/ui/settings", { values: { areadidatticaUrl: "ftp://x" } })).status, 400);
+    assert.equal((await t.call("PUT", "/api/ui/settings", { values: { dashboardUrl: "ftp://x" } })).status, 400);
     assert.equal((await t.call("PUT", "/api/ui/settings", { values: { nope: 1 } })).status, 400);
     assert.equal((await t.call("PUT", "/api/ui/settings", { values: { undoSeconds: 1 } }, "someone@else.com")).status, 403);
   } finally {
@@ -68,13 +68,13 @@ test("bad values are refused and nothing in the same save is kept", async () => 
 test("secrets are write-only: the page only learns whether one is set", async () => {
   const t = await start();
   try {
-    const before = await t.one("todoistToken");
+    const before = await t.one("openrouterKey");
     assert.deepEqual([before.value, before.set, before.source], [null, true, "env"]);
-    const res = await t.call("PUT", "/api/ui/settings", { values: { todoistToken: "new-secret" } });
+    const res = await t.call("PUT", "/api/ui/settings", { values: { openrouterKey: "new-secret" } });
     assert.ok(!JSON.stringify(res.body).includes("new-secret"), "the answer never echoes the secret");
     assert.ok(!JSON.stringify((await t.call("GET", "/api/ui/settings")).body).includes("from-env"));
-    assert.equal(t.settings.str("todoistToken"), "new-secret");
-    const off = await t.one("areadidatticaToken");
+    assert.equal(t.settings.str("openrouterKey"), "new-secret");
+    const off = await t.one("ntfyTopic");
     assert.deepEqual([off.set, off.source], [false, "default"]);
   } finally {
     t.stop();

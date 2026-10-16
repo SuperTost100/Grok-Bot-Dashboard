@@ -248,12 +248,12 @@ function renderHeader() {
   const down = s.bots.filter((b) => b.offlineSince);
   const hooked = s.bots.filter((b) => b.hasWebhook);
   const allDown = hooked.length > 0 && hooked.every((b) => b.offlineSince);
-  const politoError = s.polito?.error ? `PoliTO avvisi couldn't be checked: ${s.polito.error}` : "";
+  // Add-ons and apps that say something went wrong.
   const problems = s.sourceProblems || [];
-  $("#offline").hidden = !down.length && !politoError && !problems.length;
+  $("#offline").hidden = !down.length && !problems.length;
   $("#offline").textContent = down
     .map((b) => `${b.name} hasn't checked in since ${b.lastSeenAt ? whenFull(b.lastSeenAt) : "it was set up"}. ${b.hasWebhook ? "Tap Refresh to wake it." : "Taps wait for its next run."}`)
-    .concat(politoError || [], problems)
+    .concat(problems)
     .join(" ");
   const asked = s.bots.some((b) => b.refreshRequestedAt);
   const label = asked ? "Scan requested" : allDown ? "Bot offline" : ago(s.lastScanAt);
@@ -262,7 +262,7 @@ function renderHeader() {
   $("#refresh").classList.toggle("busy", asked);
   const hooks = s.bots.filter((b) => b.hasWebhook).length;
   // PoliTO has a filter chip like a bot, but no bot behind it.
-  const real = s.bots.filter((b) => b.slug !== "polito").length;
+  const real = s.bots.filter((b) => b.kind === "bot").length;
   const runs = s.runs ? ` Bot runs this week: ${s.runs.week} of ${s.runs.cap}.` : "";
   $("#foot").textContent = (real
     ? `${real} bot${real > 1 ? "s" : ""} connected. ${hooks ? "Taps reach the bots within seconds." : "No bot has a webhook yet, so taps wait for the next scheduled scan."}`
@@ -1010,13 +1010,12 @@ function renderSettings() {
       </div>`;
     }).join("");
     const gid = g.replace(/\W+/g, "-");
-    return `<section class="s-group" aria-labelledby="g-${gid}"><div class="sec-head"><h2 id="g-${gid}">${esc(g)}</h2><span class="note s-status" data-status-group="${esc(g)}" role="status"></span></div><div class="qr-slot" data-qr-group="${esc(g)}"></div><div class="list">${rows}</div></section>`;
+    return `<section class="s-group" aria-labelledby="g-${gid}"><div class="sec-head"><h2 id="g-${gid}">${esc(g)}</h2><span class="note s-status" data-status-group="${esc(g)}" role="status"></span></div><div class="list">${rows}</div></section>`;
   }).join("");
   renderSourceStatus();
 }
 
-let qrStamp = 0;
-/** Status lines and the QR code update in place, so a poll never wipes what you're typing. */
+/** Status lines update in place, so a poll never wipes what you're typing. */
 function renderSourceStatus() {
   const list = ui.settings?.status || [];
   for (const el of $$("[data-status-group]")) {
@@ -1025,23 +1024,6 @@ function renderSourceStatus() {
     el.classList.toggle("bad", Boolean(st && !st.ok));
     el.classList.toggle("on", Boolean(st?.on && st.ok));
   }
-  for (const el of $$("[data-qr-group]")) {
-    const st = list.find((x) => x.group === el.dataset.qrGroup);
-    if (st?.needsLink) {
-      if (!el.querySelector("[data-act=wa-link]")) {
-        el.innerHTML = `<div class="qr qr-expired"><p>WhatsApp shows a QR code for a few minutes. Get a new one when your phone is at hand.</p><button class="btn primary" data-act="wa-link" data-slot="${st.slot}">Show a new QR code</button></div>`;
-      }
-      continue;
-    }
-    if (!st?.needsQr) { el.innerHTML = ""; continue; }
-    // WhatsApp replaces its code every 20 seconds or so; the image is fetched again with each status poll.
-    const src = `/api/ui/whatsapp/${st.slot}/qr?t=${qrStamp}`;
-    if (!el.querySelector("img")) {
-      el.innerHTML = `<div class="qr"><img alt="QR code to link WhatsApp" width="220" height="220"><ol><li>Open WhatsApp on your phone${st.slot === 2 ? " (the business number)" : ""}.</li><li>Go to Settings, then Linked devices.</li><li>Tap Link a device and point the camera at this code.</li></ol></div>`;
-    }
-    const img = $("img", el);
-    if (img.getAttribute("src") !== src) img.src = src;
-  }
 }
 
 async function pollSettingsStatus() {
@@ -1049,7 +1031,6 @@ async function pollSettingsStatus() {
   try {
     const fresh = await api("GET", "/api/ui/settings");
     ui.settings = { ...ui.settings, status: fresh.status };
-    qrStamp = Date.now();
     renderSourceStatus();
   } catch {
     // The Today banner already says when the server is unreachable.
@@ -1109,20 +1090,6 @@ document.addEventListener("input", (e) => {
 document.addEventListener("click", async (e) => {
   const b = e.target.closest("[data-act], [data-tab], [data-bot]");
   if (b?.dataset.act === "setting-reset") return saveSetting(b.dataset.key, null);
-  if (b?.dataset.act === "wa-link") {
-    b.disabled = true;
-    b.textContent = "Asking WhatsApp for a code…";
-    try {
-      const fresh = await api("POST", `/api/ui/whatsapp/${b.dataset.slot}/link`, {});
-      ui.settings = { ...ui.settings, status: fresh.status };
-      renderSourceStatus();
-    } catch (err) {
-      toast(err.message);
-      b.disabled = false;
-      b.textContent = "Show a new QR code";
-    }
-    return;
-  }
   if (!b || !ui.state || b.disabled) return;
   if (b.dataset.tab) return setTab(b.dataset.tab);
   if (b.dataset.bot) {

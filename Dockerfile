@@ -1,8 +1,8 @@
 FROM node:24-alpine
 WORKDIR /app
-# Runtime dependencies are only for reading mail (imapflow, postal-mime) and calendars (ical.js).
-COPY package.json package-lock.json ./
-RUN npm ci --omit=dev --no-audit --no-fund && npm cache clean --force
+# No runtime dependencies: mail, calendars and the rest are add-ons now, each bundled on its own.
+# package.json only tells Node the .ts files are ES modules.
+COPY package.json ./
 COPY server ./server
 COPY public ./public
 COPY bin ./bin
