@@ -142,9 +142,11 @@ test("a reply needed now: urgent card, no phone ping, Grok woken and handed the 
 
     assert.equal(t.pings.length, 0, "WhatsApp already told you: the dashboard never pings for a message");
 
+    assert.equal(t.triage.wakeDue(), false, "urgent work gathers 3 minutes for more to arrive");
+    t.advance(3 * 60_000);
     assert.equal(t.triage.wakeDue(), true);
     t.triage.woke();
-    assert.equal(t.triage.wakeDue(), false, "one attempt per cooldown");
+    assert.equal(t.triage.wakeDue(), false, "one attempt per wake");
     const actions = await t.bot("/api/bot/actions");
     assert.equal(actions.inbox.length, 1);
     assert.equal(actions.inbox[0].key, "inbox:whatsapp:393401234567@c.us:needs");
@@ -171,43 +173,68 @@ test("a chat that's still typing waits; a burst is one decision", async () => {
   }
 });
 
-test("non-urgent replies wait for a batch of 3, or for 2 hours", async () => {
+test("work that isn't urgent waits an hour and goes in one run", async () => {
   const t = await setup({ reply: () => answers(3, "reply") });
   try {
     t.store.addInbox([t.msg("1@c.us", "a"), t.msg("2@c.us", "b")]);
     await t.triage.tick();
-    assert.equal(t.triage.wakeDue(), false, "2 waiting");
+    assert.equal(t.triage.wakeDue(), false, "just queued");
+    t.advance(59 * 60_000);
     t.store.addInbox([t.msg("3@c.us", "c")]);
     await t.triage.tick();
-    assert.equal(t.triage.wakeDue(), true, "3 waiting");
+    assert.equal(t.triage.wakeDue(), false, "the oldest has waited 59 minutes");
+    t.advance(60_000);
+    assert.equal(t.triage.wakeDue(), true, "an hour: all three go together");
+    t.triage.woke();
+    assert.equal((await t.bot("/api/bot/actions")).inbox.length, 3);
   } finally {
     t.stop();
   }
-  const u = await setup({ reply: () => answers(3, "reply") });
+});
+
+test("urgent work ships what waits with it, and a burst of urgent messages costs one or two runs", async () => {
+  const t = await setup({ reply: (state) => (String(state.where).includes("calm") ? answers(3, "reply") : answers(4, "reply")) });
   try {
-    u.store.addInbox([u.msg("1@c.us", "a")]);
-    await u.triage.tick();
-    assert.equal(u.triage.wakeDue(), false);
-    u.advance(2 * 3_600_000);
-    assert.equal(u.triage.wakeDue(), true, "the oldest waited 2 hours");
+    t.store.addInbox([t.msg("calm@c.us", "whenever you can")]);
+    await t.triage.tick();
+    t.advance(10 * 60_000);
+    t.store.addInbox([t.msg("1@c.us", "now!")]);
+    await t.triage.tick();
+    t.advance(60_000);
+    t.store.addInbox([t.msg("2@c.us", "also now!")]);
+    await t.triage.tick();
+    t.advance(2 * 60_000);
+    assert.equal(t.triage.wakeDue(), true, "3 minutes after the first urgent one");
+    t.triage.woke();
+    t.store.addWake("inbox", "dashboard");
+    assert.equal((await t.bot("/api/bot/actions")).inbox.length, 3, "the calm chat rides along");
+    t.advance(60_000);
+    t.store.addInbox([t.msg("3@c.us", "urgent again")]);
+    await t.triage.tick();
+    t.advance(5 * 60_000);
+    assert.equal(t.triage.wakeDue(), false, "right after a run, urgent work waits 15 minutes");
+    t.advance(10 * 60_000);
+    assert.equal(t.triage.wakeDue(), true);
   } finally {
-    u.stop();
+    t.stop();
   }
 });
 
-test("the cooldown and the daily ceiling hold Grok back, and taps count as runs", async () => {
-  const t = await setup({ reply: () => answers(4, "reply") });
+test("past the weekly cap only urgent work wakes Grok, and every bot's runs count", async () => {
+  const t = await setup({ reply: (state) => (String(state.where).includes("calm") ? answers(3, "reply") : answers(4, "reply")) });
   try {
-    t.store.addWake("actions", "dashboard"); // a tap woke Grok a minute ago
+    t.settings.update({ weeklyRuns: 2 });
+    t.store.addWake("actions", "venduto");
+    t.store.addWake("work", "secretary");
+    t.store.addInbox([t.msg("calm@c.us", "whenever")]);
+    await t.triage.tick();
+    t.advance(2 * 3_600_000);
+    assert.equal(t.triage.wakeDue(), false, "2 of 2 runs used this week");
+    assert.equal((await t.ui("GET", "/api/ui/state")).runs.week, 2);
     t.store.addInbox([t.msg("1@c.us", "now!")]);
     await t.triage.tick();
-    assert.equal(t.triage.wakeDue(), false, "Grok ran under 45 minutes ago");
-    t.advance(46 * 60_000);
-    assert.equal(t.triage.wakeDue(), true);
-    t.settings.update({ wakeCeiling: 1 });
-    assert.equal(t.triage.wakeDue(), false, "1 run today already");
-    assert.equal(t.triage.runsToday(), 1);
-    assert.equal((await t.ui("GET", "/api/ui/state")).grokRunsToday, 1);
+    t.advance(3 * 60_000);
+    assert.equal(t.triage.wakeDue(), true, "urgent still goes");
   } finally {
     t.stop();
   }
@@ -364,6 +391,7 @@ test("a wake Grok never answers isn't repeated for the same chats, only for new 
   try {
     t.store.addInbox([t.msg("1@c.us", "now!")]);
     await t.triage.tick();
+    t.advance(3 * 60_000);
     assert.equal(t.triage.wakeDue(), true);
     t.triage.woke();
     t.store.addWake("inbox", "dashboard");
@@ -371,6 +399,7 @@ test("a wake Grok never answers isn't repeated for the same chats, only for new 
     assert.equal(t.triage.wakeDue(), false, "same chat, nothing new: no second paid wake");
     t.store.addInbox([t.msg("2@c.us", "also now!", { at: t.now() - 120_000 })]);
     await t.triage.tick();
+    t.advance(3 * 60_000);
     assert.equal(t.triage.wakeDue(), true, "a new chat is worth a wake");
   } finally {
     t.stop();
@@ -422,6 +451,7 @@ test("chats Grok took but never confirmed come back once, then stay with you", a
     t.advance(31 * 60_000);
     await t.triage.tick();
     assert.equal(t.store.grokQueue().length, 1, "queued again");
+    t.advance(3 * 60_000);
     assert.equal(t.triage.wakeDue(), true, "worth one more wake");
     assert.equal((await t.bot("/api/bot/actions")).inbox.length, 1);
     t.advance(31 * 60_000);
@@ -473,14 +503,15 @@ test("switching to Shadow while Jev answers keeps the page untouched", async () 
   }
 });
 
-test("other bots' runs don't use up Grok's cooldown or ceiling", async () => {
+test("other bots' runs don't touch Grok's own clock, only the weekly total", async () => {
   const t = await setup({ reply: () => answers(4, "reply") });
   try {
     for (let i = 0; i < 12; i++) t.store.addWake("refresh", "venduto");
     t.store.addInbox([t.msg("1@c.us", "now!")]);
     await t.triage.tick();
-    assert.equal(t.triage.wakeDue(), true);
-    assert.equal(t.triage.runsToday(), 0);
+    t.advance(3 * 60_000);
+    assert.equal(t.triage.wakeDue(), true, "Venduto just ran, but Grok didn't");
+    assert.equal(t.triage.runsThisWeek(), 12);
   } finally {
     t.stop();
   }

@@ -11,6 +11,7 @@ import { Settings } from "./settings.ts";
 import { createSources } from "./sources/index.ts";
 import { createTriage } from "./triage.ts";
 import { createPhone } from "./ntfy.ts";
+import { answeredAt, dueAt, handoffWork, lastWakeOf, rules, wakeMessage } from "./wakes.ts";
 import type { InboxMessage } from "./store.ts";
 import { checkWebhookUrl, guardedLookup, missedRun, retryDue, RETRY_WINDOW } from "./webhook.ts";
 import { lastSlot, localStamp } from "./time.ts";
@@ -75,9 +76,12 @@ function politoDue(now: number): boolean {
 const PING_GAP = 20_000;
 const lastPing = new Map<string, { at: number; ok: boolean }>();
 const woken = new Map<string, number>(); // the missed scheduled run each bot was last woken for
+const attempted = new Map<string, number>(); // when each bot was last woken for handoffs, before its ping lands
+// A bot that took handoffs and never reported them gets them again after this long (twice at most).
+const HANDOFF_LEASE_MS = 30 * 60_000;
 const deferred = new Map<string, NodeJS.Timeout>();
 
-type Reason = "actions" | "refresh" | "inbox";
+type Reason = "actions" | "refresh" | "inbox" | "work";
 
 function notify(slug: string, reason: Reason) {
   const wait = (lastPing.get(slug)?.at ?? 0) + PING_GAP - Date.now();
@@ -98,8 +102,8 @@ async function ping(slug: string, reason: Reason) {
       message:
         reason === "actions"
           ? "You have dashboard actions waiting. Run: grokdash actions"
-          : reason === "inbox"
-            ? "Chats on the dashboard need a reply or an answer from you. Run: grokdash actions"
+          : reason === "inbox" || reason === "work"
+            ? wakeMessage(store, slug, slug === settings.str("grokBot") && triage.active() ? store.grokQueue().length : 0)
             : "Someone pressed refresh on the dashboard. Scan your sources and update it.",
     });
     sent.ok = status >= 200 && status < 300;
@@ -193,7 +197,20 @@ const tick = setInterval(() => {
     if (polito && politoDue(Date.now())) void polito.sync();
     sources.tick();
     if (++ticks % 5 === 0) void triage.tick();
-    if (ticks % 60 === 0) void phone.tick();
+    if (ticks % 60 === 0) {
+      void phone.tick();
+      store.expireHandoffClaims(Date.now() - HANDOFF_LEASE_MS);
+    }
+    // Handoffs wake their receiver on the same rules as triage. The Grok bot's are part of its triage wake.
+    for (const slug of store.botsWithHandoffs()) {
+      if (slug === settings.str("grokBot") && triage.active()) continue;
+      if (!store.getBot(slug)?.webhookUrl) continue;
+      const due = dueAt(handoffWork(store, slug), lastWakeOf(store, slug, attempted.get(slug)), answeredAt(store, slug), rules(store, settings, config.tz));
+      if (due === null || due > Date.now()) continue;
+      attempted.set(slug, Date.now());
+      log(`waking ${slug} for ${store.queuedHandoffs(slug).length} handoff(s)`);
+      notify(slug, "work");
+    }
     if (triage.wakeDue()) {
       triage.woke();
       const grok = settings.str("grokBot");
