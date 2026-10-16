@@ -270,9 +270,11 @@ function renderHeader() {
 }
 
 function renderFilters() {
-  const bots = ui.state.bots;
-  if (ui.filter !== "all" && !bots.some((b) => b.slug === ui.filter)) ui.filter = "all";
   const open = ui.state.needs.filter((i) => i.status !== "closed");
+  // A chip only for a source with cards to filter: add-ons and quiet bots don't crowd the row.
+  const withCards = new Set([...ui.state.needs, ...ui.state.catchup].map((i) => i.bot));
+  const bots = ui.state.bots.filter((b) => withCards.has(b.slug) || b.slug === ui.filter);
+  if (ui.filter !== "all" && !bots.some((b) => b.slug === ui.filter)) ui.filter = "all";
   const chip = (slug, label, count, extra = "") =>
     `<button class="chip-filter${extra}" aria-pressed="${ui.filter === slug}" data-bot="${esc(slug)}">${label} <span class="count num">${count || ""}</span></button>`;
   $("#filters").innerHTML = bots.length < 2 ? "" :
@@ -471,7 +473,7 @@ function renderStrip() {
 function renderPinned() {
   const list = (ui.state.pinned || []).filter((p) => p.blocks.length);
   $("#pinned").innerHTML = list.map((p) => `<section class="s-panel" aria-label="${esc(p.name)}">
-    <div class="sec-head"><h2>${esc(p.title || p.name)}</h2><span class="note">${esc(p.title ? p.name : "")}<button class="btn ghost pin-btn" data-act="panel-pin" data-owner="${esc(p.owner)}" data-pinned="false" aria-label="Unpin from Today" title="Unpin from Today">${icon("x")}</button></span></div>
+    <div class="sec-head"><h2>${esc(p.title || p.name)}</h2><span class="note">${esc(p.title && p.title !== p.name ? p.name : "")}<button class="btn ghost pin-btn" data-act="panel-pin" data-owner="${esc(p.owner)}" data-pinned="false" aria-label="Unpin from Today" title="Unpin from Today">${icon("x")}</button></span></div>
     ${renderPanel(p)}
   </section>`).join("");
 }
@@ -535,7 +537,8 @@ function renderSettingsBots() {
 
 // ---------- add-ons and apps ----------
 
-const typeLine = (x) => (x.type === "app" ? `Runs its own container${x.memory ? `, about ${x.memory} of memory` : ""}` : "Runs inside the dashboard");
+// Installed add-ons know their trust: an untrusted one runs in a container of its own.
+const typeLine = (x) => (x.type === "app" ? `Runs its own container${x.memory ? `, about ${x.memory} of memory` : ""}` : x.trusted === false ? "Runs in a container of its own" : "Runs inside the dashboard");
 
 async function loadAddons(refreshCatalog = false) {
   const a = (ui.addons ??= { view: null, catalog: null, settings: new Set(), logs: new Map(), install: null, busy: "" });

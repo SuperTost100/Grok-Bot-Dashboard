@@ -22,7 +22,7 @@
 
 <picture>
   <source media="(prefers-color-scheme: dark)" srcset="docs/screenshots/today-dark.png">
-  <img alt="The Today page with demo data: six cards under Needs you, led by an urgent vote on a lab swap with Vote Tuesday and Vote Monday buttons, then to-dos from Todoist on the right and today's and tomorrow's agenda." src="docs/screenshots/today-light.png">
+  <img alt="The Today page with demo data: Now shows the short film meeting until 11:00 and Next the Io Sono Cultura session at 14:30, with 8 h 30 free and two to-dos for today. Below, Needs you starts with an urgent vote on a lab swap, and the right column holds the to-dos, the agenda from Google Calendar and a pinned Shipments panel with one parcel ready for pickup." src="docs/screenshots/today-light.png">
 </picture>
 
 ## Why Grok Bot Dashboard
@@ -53,28 +53,26 @@ There's no account to create and nothing to pay for beyond the Grok Bot subscrip
   <tr>
     <td width="50%">
       <picture>
-        <source media="(prefers-color-scheme: dark)" srcset="docs/screenshots/archive-dark.png">
-        <img alt="The Archive tab with five closed cards, for example a Sonos offer closed by the Venduto bot with the note Countered Giulia at 45 euro." src="docs/screenshots/archive-light.png">
+        <source media="(prefers-color-scheme: dark)" srcset="docs/screenshots/bots-dark.png">
+        <img alt="The Bots page with demo data: Comprato's Purchases panel with 2 ordered and 3 watched, its card about a SONOFF switch, and the Secretary's This week list with a handoff to Venduto waiting." src="docs/screenshots/bots-light.png">
       </picture>
     </td>
     <td width="50%">
       <picture>
-        <source media="(prefers-color-scheme: dark)" srcset="docs/screenshots/settings-dark.png">
-        <img alt="The Settings tab showing the undo window at 5 seconds, 30 days of archive, 7 daily backups and the triage section in Shadow mode." src="docs/screenshots/settings-light.png">
+        <source media="(prefers-color-scheme: dark)" srcset="docs/screenshots/addons-dark.png">
+        <img alt="The Add-ons page with demo data: Calendar, Shipments, Todoist and WhatsApp installed, each with its status, and the Shipments panel showing two parcels on the way and one to pick up." src="docs/screenshots/addons-light.png">
       </picture>
     </td>
   </tr>
   <tr>
-    <td>The archive keeps closed cards for 30 days, with the bot's note.</td>
-    <td>Settings change the undo window, triage and sources without a restart.</td>
+    <td>Each bot you show gets its status, its panel, its cards and its handoffs.</td>
+    <td>Add-ons install from a store and report how they're doing.</td>
   </tr>
 </table>
 
 ## How it fits with Grok Bot
 
-A Grok Bot named "Dashboard" scans your WhatsApp, mail and calendar on a schedule (every 2 hours by default) and posts cards with the `grokdash` command. When you tap something, the dashboard calls the bot's webhook routine and the bot acts within seconds. Your existing secretary bot stops sending digests and only notifies you when a card is urgent. Any other bot can post cards too, and gets its own filter on the page.
-
-[Set up the bots](bot/README.md) after the dashboard runs.
+Add-ons read your WhatsApp, mail and calendar, and triage decides what needs you. When a chat needs an answer, the dashboard wakes a Grok Bot named "Dashboard", which works behind the scenes: it writes the card with the likely answers, and carries out what you tap within seconds. Your other bots (a secretary, a selling bot) keep their own panels on the Bots page, post cards when they need a decision, and hand work to each other through the dashboard. Every bot talks to it with the `grokdash` command, and the dashboard wakes them through their webhook routines on a weekly budget you set.
 
 ## Start
 
