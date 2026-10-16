@@ -76,7 +76,7 @@ Every run uses your Grok Bot allowance, so the schedule is the main cost. With 8
 
 ### With triage on
 
-When the dashboard reads WhatsApp and mail itself and triage is On (see [Triage with Jev](../README.md#triage-with-jev)), the bot doesn't need a schedule. The webhook wakes it when a chat needs a reply or an answer, and when you tap. So:
+When the dashboard reads WhatsApp and mail itself and triage is On (see [Triage with Jev](../docs/triage.md)), the bot doesn't need a schedule. The webhook wakes it when a chat needs a reply or an answer, and when you tap. So:
 
 1. Delete the routine that runs every 2 hours. Keep the webhook routine.
 2. Empty the schedule in `~/.config/grokdash/config`: `SCHEDULE=`.

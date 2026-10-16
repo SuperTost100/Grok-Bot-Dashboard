@@ -132,7 +132,7 @@ export function decide(answers: JevResult["answers"], replyPct: number, automate
   return { level, need: picked, actionable, doubtful, automated, chat };
 }
 
-/** Where a decision sends the messages. The table in the README matches this. */
+/** Where a decision sends the messages. The table in docs/triage.md matches this. */
 export function routeFor(d: Decision): Route {
   if (d.actionable) return d.level >= NOW ? "wake" : "ride";
   if (d.doubtful) return "card";
