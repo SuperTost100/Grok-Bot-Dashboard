@@ -64,6 +64,8 @@ export interface Sources {
   status(): SourceStatus[];
   /** Problems worth a banner on Today. */
   problems(): string[];
+  /** When every source that's on was last read without an error: the oldest of those reads. */
+  lastRead(): number | null;
   waha(slot: number): Waha | null;
   /** Show a new QR code for a WhatsApp number. */
   link(slot: number): Promise<void>;
@@ -244,6 +246,10 @@ export function createSources(
         else if (t.note.startsWith("wa:") && t.note !== "wa:STARTING") out.push(`${t.group} isn't linked. Open Settings to link it.`);
       }
       return out;
+    },
+    lastRead() {
+      const reads = jobs().filter((j) => j.run).map((j) => tracks.get(j.group)).map((t) => t?.lastOk ?? null);
+      return reads.length && reads.every((r) => r !== null) ? Math.min(...(reads as number[])) : null;
     },
     waha,
     async link(slot) {

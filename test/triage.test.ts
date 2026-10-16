@@ -8,6 +8,7 @@ import { Settings } from "../server/settings.ts";
 import { loadConfig } from "../server/config.ts";
 import { calendarFor, createTriage, decide, routeFor, type Decision } from "../server/triage.ts";
 import type { JevResult } from "../server/jev.ts";
+import type { Sources } from "../server/sources/index.ts";
 
 const TZ = "Europe/Rome";
 const env = { OWNER_LOGIN: "o@x.com", BOT_TOKEN: "test-token-123", TZ };
@@ -79,7 +80,7 @@ test("routes follow the table", () => {
 
 // ---------- The loop, with a pretend Jev ----------
 
-async function setup(opts: { reply?: (state: Record<string, unknown>) => JevResult["answers"] } = {}) {
+async function setup(opts: { reply?: (state: Record<string, unknown>) => JevResult["answers"]; sources?: Sources } = {}) {
   let clock = Date.parse("2026-10-12T10:00:00Z");
   const config = { ...loadConfig(env), publicDir: new URL("../public", import.meta.url).pathname.replace(/\/$/, "") };
   const store = new Store(":memory:", () => clock);
@@ -105,7 +106,7 @@ async function setup(opts: { reply?: (state: Record<string, unknown>) => JevResu
   });
   settings.update({ openrouterKey: "sk-or-test", triageMode: "on", ntfyTopic: "secret-topic", dashboardUrl: "https://dash.example" });
   const notified: string[] = [];
-  const server = http.createServer(createApp({ config, store, settings, triage, log: () => {}, notify: (b, r) => notified.push(`${b}:${r}`) }));
+  const server = http.createServer(createApp({ config, store, settings, triage, sources: opts.sources, log: () => {}, notify: (b, r) => notified.push(`${b}:${r}`) }));
   await new Promise<void>((r) => server.listen(0, "127.0.0.1", r));
   const base = `http://127.0.0.1:${(server.address() as AddressInfo).port}`;
   let n = 0;
@@ -728,6 +729,7 @@ test("an open invitation gets an Add to calendar button and no Grok run", async 
     const card = t.store.getItemByKey("dashboard", "inbox:whatsapp:1@c.us:event:p1")!;
     assert.equal(card.kind, "choice");
     assert.deepEqual(card.options.map((o) => o.label), ["Add to calendar"]);
+    assert.equal(card.context, "Tap Add to calendar and Grok puts it in your main Google Calendar.");
     assert.equal(t.store.grokQueue().length, 0);
   } finally {
     t.stop();
@@ -793,6 +795,21 @@ test("a chat waiting for Grok's answer needs you before Grok writes it", async (
     const card = t.store.getItemByKey("dashboard", "inbox:whatsapp:1@c.us:needs")!;
     const st = await t.ui("GET", "/api/ui/state");
     assert.deepEqual([st.needs.map((c: { id: number }) => c.id), st.catchup.length], [[card.id], 0]);
+  } finally {
+    t.stop();
+  }
+});
+
+test("with triage on, Updated means the last read of your sources, not Grok's last scan", async () => {
+  let read: number | null = null;
+  const sources = { lastRead: () => read, problems: () => [], calendarOn: () => false } as unknown as Sources;
+  const t = await setup({ sources });
+  try {
+    t.store.ensureBot("dashboard");
+    t.store.markScan("dashboard", t.now() - 86_400_000);
+    assert.equal((await t.ui("GET", "/api/ui/state")).lastScanAt, null, "Grok no longer scans: its old scan doesn't count");
+    read = t.now() - 60_000;
+    assert.equal((await t.ui("GET", "/api/ui/state")).lastScanAt, read);
   } finally {
     t.stop();
   }
