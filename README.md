@@ -39,11 +39,11 @@ There's no account to create and nothing to pay for beyond the Grok Bot subscrip
 
 **Answer in one tap.** Pick an answer, send or edit a draft, snooze, or write the bot an instruction. Anything that reaches other people waits 5 seconds with Undo, then goes to the bot that posted the card.
 
-**See your day.** To-dos come straight from Todoist, and you tick them off on the page. Next to them sit today's and tomorrow's agenda and one-paragraph summaries of busy group chats and mailboxes.
+**See your day.** A strip at the top shows what's on now or next, how much free time is left before 22:00, and three to-dos picked for today. Below sit the rest of your to-dos, today's and tomorrow's agenda, and one-line summaries of busy chats and mailboxes.
 
-**Bring in PoliTO avvisi.** Optional. Unread course avvisi and school messages from the Politecnico di Torino become cards, and marking one read here marks it read in the PoliTO app too. [More in the PoliTO guide](docs/polito.md).
+**Add your sources.** Mail, chats, calendars, to-dos and the rest come from add-ons and apps, installed from a GitHub store with one click on the Add-ons page: Todoist, Calendar, Mail, WhatsApp, PoliTO, Shipments and Plan my day are in the [default store](https://github.com/SuperTost100/grokdash-store). An add-on you don't trust runs in a container of its own and reaches only its own cards. [How add-ons work](docs/addons.md).
 
-**Read WhatsApp, mail and calendar yourself.** Optional and read-only. The dashboard reads WhatsApp through WAHA, up to three mailboxes over IMAP and your calendars through iCal, so the bot doesn't have to scan them on a schedule. [Set it up in the sources guide](docs/sources.md).
+**Give your bots a home.** Each bot you choose gets a section on the Bots page with what it's doing and a panel it keeps current, like a selling bot's listings and offers, and you can pin a panel to Today. Bots hand work to each other, and the dashboard wakes them on a schedule that batches what can wait and keeps to a weekly budget. Bots that work behind the scenes stay off the page.
 
 **Sort messages with Jev.** Optional. A small decision model on OpenRouter rates new messages, so the Grok Bot runs only when one needs a reply. 160 decisions cost under 1¢. [How triage works](docs/triage.md).
 
@@ -142,20 +142,13 @@ Open `http://127.0.0.1:8788`. `npm run dev` turns off the Tailscale check and ke
 
 Set these in `.env`. The full list with comments is in [`.env.example`](.env.example).
 
-The Settings tab on the page changes the undo window, the archive and backup length, Todoist and PoliTO without a restart. A value saved there wins over `.env` until you press Reset. Tokens saved there are stored in `data/dashboard.db` and never sent back to the page. Your login, the bot token, the port, the time zone and the webhook rule stay in `.env` only.
+The Settings tab on the page changes the undo window, the archive and backup length, triage, wakes and phone pings without a restart. Add-ons have their own settings on the Add-ons page. A value saved there wins over `.env` until you press Reset. Tokens saved there are stored in `data/dashboard.db` and never sent back to the page. Your login, the bot token, the port, the time zone and the webhook rule stay in `.env` only.
 
 | Variable                      | Required | Default     | What it does                                                             |
 | ----------------------------- | -------- | ----------- | ------------------------------------------------------------------------ |
 | `OWNER_LOGIN`                 | yes      |             | The Tailscale login allowed to open the page                             |
 | `BOT_TOKEN`                   | yes      |             | Secret the bots send with every call                                     |
 | `TZ`                          | no       | system zone | Time zone for "today", the agenda and to-do dates                        |
-| `TODOIST_TOKEN`               | no       |             | Read and complete to-dos in Todoist directly                             |
-| `TODOIST_FILTER`              | no       |             | Show only tasks matching a Todoist filter, like `today \| overdue \| p1` |
-| `AREADIDATTICA_URL`           | no       |             | Where areadidattica answers; turns on PoliTO avvisi                      |
-| `AREADIDATTICA_TOKEN`         | with URL |             | The `API_TOKEN` from areadidattica's `.env`                              |
-| `WAHA_API_KEY`                | no       |             | Secret shared by WAHA and the dashboard; turns on WhatsApp               |
-| `MAIL1_HOST` ... `MAIL3_HOST` | no       |             | IMAP server of each mailbox, with `_NAME`, `_USER` and `_PASSWORD`       |
-| `CALENDAR_URLS`               | no       |             | Secret iCal addresses, separated by spaces                               |
 | `UNDO_SECONDS`                | no       | `5`         | How long a tap waits before it goes to the bot                           |
 | `ARCHIVE_DAYS`                | no       | `30`        | How long closed cards stay in the archive                                |
 | `PORT`                        | no       | `8787`      | Port on `127.0.0.1`                                                      |
@@ -168,11 +161,9 @@ The Settings tab on the page changes the undo window, the archive and backup len
 Everything lives in one SQLite file, `data/dashboard.db`, readable by your user only. These are the only things the server sends off the machine:
 
 - **Webhook calls.** When you tap or press refresh, the server calls the webhook URL each bot registered, with no card content in it.
-- **Todoist.** With `TODOIST_TOKEN` set, it reads your active tasks and completes or reopens the ones you tick.
 - **Triage.** With an OpenRouter key set, the text of new messages (up to 15 per decision, cut to 1,500 characters each) goes to OpenRouter and Jev's provider, TypeSafe.
 - **Phone pings.** With an ntfy topic set, the server tells that topic when a PoliTO deadline is due tomorrow or a reminder you snoozed comes back: a count and a link, never what the card says. It never pings for new messages, because WhatsApp and your mail app already do.
-- **WhatsApp, mail and calendars.** When you set them up, it reads them through WAHA, IMAP and the iCal addresses you gave it, as described in the [sources guide](docs/sources.md).
-- **areadidattica.** With `AREADIDATTICA_URL` set, it asks that local service for unread avvisi and deadlines, and tells it which ones you marked read. areadidattica is the one that talks to PoliTO.
+- **Add-ons and apps.** Each one you install talks to its own service (Todoist, your IMAP servers, WAHA for WhatsApp, PoliTO through areadidattica) with the settings you gave it. The [store's README](https://github.com/SuperTost100/grokdash-store#your-data) lists what each one sends where. Installing or updating one downloads its folder from GitHub.
 
 The bots read your chats and mail inside Grok Bot, as they already do, and post only the summaries you see.
 
@@ -183,12 +174,12 @@ The server writes a consistent copy of the database to `data/backups/` once a da
 You need Node.js 24 or newer.
 
 ```bash
-npm ci          # installs TypeScript and the mail and calendar libraries
+npm ci          # installs TypeScript and Node's type definitions
 npm test        # runs the API tests
 npm run check   # typechecks
 ```
 
-The server is plain TypeScript run by Node 24 directly, with no build step. HTTP, SQLite and `fetch` come from Node. Mail and calendars use three small libraries (`imapflow`, `postal-mime` and `ical.js`). The page is plain HTML, CSS and JavaScript in `public/`. CI runs the same checks, syntax-checks the shell scripts and builds the Docker image.
+The server is plain TypeScript run by Node 24 directly, with no build step and no runtime dependencies: HTTP, SQLite and `fetch` come from Node. The page is plain HTML, CSS and JavaScript in `public/`. CI runs the same checks, syntax-checks the shell scripts and builds the Docker image.
 
 ## Documentation
 
@@ -197,9 +188,8 @@ The server is plain TypeScript run by Node 24 directly, with no build step. HTTP
 | [Set up the bots](bot/README.md)                   | Install `grokdash`, create the Dashboard bot, add a webhook |
 | [Dashboard bot instructions](bot/dashboard-bot.md) | The prompt that makes a Grok Bot keep the page current      |
 | [Secretary changes](bot/secretary.md)              | Turn your current assistant into the urgent-card notifier   |
-| [WhatsApp, mail and calendar](docs/sources.md)     | Let the dashboard read your sources itself                  |
+| [Add-ons and apps](docs/addons.md)                 | Install sources from a store, trust, and the runner         |
 | [Triage with Jev](docs/triage.md)                  | How new messages are sorted and when Grok wakes             |
-| [PoliTO avvisi](docs/polito.md)                    | Course avvisi and deadlines through areadidattica           |
 | [Backups](docs/backups.md)                         | Daily copies, a backup right now, and restoring             |
 | [API reference](docs/API.md)                       | Every endpoint, for bots that don't use `grokdash`          |
 

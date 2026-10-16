@@ -4,7 +4,7 @@ import { Store } from "../server/store.ts";
 import { Settings } from "../server/settings.ts";
 import { loadConfig } from "../server/config.ts";
 import { createPhone, PHONE_GAP_MS } from "../server/ntfy.ts";
-import { POLITO_BOT } from "../server/polito.ts";
+import { POLITO_BOT } from "../server/app.ts";
 
 const TZ = "Europe/Rome";
 

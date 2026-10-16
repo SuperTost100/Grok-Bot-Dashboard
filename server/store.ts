@@ -11,7 +11,7 @@ export type ItemStatus = "open" | "pending" | "snoozed" | "closed";
  * unknown: the bot took it but never reported back, so nobody knows if it happened.
  */
 export type ActionStatus = "queued" | "ready" | "claimed" | "unknown" | "done" | "failed" | "cancelled";
-export type ActionType = "choose" | "send" | "write" | "complete_todo" | "panel" | "closed";
+export type ActionType = "choose" | "send" | "write" | "complete_todo" | "panel" | "closed" | "refresh";
 
 export interface Option { label: string; instruction?: string }
 export interface Draft { to: string; channel?: string; text: string }

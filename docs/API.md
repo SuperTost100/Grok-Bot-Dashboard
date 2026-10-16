@@ -133,7 +133,7 @@ Add `"app": "googlecalendar"` (or another app) at the top level or per event to 
 
 ## To-dos
 
-Only used when the server has no `TODOIST_TOKEN`. `PUT /api/bot/todos` replaces this bot's whole list, so send every open to-do. Ids must be unique:
+`PUT /api/bot/todos` replaces this bot's whole list, so send every open to-do. Ids must be unique:
 
 ```json
 {

@@ -4,12 +4,9 @@ import path from "node:path";
 import crypto from "node:crypto";
 import type { Config } from "./config.ts";
 import { READ_SCOPES, type Store, type Item, type ItemInput, type Kind, type Section, type Option, type Draft, type Action, type Bot, type PanelBlock, type ReadScope } from "./store.ts";
-import { Todoist, pickTodos } from "./todoist.ts";
 import { addDays, lastSlot, localStamp, overlaps, parseWhen, snoozeChoices, zonedToEpoch } from "./time.ts";
 import { checkWebhookUrl } from "./webhook.ts";
-import { POLITO_BOT, isDeadlineKey, type PolitoSync } from "./polito.ts";
 import { GROUPS, SettingError, Settings } from "./settings.ts";
-import type { Sources } from "./sources/index.ts";
 import type { Triage } from "./triage.ts";
 import type { Phone } from "./ntfy.ts";
 import { weekStart } from "./wakes.ts";
@@ -17,7 +14,6 @@ import { hashToken, type Addons } from "./addons/manager.ts";
 import { ASKS } from "./addons/manifest.ts";
 import { askJev, type Question } from "./jev.ts";
 import type { AddonRow, InboxInput } from "./store.ts";
-import { CALENDAR_OWNER } from "./sources/calendar.ts";
 
 /** A route result sent as-is instead of as JSON, like an image. */
 class Raw {
@@ -87,6 +83,30 @@ function when(v: unknown, field: string, tz: string, required: boolean): string 
 }
 
 const KINDS: Kind[] = ["choice", "draft", "reminder", "digest"];
+
+/** The names PoliTO's and the calendar's cards and events have always used, now the PoliTO app's and the Calendar add-on's. */
+export const POLITO_BOT = "polito";
+export const CALENDAR_OWNER = "calendar";
+
+/**
+ * The to-dos worth showing today: overdue, due or with a deadline in the next 7 days,
+ * plus anything p1 or p2. Sorted by the nearest date, then priority.
+ */
+export function pickTodos<T extends { due: string; deadline: string; priority: number }>(todos: T[], today: string, limit = 30) {
+  const horizon = addDays(today, 7);
+  const nearest = (t: T) => [t.due.slice(0, 10), t.deadline].filter(Boolean).sort()[0] ?? "";
+  const shown = todos
+    .filter((t) => {
+      const d = nearest(t);
+      return (d && d <= horizon) || t.priority <= 2;
+    })
+    .sort((a, b) => {
+      const da = nearest(a) || "9999";
+      const db = nearest(b) || "9999";
+      return da === db ? a.priority - b.priority : da < db ? -1 : 1;
+    });
+  return { todos: shown.slice(0, limit), hidden: todos.length - Math.min(shown.length, limit) };
+}
 
 /**
  * What stays in Needs you: questions with answers, drafts, anything urgent, and taps in progress.
@@ -261,10 +281,7 @@ export interface AppDeps {
   store: Store;
   settings?: Settings;
   /** Read on every request: main.ts swaps them when their settings change. */
-  todoist?: Todoist | null;
-  polito?: PolitoSync | null;
   /** WhatsApp, mail and calendars the dashboard reads itself. */
-  sources?: Sources | null;
   /** Jev sorting the messages the sources read. */
   triage?: Triage | null;
   phone?: Phone | null;
@@ -315,21 +332,15 @@ export function createApp(deps: AppDeps) {
     };
   }
 
+  /** To-dos from add-ons (Todoist) replace the lists Grok bots send, as a calendar add-on replaces their agenda. */
   async function todosState() {
-    const todoist = deps.todoist;
-    if (todoist) {
-      try {
-        const all = await todoist.list();
-        const { todos, hidden } = pickTodos(all, today());
-        return { source: "todoist", items: todos.map((t) => ({ ...t, bot: "todoist", app: "todoist" })), hidden, error: "" };
-      } catch (err) {
-        return { source: "todoist", items: [], hidden: 0, error: (err as Error).message };
-      }
-    }
-    const fromBots = store.listTodos();
-    if (!fromBots.length) return { source: "none", items: [], hidden: 0, error: "" };
-    const { todos, hidden } = pickTodos(fromBots.filter((t) => !t.completedAt), today());
-    return { source: "bot", items: todos, hidden, error: "" };
+    const kinds = new Map(store.listBots().map((b) => [b.slug, b.kind]));
+    const all = store.listTodos().filter((t) => !t.completedAt);
+    const fromAddons = all.filter((t) => (kinds.get(t.bot) ?? "bot") !== "bot");
+    const list = fromAddons.length ? fromAddons : all;
+    if (!list.length) return { source: "none", items: [], hidden: 0, error: "" };
+    const { todos, hidden } = pickTodos(list, today());
+    return { source: fromAddons.length ? "addon" : "bot", items: todos, hidden, error: "" };
   }
 
   function awayView() {
@@ -340,13 +351,13 @@ export function createApp(deps: AppDeps) {
   }
 
   /**
-   * When the page's content was last brought up to date. With triage on the dashboard reads the sources
+   * When the page's content was last brought up to date. With triage on, add-ons read the sources
    * itself, so their reads count and the Grok bot's old scans (it no longer scans) don't.
    */
   function lastUpdate(bots: Bot[]): number | null {
     const triageOn = Boolean(deps.triage?.active());
     const scans = bots.filter((b) => !(triageOn && b.slug === settings.str("grokBot"))).map((b) => b.lastScanAt);
-    if (deps.sources) scans.push(deps.sources.lastRead());
+    scans.push(Number(store.getState("sources:lastRead") ?? 0) || null);
     const known = scans.filter((t): t is number => t !== null);
     return known.length ? Math.max(...known) : null;
   }
@@ -392,17 +403,16 @@ export function createApp(deps: AppDeps) {
       away: awayView(),
       todos: await todosState(),
       agenda: agenda(day),
-      polito: deps.polito ? { error: deps.polito.error() } : null,
-      sourceProblems: deps.sources?.problems() ?? [],
+      sourceProblems: store.listAddons().filter((a) => a.enabled && !a.statusOk && a.status).map((a) => `${(a.manifest as { name: string }).name}: ${a.status}`),
       runs: { week: store.allWakesSince(weekStart(store.now(), tz)), cap: settings.int("weeklyRuns") },
     };
   }
 
   function agenda(day: string) {
     const events = store.listEvents(day, addDays(day, 2));
-    // A calendar reader (the built-in one, or the Calendar add-on) replaces what Grok bots send.
+    // The Calendar add-on replaces the agenda Grok bots send.
     // Add-ons, apps and PoliTO always add their own events, like deadlines.
-    const calendarRead = Boolean(deps.sources?.calendarOn() || store.getAddon(CALENDAR_OWNER)?.enabled);
+    const calendarRead = Boolean(store.getAddon(CALENDAR_OWNER)?.enabled);
     const kinds = new Map(store.listBots().map((b) => [b.slug, b.kind]));
     return events.filter((e) => {
       if (e.bot === CALENDAR_OWNER) return calendarRead;
@@ -424,12 +434,8 @@ export function createApp(deps: AppDeps) {
     if (a?.status === "claimed") throw conflict(`${item.bot} is already doing "${a.label}". Wait for it to finish.`);
   }
 
-  /**
-   * You closed a card. PoliTO's own reader marks it read there too, so the phone app stops counting it.
-   * An add-on or app that owns the card hears about it as a "closed" action, so it can do the same.
-   */
+  /** You closed a card: an add-on or app that owns it hears about it, so PoliTO can mark a notice read there too. */
   function closedByYou(item: Item, reason: "done" | "dismissed" | "read") {
-    if (deps.polito && item.bot === POLITO_BOT && item.key && !isDeadlineKey(item.key)) void deps.polito.markRead(item.key);
     const owner = store.getBot(item.bot);
     if (owner && (owner.kind === "addon" || owner.kind === "app")) {
       store.addAction({ bot: owner.slug, type: "closed", label: reason, text: item.key ?? `#${item.id}`, delayMs: 0 });
@@ -495,37 +501,7 @@ export function createApp(deps: AppDeps) {
     }
   }
 
-  // Todoist calls for the same task run one after another, so a fast Undo can't overtake its completion.
-  // closedHere remembers which occurrence (task id and due date) this dashboard closed, so a double tap
-  // doesn't send two closes, while the next occurrence of a recurring task can still be completed.
-  const todoLocks = new Map<string, Promise<unknown>>();
-  const closedHere = new Map<string, string>();
-  function serial<T>(key: string, fn: () => Promise<T>): Promise<T> {
-    const prev = todoLocks.get(key) ?? Promise.resolve();
-    const next = prev.catch(() => {}).then(fn);
-    todoLocks.set(key, next);
-    void next.finally(() => { if (todoLocks.get(key) === next) todoLocks.delete(key); }).catch(() => {});
-    return next;
-  }
-
   async function completeTodo(bot: string, id: string, undo: boolean) {
-    const todoist = deps.todoist;
-    if (todoist && bot === "todoist") {
-      await serial(id, async () => {
-        if (undo) {
-          if (!closedHere.has(id)) throw conflict("This to-do isn't completed from here.");
-          await todoist.reopen(id);
-          closedHere.delete(id);
-        } else {
-          // The due date tells occurrences of a recurring task apart. If Todoist can't list right now, still close.
-          const due = await todoist.list().then((all) => all.find((t) => t.id === id)?.due ?? "", () => "");
-          if (closedHere.get(id) === due) throw conflict("This to-do is already completed.");
-          await todoist.close(id);
-          closedHere.set(id, due);
-        }
-      });
-      return { ok: true };
-    }
     const todo = store.findTodo(bot, id);
     if (!todo) throw new HttpError(404, "No to-do with that id.");
     const pending = store.pendingTodoAction(bot, id);
@@ -545,6 +521,7 @@ export function createApp(deps: AppDeps) {
 
   function actionForBot(a: Action) {
     if (a.type === "closed") return { id: a.id, type: a.type, key: a.text, reason: a.label };
+    if (a.type === "refresh") return { id: a.id, type: a.type };
     return {
       id: a.id,
       type: a.type,
@@ -587,7 +564,7 @@ export function createApp(deps: AppDeps) {
         types: { choose: "do instruction (or label)", send: "send text exactly to card.draft.to on card.draft.channel", write: "text is the user's instruction about the card", complete_todo: "complete to-do todoId", panel: "the user pressed a button on your panel: do instruction (or label)" },
       },
       agenda: "PUT /api/bot/agenda {from: 'YYYY-MM-DD', to: 'YYYY-MM-DD' (default from + 2 days), app, events: [{title, start, end, location, allDay}]}. It REPLACES all your events overlapping from..to, so always send the complete list for that window.",
-      todos: "PUT /api/bot/todos {app, todos: [{id, content, priority: 'p1'..'p4', due, dueString, deadline, project, url}]}. It REPLACES your whole list. Ignored when the dashboard reads Todoist directly.",
+      todos: "PUT /api/bot/todos {app, todos: [{id, content, priority: 'p1'..'p4', due, dueString, deadline, project, url}]}. It REPLACES your whole list.",
       scan: "POST /api/bot/scan {startedAt: 'YYYY-MM-DDTHH:MM:SS', schedule?: ['08:00', ...]} after a full scan where every source was read, with the time the scan began (the 'now' from grokdash actions). GET /api/bot/actions returns lastScanAt: scan for messages since then. schedule is your daily run times: when one passes without you, the page says you're offline.",
       status: "GET /api/bot/status: {offline, offlineSince, lastMissedAt, lastSeenAt, schedule}. For a watchdog; it doesn't count as the bot checking in.",
       register: "POST /api/bot/register {name, color, webhookUrl, webhookToken}",
@@ -683,6 +660,7 @@ export function createApp(deps: AppDeps) {
       };
     });
     store.replaceEvents(bot, from, to, events);
+    if (store.getBot(bot)?.kind !== "bot") store.setState("sources:lastRead", String(store.now()));
     return { from, to, stored: events.length };
   });
 
@@ -709,7 +687,8 @@ export function createApp(deps: AppDeps) {
     });
     if (new Set(todos.map((t) => t.id)).size !== todos.length) throw bad("Two to-dos share an id. Send each id once.");
     store.replaceTodos(bot, todos);
-    return { stored: todos.length, ignored: Boolean(deps.todoist) };
+    if (store.getBot(bot)?.kind !== "bot") store.setState("sources:lastRead", String(store.now()));
+    return { stored: todos.length };
   });
 
   route("GET", "/api/bot/actions", "bot", (_r, _p, q) => {
@@ -795,6 +774,7 @@ export function createApp(deps: AppDeps) {
         subject: f("subject", 500), text: f("text", 20_000), link: x.link ? url(x.link, `messages[${i}].link`) : "", at,
       };
     });
+    store.setState("sources:lastRead", String(store.now()));
     return { added: store.addInbox(messages) };
   });
 
@@ -1069,35 +1049,10 @@ export function createApp(deps: AppDeps) {
   const settingsView = () => ({
     groups: GROUPS,
     settings: settings.list(),
-    status: [...(deps.sources?.status() ?? []), ...(deps.triage?.status() ?? []), ...(deps.phone ? [deps.phone.status()] : [])],
+    status: [...(deps.triage?.status() ?? []), ...(deps.phone ? [deps.phone.status()] : [])],
   });
 
   route("GET", "/api/ui/settings", "ui", () => settingsView());
-
-  const wahaFor = (slot: string) => {
-    const waha = deps.sources?.waha(Number(slot));
-    if (!waha) throw new HttpError(404, "This WhatsApp number is off. Set its WAHA address and API key first.");
-    return waha;
-  };
-
-  route("GET", "/api/ui/whatsapp/:slot/qr", "ui", async (_r, p) => {
-    const waha = wahaFor(p[0]);
-    try {
-      return new Raw("image/png", await waha.qr());
-    } catch (err) {
-      throw new HttpError(502, (err as Error).message);
-    }
-  });
-
-  route("POST", "/api/ui/whatsapp/:slot/link", "ui", async (_r, p) => {
-    wahaFor(p[0]);
-    try {
-      await deps.sources!.link(Number(p[0]));
-    } catch (err) {
-      throw new HttpError(502, (err as Error).message);
-    }
-    return settingsView();
-  });
 
   route("PUT", "/api/ui/settings", "ui", (_r, _p, _q, b) => {
     const values = obj(b.values, "values");
@@ -1111,11 +1066,12 @@ export function createApp(deps: AppDeps) {
   });
 
   route("POST", "/api/ui/refresh", "ui", async () => {
-    // With triage on, the dashboard reads the sources itself: Refresh reads them now and asks
-    // the Grok bot for nothing. Other bots still get asked.
+    // Add-ons and apps read their sources now. With triage on, the Grok bot isn't asked to scan;
+    // other bots still are.
     const triageOn = Boolean(deps.triage?.active());
     const grok = settings.str("grokBot");
-    const bots = store.listBots().filter((b) => !(triageOn && b.slug === grok));
+    for (const a of store.listAddons()) if (a.enabled) store.addAction({ bot: a.id, type: "refresh", label: "Read now", delayMs: 0 });
+    const bots = store.listBots().filter((b) => b.kind === "bot" && !(triageOn && b.slug === grok));
     for (const bot of bots) store.requestRefresh(bot.slug);
     for (const bot of bots) if (bot.webhookUrl) notify(bot.slug, "refresh");
     // Chats still waiting for Grok (say, it missed its last wake) go to it when you press Refresh.
@@ -1123,10 +1079,6 @@ export function createApp(deps: AppDeps) {
       deps.triage!.woke();
       notify(grok, "inbox");
     }
-    if (deps.polito) void deps.polito.sync();
-    // PoliTO turned off after it ran: nothing would ever answer this refresh.
-    else store.clearRefresh(POLITO_BOT);
-    if (deps.sources) void deps.sources.refresh().then(() => deps.triage?.tick());
     return { ok: true, webhooks: bots.filter((x) => x.webhookUrl).length, state: await state() };
   });
 

@@ -4,12 +4,8 @@ import fs from "node:fs";
 import path from "node:path";
 import { loadConfig } from "./config.ts";
 import { Store } from "./store.ts";
-import { Todoist } from "./todoist.ts";
-import { Polito, POLITO_BOT, createPolitoSync } from "./polito.ts";
-import { createApp, STALE_CLAIM_MS, type AppDeps } from "./app.ts";
+import { createApp, CALENDAR_OWNER, POLITO_BOT, STALE_CLAIM_MS, type AppDeps } from "./app.ts";
 import { Settings } from "./settings.ts";
-import { createSources } from "./sources/index.ts";
-import { CALENDAR_OWNER } from "./sources/calendar.ts";
 import { createTriage } from "./triage.ts";
 import { createPhone } from "./ntfy.ts";
 import { createAddons } from "./addons/manager.ts";
@@ -17,7 +13,7 @@ import { createRunnerClient } from "./addons/runner-client.ts";
 import { answeredAt, dueAt, handoffWork, lastWakeOf, rules, wakeMessage } from "./wakes.ts";
 import type { InboxMessage } from "./store.ts";
 import { checkWebhookUrl, guardedLookup, missedRun, retryDue, RETRY_WINDOW } from "./webhook.ts";
-import { lastSlot, localStamp } from "./time.ts";
+import { localStamp } from "./time.ts";
 
 const log = (msg: string) => console.log(`${new Date().toISOString()} ${msg}`);
 const config = loadConfig();
@@ -33,20 +29,6 @@ try {
 const store = new Store(path.join(config.dataDir, "dashboard.db"));
 const settings = new Settings(store, config);
 
-// Todoist and PoliTO are rebuilt when their settings change on the Settings page.
-function makeTodoist() {
-  const token = settings.str("todoistToken");
-  return token ? new Todoist(token, settings.str("todoistFilter"), config.tz) : null;
-}
-function makePolito() {
-  const url = settings.str("areadidatticaUrl");
-  const token = settings.str("areadidatticaToken");
-  if (url && !token) log("PoliTO stays off: the areadidattica token is missing");
-  return url && token ? createPolitoSync(new Polito(url, token), store, config.tz, log) : null;
-}
-let polito = makePolito();
-const sources = createSources(settings, store, config.tz, log);
-
 /** How a message's source is named on cards and described to Jev. */
 function sourceInfo(m: InboxMessage) {
   // Sources an add-on or app described when it sent its messages.
@@ -56,29 +38,10 @@ function sourceInfo(m: InboxMessage) {
     if (d.kind === "mail") return { label: `${d.name} · ${m.fromMe ? "You" : m.sender}`, app: d.app || "mail", where: `Email to the user's ${d.name} mailbox` };
     return { label: `${d.name} · ${m.threadName}`, app: d.app, where: m.isGroup ? `${d.name} group chat "${m.threadName}"` : `${d.name} chat with ${m.threadName}` };
   }
-  if (m.source.startsWith("whatsapp:")) {
-    const name = settings.str(`whatsapp${m.source.slice(9)}Name`) || "WhatsApp";
-    const account = name === "WhatsApp" ? "WhatsApp" : `WhatsApp (the user's ${name} number)`;
-    return { label: `${name} · ${m.threadName}`, app: "whatsapp", where: m.isGroup ? `${account} group chat "${m.threadName}"` : `${account} chat with ${m.threadName}` };
-  }
-  const slot = m.source.replace(/^mail:/, "");
-  const name = settings.str(`mail${slot}Name`) || `Mail ${slot}`;
-  const gmail = /(^|\.)gmail\.com$/i.test(settings.str(`mail${slot}Host`).replace(/:\d+$/, ""));
-  return { label: `${name} · ${m.fromMe ? "You" : m.sender}`, app: gmail ? "gmail" : "mail", where: `Email to the user's ${name} mailbox` };
+  return { label: `${m.source} · ${m.threadName || m.sender}`, app: "", where: `a ${m.isGroup ? "group chat" : "conversation"} from ${m.source}` };
 }
 const triage = createTriage({ store, settings, tz: config.tz, log, sourceInfo });
 const phone = createPhone({ store, settings, tz: config.tz, log });
-
-// PoliTO is checked whenever the bots are scheduled to check their sources (every 2 hours when no bot
-// has told its schedule yet), plus on Refresh. The first tick checks once at startup.
-let politoSlot: number | null = null;
-function politoDue(now: number): boolean {
-  const slots = [...new Set(store.listBots().filter((b) => b.slug !== POLITO_BOT).flatMap((b) => b.schedule))];
-  const slot = lastSlot(now, slots, config.tz) ?? Math.floor(now / 7_200_000) * 7_200_000;
-  if (slot === politoSlot) return false;
-  politoSlot = slot;
-  return true;
-}
 
 // Ping a bot's webhook routine so it picks up work now instead of at its next scheduled run.
 // At most one ping per bot every 20 seconds; a ping that comes sooner is sent when the gap is up.
@@ -166,22 +129,9 @@ const addons = createAddons({
   untrustedSafe: config.ownerVia === "gateway" && config.authMode === "tailscale",
   reserved: () => [settings.str("grokBot")],
   // The dashboard's own readers: only a trusted add-on may carry their cards and events on.
-  integrations: ["polito", CALENDAR_OWNER, "todoist", "mail", "whatsapp"],
+  integrations: [POLITO_BOT, CALENDAR_OWNER, "todoist", "mail", "whatsapp"],
 });
-const deps: AppDeps = { config, store, settings, todoist: makeTodoist(), polito, sources, triage, phone, addons, notify, lastPing: (bot) => lastPing.get(bot), log };
-settings.onChange((keys) => {
-  if (keys.some((k) => k.startsWith("todoist"))) {
-    deps.todoist = makeTodoist();
-    log(`to-dos now ${deps.todoist ? "from Todoist" : "from bots"}`);
-  }
-  if (keys.some((k) => k.startsWith("areadidattica"))) {
-    deps.polito = polito = makePolito();
-    politoSlot = null; // check right away with the new address
-    log(`PoliTO now ${polito ? "on" : "off"}`);
-  }
-  // A source with new settings is read right away instead of at its next turn.
-  if (keys.some((k) => /^(whatsapp|mail|calendar)/.test(k))) void sources.refresh();
-});
+const deps: AppDeps = { config, store, settings, triage, phone, addons, notify, lastPing: (bot) => lastPing.get(bot), log };
 const handle = createApp(deps);
 const server = http.createServer((req, res) => {
   handle(req, res).catch((err) => {
@@ -216,8 +166,6 @@ const tick = setInterval(() => {
       store.requestRefresh(b.slug);
       notify(b.slug, "refresh");
     }
-    if (polito && politoDue(Date.now())) void polito.sync();
-    sources.tick();
     if (++ticks % 5 === 0) void triage.tick();
     if (ticks % 60 === 0) {
       void phone.tick();
@@ -278,7 +226,7 @@ void dailyBackup();
 server.listen(config.port, config.host, () => {
   // Add-ons call the dashboard over HTTP, so they start once it listens.
   void addons.startAll();
-  log(`Grok Bot Dashboard on http://${config.host}:${config.port} (auth: ${config.authMode}, to-dos: ${deps.todoist ? "Todoist" : "from bots"}, PoliTO: ${polito ? "on" : "off"}, time zone: ${config.tz})`);
+  log(`Grok Bot Dashboard on http://${config.host}:${config.port} (auth: ${config.authMode}, add-ons: ${store.listAddons().filter((a) => a.enabled).length}, time zone: ${config.tz})`);
 });
 
 async function shutdown() {

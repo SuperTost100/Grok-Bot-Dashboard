@@ -4,8 +4,7 @@ import http from "node:http";
 import net from "node:net";
 import type { AddressInfo } from "node:net";
 import { Store } from "../server/store.ts";
-import { createApp } from "../server/app.ts";
-import { Todoist, pickTodos } from "../server/todoist.ts";
+import { createApp, pickTodos } from "../server/app.ts";
 import { loadConfig, type Config } from "../server/config.ts";
 import { parseWhen, snoozeChoices, localStamp } from "../server/time.ts";
 import { checkWebhookUrl, isPrivateAddress, missedRun, retryDue, RETRY_GAP } from "../server/webhook.ts";
@@ -25,10 +24,6 @@ const config: Config = {
   authMode: "tailscale",
   ownerLogin: OWNER,
   botToken: TOKEN,
-  todoistToken: "",
-  todoistFilter: "",
-  areadidatticaUrl: "",
-  areadidatticaToken: "",
   undoSeconds: 5,
   archiveDays: 30,
   tz: "Europe/Rome",
@@ -470,35 +465,18 @@ test("a recurring bot to-do comes back with its next date", async () => {
   assert.equal(s.store.findTodo("plants", "r1")!.completedAt, null, "next occurrence is open");
 });
 
-test("Todoist tasks: p1 the right way round, nearest date first, UTC times in local time", async () => {
-  const calls: string[] = [];
-  const fake = (async (input: URL | RequestInfo, init?: RequestInit) => {
-    const u = new URL(String(input));
-    calls.push(`${init?.method} ${u.pathname}`);
-    const json = (v: unknown) => new Response(JSON.stringify(v), { headers: { "content-type": "application/json" } });
-    if (u.pathname.endsWith("/projects")) return json({ results: [{ id: "p", name: "Work" }], next_cursor: null });
-    if (u.pathname.endsWith("/tasks")) {
-      return json({
-        results: [
-          { id: "a", content: "Later", priority: 1, project_id: "p", due: { date: "2026-10-16" }, deadline: null },
-          { id: "b", content: "Urgent", priority: 4, project_id: "p", due: null, deadline: { date: "2026-10-13" } },
-          { id: "c", content: "Far away", priority: 1, project_id: "p", due: { date: "2026-12-01" }, deadline: null },
-          { id: "d", content: "Late night", priority: 1, project_id: "p", due: { date: "2026-10-12", datetime: "2026-10-12T22:30:00Z" }, deadline: null },
-        ],
-        next_cursor: null,
-      });
-    }
-    return new Response(null, { status: 204 });
-  }) as typeof fetch;
-  const t = new Todoist("tok", "", "Europe/Rome", fake);
-  const all = await t.list();
-  assert.equal(all.find((x) => x.id === "b")!.priority, 1);
+test("to-dos from Todoist: nearest date first, UTC times in local time, the rest counted as hidden", async () => {
+  assert.equal((await bot("PUT", "/api/bot/todos", { todos: [
+    { id: "a", content: "Later", priority: "p4", due: "2026-10-16" },
+    { id: "b", content: "Urgent", priority: "p1", deadline: "2026-10-13" },
+    { id: "c", content: "Far away", priority: "p4", due: "2026-12-01" },
+    { id: "d", content: "Late night", priority: "p4", due: "2026-10-12T22:30:00Z" },
+  ] }, "todo-order")).status, 200);
+  const all = s.store.listTodos().filter((t) => t.bot === "todo-order");
   assert.equal(all.find((x) => x.id === "d")!.due, "2026-10-13T00:30:00");
   const { todos, hidden } = pickTodos(all, "2026-10-12");
   assert.deepEqual(todos.map((x) => x.id), ["b", "d", "a"]);
   assert.equal(hidden, 1);
-  await t.close("b");
-  assert.ok(calls.includes("POST /api/v1/tasks/b/close"));
 });
 
 // ---------- Helpers and config ----------
@@ -626,34 +604,6 @@ test("taps queued before snapshots existed are cancelled on upgrade", () => {
   fs.rmSync(path.dirname(file), { recursive: true });
 });
 
-test("direct Todoist: a double tap closes the task once", async () => {
-  let closes = 0;
-  const fake = (async (input: URL | RequestInfo) => {
-    const u = new URL(String(input));
-    if (u.pathname.endsWith("/close")) closes++;
-    if (u.pathname.endsWith("/tasks") || u.pathname.endsWith("/projects")) {
-      return new Response(JSON.stringify({ results: [], next_cursor: null }), { headers: { "content-type": "application/json" } });
-    }
-    return new Response(null, { status: 204 });
-  }) as typeof fetch;
-  const store = new Store(":memory:", () => clock);
-  const server = http.createServer(createApp({ config, store, todoist: new Todoist("tok", "", "Europe/Rome", fake), log: () => {} }));
-  await new Promise<void>((r) => server.listen(0, "127.0.0.1", r));
-  const base = `http://127.0.0.1:${(server.address() as AddressInfo).port}`;
-  const post = (body: unknown) => fetch(base + "/api/ui/todos/complete", { method: "POST", headers: { "Content-Type": "application/json", "Tailscale-User-Login": OWNER }, body: JSON.stringify(body) });
-  try {
-    const [a, b] = await Promise.all([post({ bot: "todoist", id: "42" }), post({ bot: "todoist", id: "42" })]);
-    assert.deepEqual([a.status, b.status].sort(), [200, 409]);
-    assert.equal(closes, 1);
-  } finally {
-    server.closeAllConnections();
-    server.close();
-    store.close();
-  }
-});
-
-// ---------- Round 3 review ----------
-
 test("a late success doesn't reopen a card the user dismissed after the action went quiet", async () => {
   const { body } = await bot("POST", "/api/bot/items", { key: "late-dismiss", kind: "reminder", title: "Late" });
   await act(body.id, { type: "write", text: "go" });
@@ -689,38 +639,6 @@ test("pressing refresh again renews the retry window", async () => {
   await call("POST", "/api/ui/refresh", {});
   assert.ok(s.store.botsWithPendingRefresh(15 * 60_000).includes("refresher"));
 });
-
-test("direct Todoist: the next occurrence of a recurring task can be completed", async () => {
-  let due = "2026-10-12";
-  let closes = 0;
-  const fake = (async (input: URL | RequestInfo) => {
-    const u = new URL(String(input));
-    const json = (v: unknown) => new Response(JSON.stringify(v), { headers: { "content-type": "application/json" } });
-    if (u.pathname.endsWith("/close")) { closes++; return new Response(null, { status: 204 }); }
-    if (u.pathname.endsWith("/projects")) return json({ results: [], next_cursor: null });
-    return json({ results: [{ id: "77", content: "Daily", priority: 1, project_id: "p", due: { date: due, is_recurring: true }, deadline: null }], next_cursor: null });
-  }) as typeof fetch;
-  const store = new Store(":memory:", () => clock);
-  const todoist = new Todoist("tok", "", "Europe/Rome", fake);
-  const server = http.createServer(createApp({ config, store, todoist, log: () => {} }));
-  await new Promise<void>((r) => server.listen(0, "127.0.0.1", r));
-  const base = `http://127.0.0.1:${(server.address() as AddressInfo).port}`;
-  const post = (body: unknown) => fetch(base + "/api/ui/todos/complete", { method: "POST", headers: { "Content-Type": "application/json", "Tailscale-User-Login": OWNER }, body: JSON.stringify(body) });
-  try {
-    assert.equal((await post({ bot: "todoist", id: "77" })).status, 200);
-    assert.equal((await post({ bot: "todoist", id: "77" })).status, 409, "same occurrence");
-    due = "2026-10-13";
-    todoist.cache = null;
-    assert.equal((await post({ bot: "todoist", id: "77" })).status, 200, "next occurrence");
-    assert.equal(closes, 2);
-  } finally {
-    server.closeAllConnections();
-    server.close();
-    store.close();
-  }
-});
-
-// ---------- Decluttering ----------
 
 test("Needs you keeps questions, drafts and urgent cards; news reads as catch-up and can be marked read", async () => {
   const { body: r } = await bot("POST", "/api/bot/items", { items: [

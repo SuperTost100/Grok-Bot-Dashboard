@@ -25,10 +25,9 @@ export interface SettingDef {
   fallback: string | number | boolean;
 }
 
-export const MAIL_SLOTS = [1, 2, 3] as const;
-export const WHATSAPP_SLOTS = [1, 2] as const;
 
-export const GROUPS = ["General", "Triage", "Wakes", "Phone pings", ...WHATSAPP_SLOTS.map((n) => `WhatsApp ${n}`), ...MAIL_SLOTS.map((n) => `Mail ${n}`), "Calendar", "Todoist", "PoliTO"];
+// WhatsApp, mail, calendars, Todoist and PoliTO are add-ons now, set up on the Add-ons page.
+export const GROUPS = ["General", "Triage", "Wakes", "Phone pings"];
 
 export const DEFS: SettingDef[] = [
   {
@@ -96,61 +95,6 @@ export const DEFS: SettingDef[] = [
   {
     key: "dashboardUrl", env: "DASHBOARD_URL", group: "Phone pings", type: "url", fallback: "", placeholder: "https://your-machine.your-tailnet.ts.net:8443",
     label: "Dashboard address", help: "Tapping the ping opens this.",
-  },
-  ...WHATSAPP_SLOTS.flatMap((n): SettingDef[] => [
-    {
-      key: `whatsapp${n}Name`, env: `WAHA${n === 1 ? "" : n}_NAME`, group: `WhatsApp ${n}`, type: "text",
-      fallback: n === 1 ? "WhatsApp" : "WhatsApp Business", placeholder: n === 1 ? "WhatsApp" : "WhatsApp Business",
-      label: "Name", help: "Shown on cards from this number, so you can tell your numbers apart.",
-    },
-    {
-      key: `whatsapp${n}Url`, env: `WAHA${n === 1 ? "" : n}_URL`, group: `WhatsApp ${n}`, type: "url", fallback: "",
-      placeholder: `http://waha${n === 1 ? "" : n}:3000`,
-      label: "WAHA address", help: `Where this number's WAHA bridge answers.${n === 1 ? "" : " Each number needs its own WAHA."} Empty turns it off. The dashboard only reads.`,
-    },
-    {
-      key: `whatsapp${n}ApiKey`, env: `WAHA${n === 1 ? "" : n}_API_KEY`, group: `WhatsApp ${n}`, type: "secret", fallback: "",
-      label: "WAHA API key", help: "The WAHA_API_KEY that this WAHA runs with.",
-    },
-  ]),
-  ...MAIL_SLOTS.flatMap((n): SettingDef[] => [
-    {
-      key: `mail${n}Name`, env: `MAIL${n}_NAME`, group: `Mail ${n}`, type: "text", fallback: "", placeholder: n === 1 ? "PoliTO" : n === 2 ? "Work" : "Gmail",
-      label: "Name", help: "Shown on cards from this mailbox.",
-    },
-    {
-      key: `mail${n}Host`, env: `MAIL${n}_HOST`, group: `Mail ${n}`, type: "text", fallback: "", placeholder: "imap.gmail.com",
-      label: "IMAP server", help: "Port 993 with TLS. Add :port for another one. Empty turns this mailbox off.",
-    },
-    {
-      key: `mail${n}User`, env: `MAIL${n}_USER`, group: `Mail ${n}`, type: "text", fallback: "", placeholder: "you@example.com",
-      label: "Login", help: "Usually the full address.",
-    },
-    {
-      key: `mail${n}Password`, env: `MAIL${n}_PASSWORD`, group: `Mail ${n}`, type: "secret", fallback: "",
-      label: "Password", help: "For Gmail, an app password (Google Account > Security > App passwords), not your normal one.",
-    },
-  ]),
-  {
-    key: "calendarUrls", env: "CALENDAR_URLS", group: "Calendar", type: "secret", fallback: "",
-    label: "Secret iCal addresses",
-    help: "In Google Calendar: Settings > your calendar > Integrate calendar > Secret address in iCal format. For several calendars, put spaces between the addresses.",
-  },
-  {
-    key: "todoistToken", env: "TODOIST_TOKEN", group: "Todoist", type: "secret", fallback: "",
-    label: "API token", help: "From Todoist Settings > Integrations > Developer. Without it, a bot sends your to-dos.",
-  },
-  {
-    key: "todoistFilter", env: "TODOIST_FILTER", group: "Todoist", type: "text", fallback: "", placeholder: "today | overdue | p1",
-    label: "Filter", help: "Show only tasks matching a Todoist filter. Empty shows all active tasks.",
-  },
-  {
-    key: "areadidatticaUrl", env: "AREADIDATTICA_URL", group: "PoliTO", type: "url", fallback: "", placeholder: "http://areadidattica:8789",
-    label: "areadidattica address", help: "Where areadidattica answers. Empty turns PoliTO avvisi off.",
-  },
-  {
-    key: "areadidatticaToken", env: "AREADIDATTICA_TOKEN", group: "PoliTO", type: "secret", fallback: "",
-    label: "areadidattica token", help: "The API_TOKEN from areadidattica's .env.",
   },
 ];
 

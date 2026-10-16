@@ -451,11 +451,6 @@ details.arch + details.arch { border-top: 1px solid var(--border); }
 .s-status:empty { display: none; }
 .s-status.on { color: var(--ok); }
 .s-status.bad { color: var(--urgent); }
-.qr { display: flex; gap: 20px; align-items: center; flex-wrap: wrap; margin: 0 0 12px; padding: 16px; border: 1px solid var(--border); border-radius: var(--radius); background: var(--surface); }
-.qr img { width: 220px; height: 220px; border-radius: 8px; background: #fff; image-rendering: pixelated; }
-.qr ol { margin: 0; padding-left: 20px; font-size: 15px; line-height: 1.6; }
-.qr-expired { justify-content: space-between; }
-.qr-expired p { margin: 0; flex: 1 1 260px; font-size: 15px; color: var(--muted); }
 
 /* Declutter: a few cards at a time, one catch-up line per chat or sender */
 .more-btn { width: 100%; color: var(--muted); }
