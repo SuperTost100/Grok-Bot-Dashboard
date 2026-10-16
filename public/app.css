@@ -608,3 +608,6 @@ p.nn-k { margin: 0 0 4px; }
   width: 100%; min-height: 40px; padding: 0 12px; border-radius: 10px; border: 1px solid var(--border-strong); background: var(--surface); font-size: 16px;
 }
 @media (max-width: 999px) { .tabbar button { font-size: 10px; } }
+.hook { display: flex; gap: 6px; margin-top: 8px; flex-wrap: wrap; }
+.hook input { flex: 1 1 180px; min-width: 0; min-height: 36px; padding: 0 10px; border-radius: 10px; border: 1px solid var(--border-strong); background: var(--surface); font-size: 15px; }
+.hook .btn { min-height: 36px; }
