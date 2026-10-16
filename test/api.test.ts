@@ -801,3 +801,51 @@ test("new content on an expired card brings it back with a fresh clock", async (
     clock = start;
   }
 });
+
+// ---------- Bots: shown or behind the scenes, panels, reads ----------
+
+test("panels: a bot posts one, you pin it, its buttons reach the bot after the undo window", async () => {
+  const panel = {
+    title: "Listings",
+    blocks: [
+      { type: "stats", items: [{ label: "Active", value: 3 }, { label: "Offers", value: "1" }] },
+      { type: "list", items: [{ title: "Mavic Mini", sub: "€180 · 2 watchers", badge: "offer", link: "https://example.com/l/1" }] },
+      { type: "buttons", items: [{ label: "Lower Mavic to €170", instruction: "Lower the Mavic Mini listing price to €170" }] },
+    ],
+  };
+  assert.equal((await bot("PUT", "/api/bot/panel", panel, "venduto")).status, 200);
+  assert.equal((await bot("PUT", "/api/bot/panel", { blocks: [{ type: "image", src: "https://evil.example/x.png", alt: "x" }] }, "venduto")).status, 400, "no images from elsewhere");
+  assert.equal((await bot("PUT", "/api/bot/panel", { blocks: [{ type: "html", html: "<b>" }] }, "venduto")).status, 400);
+  assert.equal((await state()).pinned.length, 0);
+  await call("POST", "/api/ui/panels/venduto/pin", { pinned: true });
+  const st = await state();
+  assert.deepEqual([st.pinned.length, st.pinned[0].title, st.pinned[0].blocks[0].items[0].value], [1, "Listings", "3"]);
+  const press = await call("POST", "/api/ui/panels/venduto/press", { block: 2, index: 0, label: "Lower Mavic to €170" });
+  assert.equal(press.status, 200);
+  assert.equal((await call("POST", "/api/ui/panels/venduto/press", { block: 2, index: 0, label: "Something else" })).status, 409);
+  assert.equal((await bot("GET", "/api/bot/actions", undefined, "venduto")).body.actions.length, 0, "inside the undo window");
+  clock += 6000;
+  const [a] = (await bot("GET", "/api/bot/actions", undefined, "venduto")).body.actions;
+  assert.deepEqual([a.type, a.instruction, a.card], ["panel", "Lower the Mavic Mini listing price to €170", null]);
+  assert.equal((await bot("POST", `/api/bot/actions/${a.id}`, { ok: true, result: "Lowered" }, "venduto")).status, 200);
+  assert.equal((await state()).panelActions.length, 0);
+});
+
+test("bots: shown or behind the scenes, and reads only what you allow", async () => {
+  await bot("POST", "/api/bot/items", { key: "sec-1", kind: "reminder", title: "Plan the week" }, "secretary");
+  let st = await state();
+  const sec = st.bots.find((b: { slug: string }) => b.slug === "secretary");
+  assert.deepEqual([sec.kind, sec.shown, sec.status], ["bot", false, "idle"], "new bots start behind the scenes");
+  assert.equal((await bot("GET", "/api/bot/read/agenda", undefined, "secretary")).status, 403);
+  assert.equal((await call("PUT", "/api/ui/bots/secretary", { shown: true, reads: ["agenda", "cards"] })).status, 200);
+  assert.equal((await call("PUT", "/api/ui/bots/secretary", { reads: ["mail"] })).status, 400);
+  st = await state();
+  assert.deepEqual(st.bots.find((b: { slug: string }) => b.slug === "secretary").reads, ["agenda", "cards"]);
+  assert.equal((await bot("GET", "/api/bot/read/agenda", undefined, "secretary")).status, 200);
+  assert.equal((await bot("GET", "/api/bot/read/todos", undefined, "secretary")).status, 403);
+  const cards = (await bot("GET", "/api/bot/read/cards", undefined, "secretary")).body.items;
+  assert.ok(cards.some((c: { title: string }) => c.title === "Plan the week"));
+  const page = (await call("GET", "/api/ui/bots")).body.bots.find((b: { slug: string }) => b.slug === "secretary");
+  assert.deepEqual([page.shown, page.cards.length, page.runsThisWeek], [true, 1, 0]);
+  assert.equal((await call("PUT", "/api/ui/bots/nobody", { shown: true })).status, 404);
+});

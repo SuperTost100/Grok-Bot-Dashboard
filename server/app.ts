@@ -3,7 +3,7 @@ import fs from "node:fs";
 import path from "node:path";
 import crypto from "node:crypto";
 import type { Config } from "./config.ts";
-import type { Store, Item, ItemInput, Kind, Section, Option, Draft, Action, Bot } from "./store.ts";
+import { READ_SCOPES, type Store, type Item, type ItemInput, type Kind, type Section, type Option, type Draft, type Action, type Bot, type PanelBlock, type ReadScope } from "./store.ts";
 import { Todoist, pickTodos } from "./todoist.ts";
 import { addDays, lastSlot, localStamp, overlaps, parseWhen, snoozeChoices, zonedToEpoch } from "./time.ts";
 import { checkWebhookUrl } from "./webhook.ts";
@@ -91,6 +91,57 @@ export function needsYou(i: Item, awaitingGrok: Set<number> = new Set()): boolea
   if (i.section !== "needs") return false;
   if (i.status === "pending" || (i.status === "closed" && i.closedReason === "action")) return true;
   return i.kind === "choice" || i.kind === "draft" || i.urgent !== "" || awaitingGrok.has(i.id);
+}
+
+const MAX_IMAGE = 300_000;
+
+/** A panel from a bot or add-on: a title and up to 20 blocks the page knows how to draw. */
+export function parsePanel(b: Record<string, unknown>): { title: string; blocks: PanelBlock[] } {
+  if (!Array.isArray(b.blocks) || b.blocks.length > 20) throw bad(`"blocks" must be a list of up to 20 blocks`);
+  const list = (v: unknown, field: string, max: number) => {
+    if (!Array.isArray(v) || v.length > max) throw bad(`"${field}" must be a list of up to ${max}`);
+    return v;
+  };
+  const blocks = (b.blocks as unknown[]).map((raw, i): PanelBlock => {
+    const at = `blocks[${i}]`;
+    const x = obj(raw, at);
+    switch (x.type) {
+      case "text": return { type: "text", text: text(x.text, `${at}.text`, 1000, true) };
+      case "stats":
+        return { type: "stats", items: list(x.items, `${at}.items`, 6).map((r, n) => { const o = obj(r, `${at}.items[${n}]`); return { label: text(o.label, `${at}.items[${n}].label`, 40, true), value: text(String(o.value ?? ""), `${at}.items[${n}].value`, 40, true) }; }) };
+      case "list":
+        return {
+          type: "list",
+          items: list(x.items, `${at}.items`, 30).map((r, n) => {
+            const o = obj(r, `${at}.items[${n}]`);
+            const f = `${at}.items[${n}]`;
+            return { title: text(o.title, `${f}.title`, 200, true), sub: text(o.sub, `${f}.sub`, 200), link: url(o.link, `${f}.link`), badge: text(o.badge, `${f}.badge`, 30) };
+          }),
+        };
+      case "table": {
+        const columns = list(x.columns, `${at}.columns`, 8).map((c, n) => text(c, `${at}.columns[${n}]`, 40, true));
+        const rows = list(x.rows, `${at}.rows`, 50).map((r, n) => list(r, `${at}.rows[${n}]`, columns.length).map((c, k) => text(String(c ?? ""), `${at}.rows[${n}][${k}]`, 200)));
+        return { type: "table", columns, rows };
+      }
+      case "buttons":
+        return {
+          type: "buttons",
+          items: list(x.items, `${at}.items`, 4).map((r, n) => {
+            const o = typeof r === "string" ? { label: r } : obj(r, `${at}.items[${n}]`);
+            return { label: text(o.label, `${at}.items[${n}].label`, 60, true), instruction: text(o.instruction, `${at}.items[${n}].instruction`, 1000) };
+          }),
+        };
+      case "image": {
+        const src = text(x.src, `${at}.src`, MAX_IMAGE, true);
+        // Only inline images: the page never loads anything from elsewhere.
+        if (!/^data:image\/(png|jpeg);base64,[A-Za-z0-9+/=]+$/.test(src)) throw bad(`"${at}.src" must be a base64 data: image (png or jpeg)`);
+        return { type: "image", src, alt: text(x.alt, `${at}.alt`, 200, true) };
+      }
+      default:
+        throw bad(`"${at}.type" must be text, stats, list, table, buttons or image`);
+    }
+  });
+  return { title: text(b.title, "title", 80), blocks };
 }
 
 export function parseItem(raw: unknown, i = 0, tz = "UTC"): ItemInput {
@@ -256,6 +307,28 @@ export function createApp(deps: AppDeps) {
     return known.length ? Math.max(...known) : null;
   }
 
+  /** Monday 00:00 in the dashboard's time zone: runs are counted per week. */
+  function weekStart() {
+    const day = today();
+    const dow = (new Date(day + "T12:00:00Z").getUTCDay() + 6) % 7;
+    return zonedToEpoch(`${addDays(day, -dow)}T00:00:00`, tz);
+  }
+
+  function botView(b: Bot, busy: Set<string>) {
+    const offline = offlineSince(b);
+    return {
+      slug: b.slug, name: b.name, color: b.color, lastScanAt: b.lastScanAt, lastSeenAt: b.lastSeenAt,
+      refreshRequestedAt: b.refreshRequestedAt, hasWebhook: Boolean(b.webhookUrl), offlineSince: offline,
+      kind: b.kind, shown: b.shown, role: b.role, reads: b.reads,
+      status: offline ? "offline" : busy.has(b.slug) ? "working" : "idle",
+    };
+  }
+
+  function panelView(p: ReturnType<Store["listPanels"]>[number]) {
+    const owner = store.getBot(p.owner);
+    return { ...p, name: owner?.name ?? p.owner, color: owner?.color ?? "", kind: owner?.kind ?? "bot" };
+  }
+
   async function state() {
     store.wakeSnoozed();
     store.expireClaims(STALE_CLAIM_MS);
@@ -265,6 +338,7 @@ export function createApp(deps: AppDeps) {
     const awaiting = store.awaitingGrok();
     const day = today();
     const bots = store.listBots();
+    const busy = store.busyBots();
     return {
       now: store.now(),
       today: day,
@@ -272,10 +346,9 @@ export function createApp(deps: AppDeps) {
       undoSeconds: settings.int("undoSeconds"),
       archiveDays: settings.int("archiveDays"),
       snoozeChoices: snoozeChoices(store.now(), tz),
-      bots: bots.map((b) => ({
-        slug: b.slug, name: b.name, color: b.color, lastScanAt: b.lastScanAt, lastSeenAt: b.lastSeenAt,
-        refreshRequestedAt: b.refreshRequestedAt, hasWebhook: Boolean(b.webhookUrl), offlineSince: offlineSince(b),
-      })),
+      bots: bots.map((b) => botView(b, busy)),
+      pinned: store.listPanels().filter((p) => p.pinned).map(panelView),
+      panelActions: store.openPanelActions().map((a) => ({ id: a.id, bot: a.bot, label: a.label, status: a.status, runAfter: a.runAfter })),
       lastScanAt: lastUpdate(bots),
       needs: items.filter((i) => needsYou(i, awaiting)),
       catchup: items.filter((i) => !needsYou(i, awaiting)),
@@ -459,7 +532,7 @@ export function createApp(deps: AppDeps) {
       actions: {
         take: "GET /api/bot/actions claims every waiting action. Do each one once, using its id to avoid doing it twice.",
         report: "POST /api/bot/actions/<id> {ok: true|false, result: 'one line'}. Report every action you took.",
-        types: { choose: "do instruction (or label)", send: "send text exactly to card.draft.to on card.draft.channel", write: "text is the user's instruction about the card", complete_todo: "complete to-do todoId" },
+        types: { choose: "do instruction (or label)", send: "send text exactly to card.draft.to on card.draft.channel", write: "text is the user's instruction about the card", complete_todo: "complete to-do todoId", panel: "the user pressed a button on your panel: do instruction (or label)" },
       },
       agenda: "PUT /api/bot/agenda {from: 'YYYY-MM-DD', to: 'YYYY-MM-DD' (default from + 2 days), app, events: [{title, start, end, location, allDay}]}. It REPLACES all your events overlapping from..to, so always send the complete list for that window.",
       todos: "PUT /api/bot/todos {app, todos: [{id, content, priority: 'p1'..'p4', due, dueString, deadline, project, url}]}. It REPLACES your whole list. Ignored when the dashboard reads Todoist directly.",
@@ -604,6 +677,29 @@ export function createApp(deps: AppDeps) {
     };
   });
 
+  route("PUT", "/api/bot/panel", "bot", (_r, _p, _q, b) => {
+    const panel = parsePanel(b);
+    const p = store.setPanel(slug(b.bot), panel.title, panel.blocks);
+    return { owner: p.owner, blocks: p.blocks.length, pinned: p.pinned };
+  });
+
+  route("DELETE", "/api/bot/panel", "bot", (_r, _p, _q, b) => {
+    store.deletePanel(slug(b.bot));
+    return { ok: true };
+  });
+
+  // What a bot may read beyond its own cards. You tick it per bot under Settings, Bots.
+  route("GET", "/api/bot/read/:what", "bot", async (_r, p, q) => {
+    const what = p[0] as ReadScope;
+    if (!READ_SCOPES.includes(what)) throw new HttpError(404, `Readable: ${READ_SCOPES.join(", ")}.`);
+    const bot = store.getBot(slug(q.get("bot")));
+    const legacy = bot?.slug === settings.str("grokBot");
+    if (!bot || (!legacy && !bot.reads.includes(what))) throw new HttpError(403, `This bot may not read ${what}. The owner can allow it on the dashboard under Settings, Bots.`);
+    if (what === "agenda") return { from: today(), events: agenda(today()) };
+    if (what === "todos") return await todosState();
+    return { items: store.activeItems(0).filter((i) => i.status !== "closed").map((i) => ({ id: i.id, bot: i.bot, kind: i.kind, title: i.title, body: i.body, source: i.source, urgent: i.urgent, status: i.status })) };
+  });
+
   route("POST", "/api/bot/actions/:id", "bot", (_r, p, _q, b) => {
     if (typeof b.ok !== "boolean") throw bad(`"ok" must be true or false`);
     const r = store.finishAction(Number(p[0]), slug(b.bot), b.ok, text(b.result, "result", 500));
@@ -700,6 +796,55 @@ export function createApp(deps: AppDeps) {
     const a = store.getAway();
     if (a && !store.isAway()) store.setAway({ ...a, summarized: true });
     return { ok: true, state: await state() };
+  });
+
+  route("GET", "/api/ui/bots", "ui", () => {
+    const busy = store.busyBots();
+    const since = weekStart();
+    const items = store.activeItems(0).filter((i) => i.status !== "closed");
+    return {
+      bots: store.listBots().filter((b) => b.kind === "bot").map((b) => ({
+        ...botView(b, busy),
+        panel: store.getPanel(b.slug),
+        cards: items.filter((i) => i.bot === b.slug).map((i) => ({ id: i.id, title: i.title, kind: i.kind, urgent: i.urgent, status: i.status })),
+        runsThisWeek: store.wakesSince(since, b.slug).length,
+        lastWake: store.wakesSince(since, b.slug).at(-1) ?? null,
+      })),
+    };
+  });
+
+  route("PUT", "/api/ui/bots/:slug", "ui", async (_r, p, _q, b) => {
+    const bot = store.getBot(slug(p[0]));
+    if (!bot) throw new HttpError(404, "No bot with that name.");
+    let reads: ReadScope[] | undefined;
+    if (b.reads !== undefined) {
+      if (!Array.isArray(b.reads) || !b.reads.every((r) => READ_SCOPES.includes(r as ReadScope))) throw bad(`"reads" must be a list of ${READ_SCOPES.join(", ")}`);
+      reads = [...new Set(b.reads as ReadScope[])];
+    }
+    store.configureBot(bot.slug, {
+      shown: b.shown === undefined ? undefined : b.shown === true,
+      reads,
+      role: b.role === undefined ? undefined : text(b.role, "role", 120),
+    });
+    return { ok: true, state: await state() };
+  });
+
+  route("POST", "/api/ui/panels/:owner/pin", "ui", async (_r, p, _q, b) => {
+    if (!store.getPanel(p[0])) throw new HttpError(404, "No panel with that name.");
+    store.pinPanel(p[0], b.pinned === true);
+    return { ok: true, state: await state() };
+  });
+
+  // A button on a panel: like an answer on a card, it waits out the undo window, then goes to the panel's owner.
+  route("POST", "/api/ui/panels/:owner/press", "ui", async (_r, p, _q, b) => {
+    const panel = store.getPanel(p[0]);
+    if (!panel) throw new HttpError(404, "No panel with that name.");
+    const block = panel.blocks[Number(b.block)];
+    const button = block?.type === "buttons" ? block.items[Number(b.index)] : undefined;
+    if (!button) throw conflict("That button is gone. The panel changed since you opened it.");
+    if (b.label !== undefined && b.label !== button.label) throw conflict("The panel changed since you opened it. Check it again.");
+    const action = store.addAction({ bot: panel.owner, type: "panel", label: button.label, instruction: button.instruction, delayMs: undoMs() });
+    return { action: { id: action.id }, state: await state() };
   });
 
   route("POST", "/api/ui/actions/:id/undo", "ui", async (_r, p) => {

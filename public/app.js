@@ -27,6 +27,8 @@ const ui = {
   seenSent: new Set(),   // "id:updatedAt" already reported as seen
   seenNow: [],           // items on screen after the last render
   todosAll: false,       // the to-dos beyond today's three are unfolded
+  bots: null,            // the Bots page, loaded when opened
+  stripOpen: false,      // the bot strip unfolded while every bot is fine
 };
 
 // ---------- talking to the server ----------
@@ -217,6 +219,9 @@ function render() {
   renderTodos();
   renderAgenda();
   renderCatch();
+  renderStrip();
+  renderPinned();
+  renderSettingsBots();
   renderAway();
   paintColors();
   reportSeen();
@@ -418,6 +423,104 @@ function renderNeeds() {
   $("#needs").innerHTML = list.length
     ? shown.map(renderCard).join("") + toggle
     : `<div class="empty"><strong>Nothing needs you right now</strong>Questions from your bots show up here.</div>`;
+}
+
+// ---------- panels and bots ----------
+
+/** A panel a bot or add-on sent: blocks drawn with the page's own pieces, never its own HTML. */
+function renderPanel(p) {
+  if (!p?.blocks?.length) return "";
+  const pending = (ui.state?.panelActions || []).filter((a) => a.bot === p.owner);
+  const body = p.blocks.map((b, bi) => {
+    switch (b.type) {
+      case "text": return `<p class="pn-text">${esc(b.text)}</p>`;
+      case "stats": return `<div class="pn-stats">${b.items.map((x) => `<div><span class="num">${esc(x.value)}</span><span>${esc(x.label)}</span></div>`).join("")}</div>`;
+      case "list": return `<ul class="pn-list">${b.items.map((x) => `<li><div class="pn-li"><span class="pn-t">${x.link ? `<a href="${esc(x.link)}" target="_blank" rel="noopener noreferrer">${esc(x.title)}</a>` : esc(x.title)}</span>${x.badge ? `<span class="pn-badge">${esc(x.badge)}</span>` : ""}</div>${x.sub ? `<div class="pn-sub">${esc(x.sub)}</div>` : ""}</li>`).join("")}</ul>`;
+      case "table": return `<div class="table-wrap" tabindex="0"><table><thead><tr>${b.columns.map((c) => `<th>${esc(c)}</th>`).join("")}</tr></thead><tbody>${b.rows.map((r) => `<tr>${r.map((c) => `<td>${esc(c)}</td>`).join("")}</tr>`).join("")}</tbody></table></div>`;
+      case "buttons": return `<div class="actions">${b.items.map((x, i) => `<button class="btn suggest${i === 0 ? " primary" : ""}" data-act="panel-press" data-owner="${esc(p.owner)}" data-block="${bi}" data-index="${i}" data-label="${esc(x.label)}"${x.instruction ? ` title="${esc(x.instruction)}"` : ""}>${esc(x.label)}</button>`).join("")}</div>`;
+      case "image": return `<img class="pn-img" src="${esc(b.src)}" alt="${esc(b.alt)}">`;
+      default: return "";
+    }
+  }).join("");
+  const waits = pending.map((a) => a.status === "claimed"
+    ? `<div class="resolved" role="status"><span class="pending-dot"></span><span class="status"><strong>${esc(a.label)}</strong><span class="line">${esc(botOf(a.bot).name)} is on it</span></span></div>`
+    : `<div class="resolved" role="status"><span class="pending-dot"></span><span class="status"><strong>${esc(a.label)}</strong><span class="line">Sending in <span class="num" data-countdown="${a.runAfter}">${Math.max(0, Math.ceil((a.runAfter - Date.now()) / 1000))}</span>s</span></span><button class="btn" data-act="undo" data-action="${a.id}">Undo</button></div>`).join("");
+  return `<div class="panel">${body}${waits}</div>`;
+}
+
+const shownBots = () => (ui.state?.bots || []).filter((b) => b.kind === "bot" && b.shown);
+const statusWord = { idle: "Idle", working: "Working", offline: "Offline" };
+
+/** One line per shown bot under Now and next. While all is fine it folds to a single line. */
+function renderStrip() {
+  const bots = shownBots();
+  const el = $("#bot-strip");
+  el.hidden = !bots.length;
+  if (!bots.length) return;
+  const trouble = bots.filter((b) => b.status === "offline");
+  const working = bots.filter((b) => b.status === "working");
+  if (!ui.stripOpen && !trouble.length && !working.length) {
+    el.innerHTML = `<button class="strip-fold" data-act="strip-open" aria-expanded="false">${bots.map((b) => avatar(b.slug)).join("")}<span>${bots.length} bot${bots.length === 1 ? "" : "s"}, all idle</span>${icon("chev", "i chev")}</button>`;
+    return;
+  }
+  el.innerHTML = `<ul class="strip">${bots.map((b) => `<li><button class="strip-bot${b.status === "offline" ? " bad" : ""}" data-act="open-bot" data-slug="${esc(b.slug)}">${avatar(b.slug)}<span class="nm">${esc(b.name)}</span><span class="st">${statusWord[b.status]}${b.lastSeenAt ? ` · ${esc(when(b.lastSeenAt))}` : ""}</span></button></li>`).join("")}</ul>` +
+    (!trouble.length && !working.length ? `<button class="btn ghost strip-less" data-act="strip-close">Fold</button>` : "");
+}
+
+function renderPinned() {
+  const list = (ui.state.pinned || []).filter((p) => p.blocks.length);
+  $("#pinned").innerHTML = list.map((p) => `<section class="s-panel" aria-label="${esc(p.name)}">
+    <div class="sec-head"><h2>${esc(p.title || p.name)}</h2><span class="note">${esc(p.title ? p.name : "")}<button class="btn ghost pin-btn" data-act="panel-pin" data-owner="${esc(p.owner)}" data-pinned="false" aria-label="Unpin from Today" title="Unpin from Today">${icon("x")}</button></span></div>
+    ${renderPanel(p)}
+  </section>`).join("");
+}
+
+async function loadBots() {
+  try {
+    ui.bots = await api("GET", "/api/ui/bots");
+    renderBots();
+  } catch (err) {
+    $("#bots").innerHTML = `<div class="empty-row">${esc(err.message)}</div>`;
+  }
+}
+
+const kindWord = { choice: "Question", draft: "Draft", reminder: "Reminder", digest: "Summary" };
+
+function renderBots() {
+  if (!ui.bots) return;
+  const shown = ui.bots.bots.filter((b) => b.shown);
+  const hidden = ui.bots.bots.length - shown.length;
+  $("#bots").innerHTML = (shown.length ? shown.map((b) => {
+    const facts = [statusWord[b.status], b.lastSeenAt ? `seen ${when(b.lastSeenAt)}` : "never seen", `${b.runsThisWeek} run${b.runsThisWeek === 1 ? "" : "s"} this week`, b.hasWebhook ? "" : "no webhook, so the dashboard can't wake it"].filter(Boolean);
+    const pin = b.panel?.blocks?.length
+      ? `<button class="btn ghost" data-act="panel-pin" data-owner="${esc(b.slug)}" data-pinned="${!b.panel.pinned}">${icon("pin")}${b.panel.pinned ? "Unpin from Today" : "Pin to Today"}</button>`
+      : "";
+    return `<section class="bot-page" id="bot-${esc(b.slug)}" aria-labelledby="bh-${esc(b.slug)}">
+      <div class="bot-head">${avatar(b.slug)}<div><h2 id="bh-${esc(b.slug)}">${esc(b.name)}</h2>${b.role ? `<p class="role">${esc(b.role)}</p>` : ""}<p class="facts${b.status === "offline" ? " bad" : ""}">${esc(facts.join(" · "))}</p></div><span class="spacer"></span>${pin}</div>
+      ${b.panel?.blocks?.length ? `${b.panel.title ? `<h3 class="pn-title">${esc(b.panel.title)}</h3>` : ""}${renderPanel(b.panel)}` : `<p class="empty-row">No panel yet. ${esc(b.name)} sends one when it runs.</p>`}
+      ${b.cards.length ? `<h3 class="pn-title">Its cards</h3><ul class="pn-list">${b.cards.map((c) => `<li><div class="pn-li"><span class="pn-t">${esc(c.title)}</span><span class="pn-badge">${esc(c.urgent || kindWord[c.kind] || c.kind)}</span></div></li>`).join("")}</ul>` : ""}
+    </section>`;
+  }).join("") : `<div class="empty"><strong>No bots on this page yet</strong>Pick the bots that belong here under Settings, Bots.</div>`) +
+    (hidden ? `<p class="settings-note">${hidden} bot${hidden === 1 ? " works" : "s work"} behind the scenes. Their cards still reach Today.</p>` : "");
+  paintColors();
+  if (ui.scrollToBot) {
+    $(`#bot-${CSS.escape(ui.scrollToBot)}`)?.scrollIntoView({ block: "start" });
+    ui.scrollToBot = null;
+  }
+}
+
+function renderSettingsBots() {
+  const el = $("#settings-bots");
+  if (!el || ui.tab !== "settings") return;
+  const bots = ui.state.bots.filter((b) => b.kind === "bot");
+  if (el.contains(document.activeElement)) return;
+  el.innerHTML = bots.length ? bots.map((b) => `<div class="setting bot-row">
+    <div class="s-text"><p class="s-label">${avatar(b.slug)} ${esc(b.name)}</p>
+      <p class="help">${b.hasWebhook ? "Has a webhook: the dashboard can wake it." : "No webhook yet: it only sees taps when it runs on its own."}</p>
+      <fieldset class="reads"><legend>May also read</legend>${[["agenda", "Agenda"], ["todos", "To-dos"], ["cards", "Every card"]].map(([k, l]) => `<label><input type="checkbox" data-act="bot-read" data-slug="${esc(b.slug)}" data-read="${k}"${b.reads.includes(k) ? " checked" : ""}> ${l}</label>`).join("")}</fieldset>
+    </div>
+    <div class="s-control"><label class="sw"><span>Shown</span><input type="checkbox" class="switch" data-act="bot-shown" data-slug="${esc(b.slug)}"${b.shown ? " checked" : ""} aria-label="Show ${esc(b.name)} on the Bots page"></label></div>
+  </div>`).join("") : `<div class="empty-row">No bot has talked to the dashboard yet.</div>`;
 }
 
 // ---------- now and next ----------
@@ -735,7 +838,7 @@ function renderArchive() {
 
 // ---------- interactions ----------
 
-const TITLES = { today: "Today", archive: "Archive", settings: "Settings" };
+const TITLES = { today: "Today", bots: "Bots", archive: "Archive", settings: "Settings" };
 
 function setTab(tab) {
   ui.tab = tab;
@@ -743,8 +846,10 @@ function setTab(tab) {
   for (const name of Object.keys(TITLES)) $(`#view-${name}`).hidden = tab !== name;
   $("#view-title").textContent = TITLES[tab];
   // Bot filters only mean something on Today and Archive.
-  $("#filters").classList.toggle("off", tab === "settings");
+  $("#filters").classList.toggle("off", tab === "settings" || tab === "bots");
   if (tab === "archive") loadArchive();
+  if (tab === "bots") loadBots();
+  if (tab === "settings") { renderSettingsBots(); paintColors(); }
   if (tab === "settings") loadSettings();
   window.scrollTo({ top: 0 });
 }
@@ -961,6 +1066,17 @@ document.addEventListener("click", async (e) => {
     case "dismiss": if (await actOn(id, { type: "dismiss" })) toast("Dismissed. Restore it from the archive."); break;
     case "read": e.preventDefault(); await actOn(id, { type: "read" }); break;
     case "needs-more": ui.needsAll = true; render(); break;
+    case "strip-open": ui.stripOpen = true; renderStrip(); break;
+    case "strip-close": ui.stripOpen = false; renderStrip(); break;
+    case "open-bot": ui.scrollToBot = b.dataset.slug; setTab("bots"); break;
+    case "panel-press":
+      await run("POST", `/api/ui/panels/${encodeURIComponent(b.dataset.owner)}/press`, { block: Number(b.dataset.block), index: Number(b.dataset.index), label: b.dataset.label });
+      if (ui.tab === "bots") loadBots();
+      break;
+    case "panel-pin":
+      await run("POST", `/api/ui/panels/${encodeURIComponent(b.dataset.owner)}/pin`, { pinned: b.dataset.pinned === "true" });
+      if (ui.tab === "bots") loadBots();
+      break;
     case "todos-more": ui.todosAll = true; renderTodos(); break;
     case "todos-less": ui.todosAll = false; renderTodos(); break;
     case "away-open": openAwayMenu(); break;
@@ -1008,6 +1124,16 @@ document.addEventListener("click", async (e) => {
       renderTodos();
       break;
     }
+  }
+});
+
+document.addEventListener("change", async (e) => {
+  const el = e.target;
+  if (el.dataset?.act === "bot-shown") {
+    await run("PUT", `/api/ui/bots/${encodeURIComponent(el.dataset.slug)}`, { shown: el.checked });
+  } else if (el.dataset?.act === "bot-read") {
+    const reads = $$(`[data-act=bot-read][data-slug="${CSS.escape(el.dataset.slug)}"]`).filter((x) => x.checked).map((x) => x.dataset.read);
+    await run("PUT", `/api/ui/bots/${encodeURIComponent(el.dataset.slug)}`, { reads });
   }
 });
 
