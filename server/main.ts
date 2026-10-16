@@ -11,6 +11,8 @@ import { Settings } from "./settings.ts";
 import { createSources } from "./sources/index.ts";
 import { createTriage } from "./triage.ts";
 import { createPhone } from "./ntfy.ts";
+import { createAddons } from "./addons/manager.ts";
+import { createRunnerClient } from "./addons/runner-client.ts";
 import { answeredAt, dueAt, handoffWork, lastWakeOf, rules, wakeMessage } from "./wakes.ts";
 import type { InboxMessage } from "./store.ts";
 import { checkWebhookUrl, guardedLookup, missedRun, retryDue, RETRY_WINDOW } from "./webhook.ts";
@@ -46,6 +48,13 @@ const sources = createSources(settings, store, config.tz, log);
 
 /** How a message's source is named on cards and described to Jev. */
 function sourceInfo(m: InboxMessage) {
+  // Sources an add-on or app described when it sent its messages.
+  const described = store.getState(`inbox:source:${m.source}`);
+  if (described) {
+    const d = JSON.parse(described) as { name: string; app: string; kind: "chat" | "mail" };
+    if (d.kind === "mail") return { label: `${d.name} · ${m.fromMe ? "You" : m.sender}`, app: d.app || "mail", where: `Email to the user's ${d.name} mailbox` };
+    return { label: `${d.name} · ${m.threadName}`, app: d.app, where: m.isGroup ? `${d.name} group chat "${m.threadName}"` : `${d.name} chat with ${m.threadName}` };
+  }
   if (m.source.startsWith("whatsapp:")) {
     const name = settings.str(`whatsapp${m.source.slice(9)}Name`) || "WhatsApp";
     const account = name === "WhatsApp" ? "WhatsApp" : `WhatsApp (the user's ${name} number)`;
@@ -146,7 +155,15 @@ function post(url: string, token: string, body: unknown): Promise<number> {
   });
 }
 
-const deps: AppDeps = { config, store, settings, todoist: makeTodoist(), polito, sources, triage, phone, notify, lastPing: (bot) => lastPing.get(bot), log };
+// Apps need the runner service (compose.yaml). Without RUNNER_URL, add-ons still work and apps say why they can't start.
+const runnerUrl = process.env.RUNNER_URL ?? "";
+const addons = createAddons({
+  store, dataDir: config.dataDir, tz: config.tz, log,
+  localUrl: `http://127.0.0.1:${config.port}`,
+  appUrl: process.env.DASHBOARD_URL_FOR_APPS ?? "http://dashboard:8787",
+  runner: runnerUrl ? await createRunnerClient(runnerUrl, config.botToken) : null,
+});
+const deps: AppDeps = { config, store, settings, todoist: makeTodoist(), polito, sources, triage, phone, addons, notify, lastPing: (bot) => lastPing.get(bot), log };
 settings.onChange((keys) => {
   if (keys.some((k) => k.startsWith("todoist"))) {
     deps.todoist = makeTodoist();
@@ -245,6 +262,7 @@ async function dailyBackup() {
 const INBOX_DAYS = 14;
 
 const housekeeping = setInterval(() => {
+  void addons.checkUpdates();
   store.purge(settings.int("archiveDays"));
   store.purgeInbox(INBOX_DAYS);
   void dailyBackup();
@@ -253,10 +271,13 @@ store.purge(settings.int("archiveDays"));
 void dailyBackup();
 
 server.listen(config.port, config.host, () => {
+  // Add-ons call the dashboard over HTTP, so they start once it listens.
+  void addons.startAll();
   log(`Grok Bot Dashboard on http://${config.host}:${config.port} (auth: ${config.authMode}, to-dos: ${deps.todoist ? "Todoist" : "from bots"}, PoliTO: ${polito ? "on" : "off"}, time zone: ${config.tz})`);
 });
 
 function shutdown() {
+  void addons.stopAll();
   clearInterval(tick);
   clearInterval(housekeeping);
   for (const t of deferred.values()) clearTimeout(t);

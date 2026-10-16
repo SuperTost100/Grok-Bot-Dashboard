@@ -11,7 +11,7 @@ export type ItemStatus = "open" | "pending" | "snoozed" | "closed";
  * unknown: the bot took it but never reported back, so nobody knows if it happened.
  */
 export type ActionStatus = "queued" | "ready" | "claimed" | "unknown" | "done" | "failed" | "cancelled";
-export type ActionType = "choose" | "send" | "write" | "complete_todo" | "panel";
+export type ActionType = "choose" | "send" | "write" | "complete_todo" | "panel" | "closed";
 
 export interface Option { label: string; instruction?: string }
 export interface Draft { to: string; channel?: string; text: string }
@@ -110,6 +110,32 @@ export interface Bot {
 export type BotKind = "bot" | "addon" | "app" | "source";
 export const READ_SCOPES = ["agenda", "todos", "cards"] as const;
 export type ReadScope = (typeof READ_SCOPES)[number];
+
+/** An add-on or app installed from a store. */
+export interface AddonRow {
+  id: string;
+  type: "addon" | "app";
+  manifest: unknown;
+  repo: string;
+  branch: string;
+  path: string;
+  /** The commit it was installed from, and the newest commit that touched its folder then. */
+  sha: string;
+  pathSha: string;
+  trusted: boolean;
+  enabled: boolean;
+  settings: Record<string, string | number | boolean>;
+  tokenHash: string;
+  /** One line from the add-on itself, like "Read 2 min ago" or an error. */
+  status: string;
+  statusOk: boolean;
+  /** A newer commit for its folder, and what those commits say. */
+  updateSha: string;
+  updateNotes: string[];
+  checkedAt: number | null;
+  installedAt: number;
+  updatedAt: number;
+}
 
 /** Work one bot (or add-on) leaves for another, delivered with the receiver's next run. */
 export interface Handoff {
@@ -298,6 +324,27 @@ CREATE TABLE IF NOT EXISTS triage (
   cost REAL NOT NULL DEFAULT 0
 );
 CREATE INDEX IF NOT EXISTS triage_grok ON triage (grok, level);
+CREATE TABLE IF NOT EXISTS addons (
+  id TEXT PRIMARY KEY,
+  type TEXT NOT NULL,
+  manifest TEXT NOT NULL,
+  repo TEXT NOT NULL,
+  branch TEXT NOT NULL,
+  path TEXT NOT NULL,
+  sha TEXT NOT NULL,
+  path_sha TEXT NOT NULL,
+  trusted INTEGER NOT NULL DEFAULT 0,
+  enabled INTEGER NOT NULL DEFAULT 1,
+  settings TEXT NOT NULL DEFAULT '{}',
+  token_hash TEXT NOT NULL,
+  status TEXT NOT NULL DEFAULT '',
+  status_ok INTEGER NOT NULL DEFAULT 1,
+  update_sha TEXT NOT NULL DEFAULT '',
+  update_notes TEXT NOT NULL DEFAULT '[]',
+  checked_at INTEGER,
+  installed_at INTEGER NOT NULL,
+  updated_at INTEGER NOT NULL
+);
 CREATE TABLE IF NOT EXISTS handoffs (
   id INTEGER PRIMARY KEY AUTOINCREMENT,
   from_bot TEXT NOT NULL,
@@ -428,6 +475,15 @@ function toBot(r: Row): Bot {
     shown: Boolean(r.shown),
     reads: JSON.parse(str(r.reads) || "[]"),
     role: str(r.role),
+  };
+}
+
+function toAddon(r: Row): AddonRow {
+  return {
+    id: str(r.id), type: str(r.type) as AddonRow["type"], manifest: JSON.parse(str(r.manifest)), repo: str(r.repo), branch: str(r.branch), path: str(r.path),
+    sha: str(r.sha), pathSha: str(r.path_sha), trusted: Boolean(r.trusted), enabled: Boolean(r.enabled), settings: JSON.parse(str(r.settings) || "{}"),
+    tokenHash: str(r.token_hash), status: str(r.status), statusOk: Boolean(r.status_ok), updateSha: str(r.update_sha),
+    updateNotes: JSON.parse(str(r.update_notes) || "[]"), checkedAt: num(r.checked_at), installedAt: Number(r.installed_at), updatedAt: Number(r.updated_at),
   };
 }
 
@@ -662,6 +718,14 @@ export class Store {
     });
   }
 
+  /** Messages after an id, oldest first, for add-ons that read mail and chats. */
+  inboxAfter(afterId: number, sourcePrefix: string, limit: number): InboxMessage[] {
+    return this.db
+      .prepare("SELECT * FROM inbox WHERE id > ? AND (? = '' OR source = ? OR source LIKE ? ESCAPE '\\') ORDER BY id LIMIT ?")
+      .all(afterId, sourcePrefix, sourcePrefix, sourcePrefix.replace(/[%_\\]/g, (c) => "\\" + c) + ":%", limit)
+      .map((r) => toInbox(r as Row));
+  }
+
   untriaged(limit = 500): InboxMessage[] {
     return this.db.prepare("SELECT * FROM inbox WHERE triaged_at IS NULL ORDER BY at, id LIMIT ?").all(limit).map((r) => toInbox(r as Row));
   }
@@ -873,6 +937,47 @@ export class Store {
     if (patch.name !== undefined) this.db.prepare("UPDATE bots SET name = ? WHERE slug = ?").run(patch.name, slug);
     if (patch.color !== undefined) this.db.prepare("UPDATE bots SET color = ? WHERE slug = ?").run(patch.color, slug);
     return this.getBot(slug)!;
+  }
+
+  // Add-ons and apps
+
+  listAddons(): AddonRow[] {
+    return this.db.prepare("SELECT * FROM addons ORDER BY id").all().map((r) => toAddon(r as Row));
+  }
+
+  getAddon(id: string): AddonRow | null {
+    const r = this.db.prepare("SELECT * FROM addons WHERE id = ?").get(id) as Row | undefined;
+    return r ? toAddon(r) : null;
+  }
+
+  addonByToken(hash: string): AddonRow | null {
+    const r = this.db.prepare("SELECT * FROM addons WHERE token_hash = ?").get(hash) as Row | undefined;
+    return r ? toAddon(r) : null;
+  }
+
+  saveAddon(a: AddonRow) {
+    this.db
+      .prepare(
+        `INSERT INTO addons (id, type, manifest, repo, branch, path, sha, path_sha, trusted, enabled, settings, token_hash, status, status_ok, update_sha, update_notes, checked_at, installed_at, updated_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+         ON CONFLICT (id) DO UPDATE SET type = excluded.type, manifest = excluded.manifest, repo = excluded.repo, branch = excluded.branch,
+           path = excluded.path, sha = excluded.sha, path_sha = excluded.path_sha, trusted = excluded.trusted, enabled = excluded.enabled,
+           settings = excluded.settings, token_hash = excluded.token_hash, status = excluded.status, status_ok = excluded.status_ok,
+           update_sha = excluded.update_sha, update_notes = excluded.update_notes, checked_at = excluded.checked_at, updated_at = excluded.updated_at`,
+      )
+      .run(
+        a.id, a.type, JSON.stringify(a.manifest), a.repo, a.branch, a.path, a.sha, a.pathSha, a.trusted ? 1 : 0, a.enabled ? 1 : 0,
+        JSON.stringify(a.settings), a.tokenHash, a.status, a.statusOk ? 1 : 0, a.updateSha, JSON.stringify(a.updateNotes), a.checkedAt, a.installedAt, a.updatedAt,
+      );
+    return this.getAddon(a.id)!;
+  }
+
+  setAddonStatus(id: string, status: string, ok: boolean) {
+    this.db.prepare("UPDATE addons SET status = ?, status_ok = ? WHERE id = ?").run(status, ok ? 1 : 0, id);
+  }
+
+  deleteAddon(id: string) {
+    this.db.prepare("DELETE FROM addons WHERE id = ?").run(id);
   }
 
   // Handoffs

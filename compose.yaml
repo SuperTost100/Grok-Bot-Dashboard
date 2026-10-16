@@ -12,8 +12,29 @@ services:
       HOST: 0.0.0.0
       PORT: 8787
       DATA_DIR: /data
+      RUNNER_URL: http://runner:8790
     # Only this machine can reach the port. Tailscale Serve puts it on your tailnet.
     ports:
       - "127.0.0.1:${PORT:-8787}:8787"
     volumes:
       - ./data:/data
+
+  # Starts apps (add-ons that run their own containers). It's the only service with the Docker socket,
+  # which is as good as root here, so it's kept small: it answers only the dashboard, on this network
+  # only, and starts nothing that fails runner/validate.mjs. Remove this service to turn apps off.
+  runner:
+    build: ./runner
+    image: grok-bot-dashboard-runner
+    restart: unless-stopped
+    env_file: .env
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock
+      - runner-apps:/apps
+
+volumes:
+  runner-apps:
+
+# Apps join this network to reach the dashboard at http://dashboard:8787.
+networks:
+  default:
+    name: grokdash

@@ -300,7 +300,7 @@ textarea.draft-edit {
 /* Bottom tab bar (phone) */
 .tabbar {
   position: fixed; left: 0; right: 0; bottom: 0; z-index: 6;
-  display: grid; grid-template-columns: repeat(4, 1fr);
+  display: grid; grid-template-columns: repeat(5, 1fr);
   padding-bottom: env(safe-area-inset-bottom);
   background: color-mix(in oklab, var(--bg) 90%, transparent);
   backdrop-filter: saturate(1.4) blur(14px); -webkit-backdrop-filter: saturate(1.4) blur(14px);
@@ -584,3 +584,32 @@ p.nn-k { margin: 0 0 4px; }
   .bot-head { flex-wrap: wrap; }
   .tabbar button { font-size: 11px; }
 }
+
+/* Add-ons page */
+#view-addons { max-width: 860px; }
+.addon + .addon { margin-top: 28px; padding-top: 22px; border-top: 1px solid var(--border); }
+.addon .role { margin: 0 0 8px; font-size: 15px; }
+.addon .actions { margin-top: 8px; }
+.addon-form { margin-top: 12px; }
+.addon-form .form-actions { padding: 12px 14px; margin: 0; border-top: 1px solid var(--border); }
+.addon-form .opt { font-weight: 400; color: var(--muted); font-size: 13px; }
+.update { margin: 4px 0 8px; padding: 10px 12px; border-radius: 10px; background: var(--surface-2); font-size: 14px; }
+.update ul { margin: 4px 0 0; padding-left: 18px; color: var(--muted); }
+.asks { margin: 4px 0 6px; padding-left: 18px; font-size: 14px; }
+.logs { margin: 12px 0 0; padding: 10px 12px; max-height: 240px; overflow: auto; border-radius: 10px; background: var(--surface-2); font-size: 12px; white-space: pre-wrap; overflow-wrap: anywhere; }
+.pn-head { display: flex; align-items: baseline; gap: 8px; margin-top: 12px; }
+.pn-head .pn-title { margin: 0; flex: 1; }
+.pn-head .btn.ghost svg { width: 16px; height: 16px; }
+.store { margin-top: 36px; }
+.store-item + .store-item { border-top: 1px solid var(--border); }
+.store-row { display: flex; gap: 12px; align-items: center; padding: 12px 14px; }
+.store-row > div { flex: 1; min-width: 0; }
+.store-row .help { margin: 2px 0 0; font-size: 13px; color: var(--muted); }
+.store-item .addon-form { margin: 0 14px 14px; }
+.from-link { margin-top: 16px; }
+.from-link label { font-size: 14px; color: var(--muted); }
+.from-link + .addon-form { margin-top: 12px; }
+.s-control select, .addon-form input[type="text"], .addon-form input[type="url"], .addon-form input[type="number"], .addon-form input[type="password"] {
+  width: 100%; min-height: 40px; padding: 0 12px; border-radius: 10px; border: 1px solid var(--border-strong); background: var(--surface); font-size: 16px;
+}
+@media (max-width: 999px) { .tabbar button { font-size: 10px; } }

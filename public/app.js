@@ -29,6 +29,7 @@ const ui = {
   todosAll: false,       // the to-dos beyond today's three are unfolded
   bots: null,            // the Bots page, loaded when opened
   stripOpen: false,      // the bot strip unfolded while every bot is fine
+  addons: null,          // the Add-ons page: { view, catalog, open settings/logs, install form }
 };
 
 // ---------- talking to the server ----------
@@ -525,6 +526,104 @@ function renderSettingsBots() {
   </div>`).join("") : `<div class="empty-row">No bot has talked to the dashboard yet.</div>`;
 }
 
+// ---------- add-ons and apps ----------
+
+const typeLine = (x) => (x.type === "app" ? `Runs its own container${x.memory ? `, about ${x.memory} of memory` : ""}` : "Runs inside the dashboard");
+
+async function loadAddons(refreshCatalog = false) {
+  const a = (ui.addons ??= { view: null, catalog: null, settings: new Set(), logs: new Map(), install: null, busy: "" });
+  try {
+    a.view = await api("GET", "/api/ui/addons");
+    renderAddons();
+    a.catalog = await api("GET", `/api/ui/addons/catalog${refreshCatalog ? "?refresh=1" : ""}`);
+  } catch (err) {
+    a.error = err.message;
+  }
+  renderAddons();
+}
+
+function settingField(addonId, d) {
+  const id = `as-${addonId}-${d.key}`;
+  const v = d.value ?? d.default ?? "";
+  const label = `<label for="${esc(id)}">${esc(d.label)}${d.required ? "" : ` <span class="opt">optional</span>`}</label>${d.help ? `<p class="help">${esc(d.help)}</p>` : ""}`;
+  let control;
+  if (d.type === "bool") control = `<input type="checkbox" class="switch" id="${esc(id)}" data-key="${esc(d.key)}"${v === true || v === "true" ? " checked" : ""}>`;
+  else if (d.type === "select") control = `<select id="${esc(id)}" data-key="${esc(d.key)}">${d.options.map((o) => `<option${o === v ? " selected" : ""}>${esc(o)}</option>`).join("")}</select>`;
+  else if (d.type === "secret") control = `<input type="password" id="${esc(id)}" data-key="${esc(d.key)}" autocomplete="off" placeholder="${v === "set" ? "Saved. Type to replace it." : "Not set"}">`;
+  else control = `<input type="${d.type === "number" ? "number" : d.type === "url" ? "url" : "text"}" id="${esc(id)}" data-key="${esc(d.key)}" value="${esc(v)}">`;
+  return `<div class="setting${d.type === "bool" ? " is-bool" : ""}"><div class="s-text">${label}</div><div class="s-control">${control}</div></div>`;
+}
+
+const formValues = (form) => Object.fromEntries($$("[data-key]", form).map((el) => [el.dataset.key, el.type === "checkbox" ? el.checked : el.value]));
+
+function asksList(asks, names) {
+  if (!asks?.length) return `<p class="help">It asks for nothing beyond its own cards and panel.</p>`;
+  return `<ul class="asks">${asks.map((k) => `<li>${esc(names[k] ?? k)}</li>`).join("")}</ul>`;
+}
+
+function renderAddons() {
+  const a = ui.addons;
+  if (!a?.view) {
+    if (a?.error) $("#addons").innerHTML = `<div class="empty-row">${esc(a.error)}</div>`;
+    return;
+  }
+  const { installed, asks, panels, stores, runner } = a.view;
+  const mine = installed.map((x) => {
+    const panel = panels[x.id];
+    return `<article class="addon" id="addon-${esc(x.id)}">
+      <div class="bot-head">${avatar(x.id)}<div><h2>${esc(x.name)}</h2>
+        <p class="facts">${esc(typeLine(x))} · ${x.trusted ? "Trusted" : "Not trusted"} · ${esc(x.source)}@${esc(x.sha)}</p>
+        <p class="facts${x.statusOk ? "" : " bad"}">${esc(x.enabled ? x.status || (x.running ? "Running" : "Starting…") : "Turned off")}</p></div></div>
+      ${x.description ? `<p class="role">${esc(x.description)}</p>` : ""}
+      ${x.update ? `<div class="update"><strong>Update available (${esc(x.update.sha)})</strong><ul>${x.update.notes.map((n) => `<li>${esc(n)}</li>`).join("")}</ul></div>` : ""}
+      <div class="actions">
+        ${x.update ? `<button class="btn primary" data-act="addon-update" data-id-addon="${esc(x.id)}">Update</button>` : ""}
+        <button class="btn" data-act="addon-settings" data-id-addon="${esc(x.id)}" aria-expanded="${a.settings.has(x.id)}">Settings</button>
+        <button class="btn ghost" data-act="addon-logs" data-id-addon="${esc(x.id)}" aria-expanded="${a.logs.has(x.id)}">Log</button>
+        <button class="btn ghost" data-act="addon-toggle" data-id-addon="${esc(x.id)}" data-on="${!x.enabled}">${x.enabled ? "Turn off" : "Turn on"}</button>
+        <button class="btn ghost" data-act="addon-remove" data-id-addon="${esc(x.id)}">Remove</button>
+      </div>
+      ${a.settings.has(x.id) ? `<form class="addon-form list" data-addon-form="${esc(x.id)}">
+        ${x.settings.map((d) => settingField(x.id, d)).join("")}
+        <div class="setting is-bool"><div class="s-text"><label for="tr-${esc(x.id)}">Trusted</label><p class="help">Trusted, it can do everything it asks for:</p>${asksList(x.asks, asks)}<p class="help">Not trusted, it only reaches its own cards, panel, agenda and to-dos.</p></div><div class="s-control"><input type="checkbox" class="switch" id="tr-${esc(x.id)}" data-trust${x.trusted ? " checked" : ""}></div></div>
+        <div class="actions form-actions"><button class="btn primary" type="submit">Save and restart</button></div>
+      </form>` : ""}
+      ${a.logs.has(x.id) ? `<pre class="logs">${esc((a.logs.get(x.id) || []).join("\n") || "Nothing logged yet.")}</pre>` : ""}
+      ${panel?.blocks?.length ? `<div class="pn-head"><h3 class="pn-title">${esc(panel.title || "Panel")}</h3><button class="btn ghost" data-act="panel-pin" data-owner="${esc(x.id)}" data-pinned="${!panel.pinned}">${icon("pin")}${panel.pinned ? "Unpin from Today" : "Pin to Today"}</button></div>${renderPanel(panel)}` : ""}
+    </article>`;
+  }).join("");
+  const installedIds = new Set(installed.map((x) => x.id));
+  const cat = a.catalog;
+  const offer = (cat?.entries || []).filter((e) => !installedIds.has(e.id));
+  const form = a.install;
+  const installForm = (key) => form && form.key === key ? (form.manifest
+    ? `<form class="addon-form list" data-install-form>
+        <div class="setting"><div class="s-text"><p class="s-label">It asks for</p>${asksList(form.manifest.asks, asks)}</div></div>
+        ${form.manifest.settings.map((d) => settingField("new", { ...d, value: "" })).join("")}
+        <div class="setting is-bool"><div class="s-text"><label for="tr-new">Trust it</label><p class="help">Only trusted add-ons get what they ask for. You can change this later.</p></div><div class="s-control"><input type="checkbox" class="switch" id="tr-new" data-trust></div></div>
+        ${form.manifest.type === "app" && !runner ? `<p class="s-error">Apps need the runner service from compose.yaml, and it isn't running.</p>` : ""}
+        <div class="actions form-actions"><button class="btn primary" type="submit"${a.busy ? " disabled" : ""}>${a.busy === "install" ? "Installing…" : `Install ${esc(form.manifest.name)}`}</button><button class="btn ghost" type="button" data-act="addon-install-cancel">Cancel</button></div>
+      </form>`
+    : `<p class="empty-row">${esc(form.error || "Reading what it needs…")}</p>`) : "";
+  $("#addons").innerHTML = `
+    <section aria-labelledby="h-mine"><div class="sec-head"><h2 id="h-mine">Installed</h2><span class="count num">${installed.length || ""}</span><span class="note"><button class="btn ghost" data-act="addons-check">Check for updates</button></span></div>
+      ${mine || `<div class="empty"><strong>Nothing installed yet</strong>Pick something from the store below.</div>`}</section>
+    <section aria-labelledby="h-store" class="store"><div class="sec-head"><h2 id="h-store">Store</h2><span class="note">${esc(stores.join(", "))}</span></div>
+      ${(cat?.errors || []).map((e) => `<p class="s-error">${esc(e.store)}: ${esc(e.error)}</p>`).join("")}
+      <div class="list">${cat ? (offer.map((e) => `<div class="store-item">
+          <div class="store-row"><div><p class="s-label">${esc(e.name)}</p><p class="help">${esc(e.description)}</p><p class="help">${esc(typeLine(e))}</p></div>
+          <button class="btn" data-act="addon-install-open" data-source="${esc(`${e.store}/${e.path}`)}" data-key="${esc(e.store + "/" + e.path)}">Install</button></div>
+          ${installForm(e.store + "/" + e.path)}</div>`).join("") || `<div class="empty-row">Everything from your stores is installed.</div>`) : `<div class="empty-row">Reading the store…</div>`}</div>
+      <form class="from-link" data-link-form>
+        <label for="addon-link">Install from a link, or connect another store</label>
+        <div class="write"><input id="addon-link" placeholder="https://github.com/owner/repo/tree/main/addons/name, or owner/repo" autocomplete="off">
+        <button class="btn" type="submit" data-mode="install">Install</button><button class="btn ghost" type="button" data-act="addon-store-add">Connect store</button></div>
+      </form>
+      ${installForm("link")}
+    </section>`;
+  paintColors();
+}
+
 // ---------- now and next ----------
 
 /** Free time counts until this hour: after it, the day is over. */
@@ -840,7 +939,7 @@ function renderArchive() {
 
 // ---------- interactions ----------
 
-const TITLES = { today: "Today", bots: "Bots", archive: "Archive", settings: "Settings" };
+const TITLES = { today: "Today", bots: "Bots", addons: "Add-ons", archive: "Archive", settings: "Settings" };
 
 function setTab(tab) {
   ui.tab = tab;
@@ -848,7 +947,8 @@ function setTab(tab) {
   for (const name of Object.keys(TITLES)) $(`#view-${name}`).hidden = tab !== name;
   $("#view-title").textContent = TITLES[tab];
   // Bot filters only mean something on Today and Archive.
-  $("#filters").classList.toggle("off", tab === "settings" || tab === "bots");
+  $("#filters").classList.toggle("off", tab === "settings" || tab === "bots" || tab === "addons");
+  if (tab === "addons") loadAddons();
   if (tab === "archive") loadArchive();
   if (tab === "bots") loadBots();
   if (tab === "settings") { renderSettingsBots(); paintColors(); }
@@ -1068,6 +1168,33 @@ document.addEventListener("click", async (e) => {
     case "dismiss": if (await actOn(id, { type: "dismiss" })) toast("Dismissed. Restore it from the archive."); break;
     case "read": e.preventDefault(); await actOn(id, { type: "read" }); break;
     case "needs-more": ui.needsAll = true; render(); break;
+    case "addons-check": if (ui.addons) { ui.addons.view = await run("POST", "/api/ui/addons/check-updates", {}) ?? ui.addons.view; renderAddons(); } break;
+    case "addon-settings": { const k = b.dataset.idAddon; ui.addons.settings.has(k) ? ui.addons.settings.delete(k) : ui.addons.settings.add(k); renderAddons(); break; }
+    case "addon-logs": {
+      const k = b.dataset.idAddon;
+      if (ui.addons.logs.has(k)) ui.addons.logs.delete(k);
+      else ui.addons.logs.set(k, (await api("GET", `/api/ui/addons/${encodeURIComponent(k)}/logs`).catch((err) => ({ lines: [err.message] }))).lines);
+      renderAddons();
+      break;
+    }
+    case "addon-update": { const v = await run("POST", `/api/ui/addons/${encodeURIComponent(b.dataset.idAddon)}/update`, {}); if (v) { ui.addons.view = v; toast("Updated."); renderAddons(); } break; }
+    case "addon-toggle": { const v = await run("PUT", `/api/ui/addons/${encodeURIComponent(b.dataset.idAddon)}`, { enabled: b.dataset.on === "true" }); if (v) { ui.addons.view = v; renderAddons(); } break; }
+    case "addon-remove": {
+      const x = ui.addons.view.installed.find((i) => i.id === b.dataset.idAddon);
+      if (!x || !confirm(`Remove ${x.name}? Its open cards close. Its saved data stays, so installing it again picks up where it was.`)) break;
+      const v = await run("DELETE", `/api/ui/addons/${encodeURIComponent(x.id)}`, {});
+      if (v) { ui.addons.view = v; toast(`${x.name} removed.`); renderAddons(); }
+      break;
+    }
+    case "addon-install-open": openInstall(b.dataset.key, b.dataset.source); break;
+    case "addon-install-cancel": ui.addons.install = null; renderAddons(); break;
+    case "addon-store-add": {
+      const repo = $("#addon-link").value.trim();
+      if (!/^[\w.-]+\/[\w.-]+$/.test(repo)) { toast("A store is a GitHub repo like owner/repo."); break; }
+      const v = await run("POST", "/api/ui/addons/stores", { repo });
+      if (v) { ui.addons.view = v; await loadAddons(true); }
+      break;
+    }
     case "strip-open": ui.stripOpen = true; renderStrip(); break;
     case "strip-close": ui.stripOpen = false; renderStrip(); break;
     case "open-bot": ui.scrollToBot = b.dataset.slug; setTab("bots"); break;
@@ -1078,6 +1205,7 @@ document.addEventListener("click", async (e) => {
     case "panel-pin":
       await run("POST", `/api/ui/panels/${encodeURIComponent(b.dataset.owner)}/pin`, { pinned: b.dataset.pinned === "true" });
       if (ui.tab === "bots") loadBots();
+      if (ui.tab === "addons") loadAddons();
       break;
     case "todos-more": ui.todosAll = true; renderTodos(); break;
     case "todos-less": ui.todosAll = false; renderTodos(); break;
@@ -1139,7 +1267,43 @@ document.addEventListener("change", async (e) => {
   }
 });
 
+async function openInstall(key, source) {
+  ui.addons.install = { key, source, manifest: null, error: "" };
+  renderAddons();
+  try {
+    ui.addons.install.manifest = await api("GET", `/api/ui/addons/peek?source=${encodeURIComponent(source)}`);
+  } catch (err) {
+    if (ui.addons.install?.key === key) ui.addons.install.error = err.message;
+  }
+  renderAddons();
+}
+
 document.addEventListener("submit", async (e) => {
+  const f = e.target;
+  if (f.matches("[data-addon-form]")) {
+    e.preventDefault();
+    const id = f.dataset.addonForm;
+    const v = await run("PUT", `/api/ui/addons/${encodeURIComponent(id)}`, { settings: formValues(f), trusted: $("[data-trust]", f).checked });
+    if (v) { ui.addons.view = v; ui.addons.settings.delete(id); toast("Saved. It restarted with the new settings."); renderAddons(); }
+    return;
+  }
+  if (f.matches("[data-install-form]")) {
+    e.preventDefault();
+    const form = ui.addons.install;
+    ui.addons.busy = "install";
+    renderAddons();
+    const v = await run("POST", "/api/ui/addons/install", { source: form.source, settings: formValues(f), trusted: $("[data-trust]", f).checked });
+    ui.addons.busy = "";
+    if (v) { ui.addons.install = null; toast(`${form.manifest.name} installed.`); await loadAddons(); }
+    else renderAddons();
+    return;
+  }
+  if (f.matches("[data-link-form]")) {
+    e.preventDefault();
+    const link = $("#addon-link").value.trim();
+    if (link) openInstall("link", link);
+    return;
+  }
   const id = Number(e.target.dataset.form);
   if (!id) return;
   e.preventDefault();
