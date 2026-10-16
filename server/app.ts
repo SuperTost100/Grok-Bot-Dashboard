@@ -242,6 +242,18 @@ export function createApp(deps: AppDeps) {
     return { from: a.from, until: a.until, active, back: !active && a.until <= store.now() && !a.summarized };
   }
 
+  /**
+   * When the page's content was last brought up to date. With triage on the dashboard reads the sources
+   * itself, so their reads count and the Grok bot's old scans (it no longer scans) don't.
+   */
+  function lastUpdate(bots: Bot[]): number | null {
+    const triageOn = Boolean(deps.triage?.active());
+    const scans = bots.filter((b) => !(triageOn && b.slug === settings.str("grokBot"))).map((b) => b.lastScanAt);
+    if (deps.sources) scans.push(deps.sources.lastRead());
+    const known = scans.filter((t): t is number => t !== null);
+    return known.length ? Math.max(...known) : null;
+  }
+
   async function state() {
     store.wakeSnoozed();
     store.expireClaims(STALE_CLAIM_MS);
@@ -262,7 +274,7 @@ export function createApp(deps: AppDeps) {
         slug: b.slug, name: b.name, color: b.color, lastScanAt: b.lastScanAt, lastSeenAt: b.lastSeenAt,
         refreshRequestedAt: b.refreshRequestedAt, hasWebhook: Boolean(b.webhookUrl), offlineSince: offlineSince(b),
       })),
-      lastScanAt: bots.reduce<number | null>((m, b) => (b.lastScanAt && (!m || b.lastScanAt > m) ? b.lastScanAt : m), null),
+      lastScanAt: lastUpdate(bots),
       needs: items.filter((i) => needsYou(i, awaiting)),
       catchup: items.filter((i) => !needsYou(i, awaiting)),
       away: awayView(),

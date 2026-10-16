@@ -268,7 +268,7 @@ export function eventCard(bot: string, msgs: InboxMessage[], info: SourceInfo, m
     link: last.link,
   };
   return mode === "ask"
-    ? { ...base, kind: "choice", options: [{ label: "Add to calendar", instruction: ADD_TO_CALENDAR }] }
+    ? { ...base, kind: "choice", context: "Tap Add to calendar and Grok puts it in your main Google Calendar.", options: [{ label: "Add to calendar", instruction: ADD_TO_CALENDAR }] }
     : { ...base, kind: "reminder", context: "Grok adds this to your calendar at its next run." };
 }
 

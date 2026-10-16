@@ -302,7 +302,8 @@ function cardActions(c) {
  * with a little more detail. That's the case worth a second look before tapping, so it shows on collapsed cards too.
  */
 function answersList(c) {
-  if (c.kind !== "choice") return "";
+  // The dashboard's own calendar cards carry Grok's working instructions, not words for you: the card's context says it.
+  if (c.kind !== "choice" || c.key?.includes(":event:")) return "";
   const rows = c.options.filter((o) => {
     if (!o.instruction) return false;
     const i = o.instruction.trim().toLowerCase();
