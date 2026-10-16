@@ -1124,8 +1124,9 @@ export function createApp(deps: AppDeps) {
   // ----- auth -----
 
   function isOwner(req: http.IncomingMessage) {
-    if (config.authMode === "none") return true;
+    // Checked first, so even with AUTH_MODE=none an app can't reach the owner's pages.
     if (config.ownerVia === "gateway" && !gateways().has(String(req.socket.remoteAddress ?? "").replace(/^::ffff:/, ""))) return false;
+    if (config.authMode === "none") return true;
     const login = String(req.headers["tailscale-user-login"] ?? "").toLowerCase();
     return login === config.ownerLogin;
   }

@@ -79,7 +79,9 @@ test("runner rules: nothing privileged, no host folders or ports, the token only
   assert.throws(bad({ build: { context: "./..", dockerfile: "x" } }), /own folder/);
   assert.throws(bad({ build: { context: ".", dockerfile: "/proc/self/environ" } }), /file name inside/);
   const tagged = checkCompose({ services: { "wa-x": { build: ".", image: "grok-bot-dashboard-runner" } } }, o);
-  assert.equal(tagged.services["wa-x"].image, "gd-wa-wa-x:latest", "a build can't overwrite another image");
+  assert.equal(tagged.services["wa-x"].image, "gd-wa/wa-x:latest", "a build can't overwrite another image");
+  assert.throws(() => checkCompose({ services: { "wa-bb": { image: "x" } } }, { ...o, others: { "wa-bb": ["wa-bb"] } }), /share a name with app "wa-bb"/);
+  assert.throws(() => checkCompose({ services: { "wa-bb": { image: "x" } } }, { ...o, id: "wa-bb", others: { wa: ["wa-bb"] } }), /share a name/);
 });
 
 // ---------- A real add-on, installed from a fake store ----------
@@ -138,7 +140,7 @@ async function setupAddons(o: { runner?: boolean } = {}) {
   const base = `http://127.0.0.1:${(server.address() as AddressInfo).port}`;
   const addons = createAddons({
     store, dataDir, localUrl: base, appUrl: base, tz: "Europe/Rome", log: () => {}, github: new GitHub(fake),
-    untrustedSafe: true, runner: o.runner === false ? null : runner, reserved: () => ["dashboard"],
+    untrustedSafe: true, runner: o.runner === false ? null : runner, reserved: () => ["dashboard"], integrations: ["calendar", "polito"],
   });
   server.on("request", createApp({ config: { ...config, authMode: "none" }, store, addons, log: () => {} }));
   const ui = async (method: string, p: string, body?: unknown) => {
@@ -212,7 +214,7 @@ test("add-ons: a trusted one runs as a locked-down process, and removal closes i
     assert.notEqual(t.store.getAddon("parcels")!.tokenHash, oldHash);
     t.store.upsertItem({ bot: "parcels", key: "open-one", section: "needs", kind: "reminder", title: "Parcel at the locker" });
     assert.equal((await t.ui("DELETE", "/api/ui/addons/parcels", {})).status, 200);
-    assert.deepEqual(t.downs, ["parcels"], "its container stops");
+    assert.deepEqual(t.downs, ["parcels"], "it ran as a process until trust changed, so only removal stops a container");
     assert.equal(t.store.getAddon("parcels"), null);
     assert.equal(t.store.getItemByKey("parcels", "open-one")!.status, "closed");
   } finally {
@@ -225,8 +227,7 @@ test("add-ons: reserved names, Grok bots' names, and taking over existing cards 
   try {
     const install = (p: string, trusted: boolean) => t.ui("POST", "/api/ui/addons/install", { source: `owner/store/addons/${p}`, trusted });
     assert.match((await install("grok", true)).body.error, /taken by the dashboard/);
-    t.store.ensureBot("calendar"); // events the dashboard read itself before
-    assert.match((await install("calendar", false)).body.error, /only a trusted add-on/);
+    assert.match((await install("calendar", false)).body.error, /only a trusted add-on/, "a reader's name is reserved even before it has data");
     assert.equal((await install("calendar", true)).status, 200, "trusted, it carries the calendar's events on");
     t.store.touchBot("venduto");
     t.store.configureBot("venduto", {});

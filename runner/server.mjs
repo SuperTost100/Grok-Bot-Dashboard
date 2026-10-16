@@ -32,13 +32,26 @@ function docker(args, cwd, timeoutMs = 15 * 60_000) {
   });
 }
 
+/** Every other deployed app's service names, so no two apps answer to the same name. */
+function deployed() {
+  const out = {};
+  for (const other of fs.existsSync(APPS) ? fs.readdirSync(APPS) : []) {
+    try {
+      out[other] = Object.keys(JSON.parse(fs.readFileSync(path.join(APPS, other, "compose.json"), "utf8")).services ?? {});
+    } catch {
+      out[other] = [];
+    }
+  }
+  return out;
+}
+
 const compose = (id, ...args) => docker(["compose", "-p", `gd-${id}`, "-f", "compose.json", ...args], path.join(APPS, id));
 
 async function deploy(id, body) {
   const env = body.env ?? {};
   // Placeholders are filled first; the injected values get their "$" escaped so Compose leaves them alone.
   const escaped = Object.fromEntries(Object.entries(env).map(([k, v]) => [k, String(v).replaceAll("$", "$$$$")]));
-  const checked = checkCompose(fillVars(body.compose, env), { id, network: NETWORK, env: escaped });
+  const checked = checkCompose(fillVars(body.compose, env), { id, network: NETWORK, env: escaped, others: deployed() });
   const dir = path.join(APPS, id);
   const src = path.join(dir, "src");
   // A fresh copy of the app's folder each time, so files removed from the repo are gone here too.
@@ -78,8 +91,10 @@ http.createServer(async (req, res) => {
     }
     if (!fs.existsSync(path.join(APPS, id, "compose.json"))) return send(res, 404, { error: `App ${id} isn't deployed.` });
     if (req.method === "DELETE") {
-      const out = await compose(id, "down", ...(u.searchParams.get("purge") === "1" ? ["-v"] : []));
-      fs.rmSync(path.join(APPS, id), { recursive: true, force: true });
+      const purge = u.searchParams.get("purge") === "1";
+      const out = await compose(id, "down", ...(purge ? ["-v"] : []));
+      // Kept after a plain stop, so the volumes can still be found and removed later.
+      if (purge) fs.rmSync(path.join(APPS, id), { recursive: true, force: true });
       return send(res, 200, { output: out });
     }
     if (req.method === "GET" && m[2]) return send(res, 200, { output: await compose(id, "logs", "--tail", "100", "--no-color") });

@@ -68,6 +68,8 @@ export function createAddons(o: {
   untrustedSafe?: boolean;
   /** Names an add-on can never take: the Grok bot that does triage, the dashboard's own services. */
   reserved?: () => string[];
+  /** Names of the dashboard's own readers, which only a trusted add-on may take over. */
+  integrations?: string[];
 }) {
   const { store, log } = o;
   const github = o.github ?? new GitHub();
@@ -172,7 +174,7 @@ export function createAddons(o: {
     // A Grok bot that has ever talked to the dashboard keeps its name. Only a trusted add-on may take
     // over a name that already has cards or events (like PoliTO's or the calendar's), to carry them on.
     if (bot && bot.kind === "bot" && (bot.lastSeenAt || bot.webhookUrl)) throw new Error(`A bot is already called "${m.id}".`);
-    if (bot && !opts.trusted) throw new Error(`"${m.id}" already has cards or events here, so only a trusted add-on may take it over.`);
+    if ((bot || o.integrations?.includes(m.id)) && !opts.trusted) throw new Error(`"${m.id}" is the name of one of the dashboard's readers, or already has cards or events here, so only a trusted add-on may take it.`);
     if ((m.type === "app" || !opts.trusted) && !o.runner) throw new Error(`${m.name} needs the runner service${m.type === "app" ? "" : " to run untrusted"}, and it isn't set up.`);
     if (!opts.trusted && !o.untrustedSafe) throw new Error(UNSAFE);
     const settings = checkSettings(m.settings, opts.settings);
@@ -207,8 +209,7 @@ export function createAddons(o: {
 
   async function remove(id: string, purge = false) {
     const a = mustGet(id);
-    await stop(id, a);
-    if (purge && inContainer(a) && o.runner) note(id, await o.runner.down(id, true).catch((e: Error) => `runner: ${e.message}`));
+    await stop(id, a, purge);
     fs.rmSync(path.join(root, id, "code"), { recursive: true, force: true });
     if (purge) fs.rmSync(path.join(root, id), { recursive: true, force: true });
     store.deletePanel(id);
@@ -222,6 +223,10 @@ export function createAddons(o: {
     if (patch.trusted === false && !o.untrustedSafe) throw new Error(UNSAFE);
     const settings = patch.settings ? checkSettings(manifestOf(a).settings, patch.settings, a.settings) : a.settings;
     if (patch.trusted === false && a.type === "addon" && !o.runner) throw new Error("Untrusted add-ons run in a container of their own, and the runner isn't set up.");
+    if (patch.trusted !== undefined && patch.trusted !== a.trusted && a.type === "addon") {
+      // It moves between a process and a container, which keep their saved data apart: it starts afresh.
+      note(id, "trust changed: it starts again with fresh saved data");
+    }
     // Stopped the way it ran before the change: trust moves an add-on between a process and a container.
     await stop(id, a);
     store.saveAddon({ ...store.getAddon(id)!, trusted: patch.trusted ?? a.trusted, enabled: patch.enabled ?? a.enabled, settings, updatedAt: store.now() });
@@ -316,10 +321,17 @@ export function createAddons(o: {
     note(id, `started ${m.entry}`);
   }
 
-  /** Stop it the way it was running: its process, or its containers (their volumes stay). */
-  async function stop(id: string, row = store.getAddon(id)) {
-    if (row && inContainer(row) && o.runner && row.tokenHash) {
-      note(id, await o.runner.down(id, false).catch((e: Error) => `runner: ${e.message}`));
+  /**
+   * Stop it the way it was running: its process, or its containers. Their volumes stay unless `purge`.
+   * A runner that fails to stop containers fails the whole change, so nothing is left running unseen.
+   */
+  async function stop(id: string, row = store.getAddon(id), purge = false) {
+    if (row && inContainer(row) && o.runner) {
+      try {
+        note(id, await o.runner.down(id, purge));
+      } catch (err) {
+        if (!/isn't deployed/.test((err as Error).message)) throw new Error(`Couldn't stop its containers: ${(err as Error).message}`);
+      }
     }
     const p = procs.get(id);
     if (p) {

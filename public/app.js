@@ -585,7 +585,7 @@ function renderAddons() {
       </div>
       ${a.settings.has(x.id) ? `<form class="addon-form list" data-addon-form="${esc(x.id)}">
         ${x.settings.map((d) => settingField(x.id, d)).join("")}
-        <div class="setting is-bool"><div class="s-text"><label for="tr-${esc(x.id)}">Trusted</label><p class="help">Trusted, it can do everything it asks for:</p>${asksList(x.asks, asks)}<p class="help">Not trusted, it only reaches its own cards, panel, agenda and to-dos.</p></div><div class="s-control"><input type="checkbox" class="switch" id="tr-${esc(x.id)}" data-trust${x.trusted ? " checked" : ""}></div></div>
+        <div class="setting is-bool"><div class="s-text"><label for="tr-${esc(x.id)}">Trusted</label><p class="help">Trusted, it can do everything it asks for:</p>${asksList(x.asks, asks)}<p class="help">Not trusted, it runs in a container of its own and only reaches its own cards, panel, agenda and to-dos. Changing this restarts it with fresh saved data.</p></div><div class="s-control"><input type="checkbox" class="switch" id="tr-${esc(x.id)}" data-trust${x.trusted ? " checked" : ""}></div></div>
         <div class="actions form-actions"><button class="btn primary" type="submit">Save and restart</button></div>
       </form>` : ""}
       ${a.logs.has(x.id) ? `<pre class="logs">${esc((a.logs.get(x.id) || []).join("\n") || "Nothing logged yet.")}</pre>` : ""}
@@ -600,7 +600,7 @@ function renderAddons() {
     ? `<form class="addon-form list" data-install-form>
         <div class="setting"><div class="s-text"><p class="s-label">It asks for</p>${asksList(form.manifest.asks, asks)}</div></div>
         ${form.manifest.settings.map((d) => settingField("new", { ...d, value: "" })).join("")}
-        <div class="setting is-bool"><div class="s-text"><label for="tr-new">Trust it</label><p class="help">Only trusted add-ons get what they ask for. You can change this later.</p></div><div class="s-control"><input type="checkbox" class="switch" id="tr-new" data-trust></div></div>
+        <div class="setting is-bool"><div class="s-text"><label for="tr-new">Trust it</label><p class="help">A trusted add-on gets what it asks for and runs next to the dashboard: trust only code you'd run on this machine yourself. Untrusted, it runs in a container of its own and reaches only its own cards and panel.</p></div><div class="s-control"><input type="checkbox" class="switch" id="tr-new" data-trust></div></div>
         ${form.manifest.type === "app" && !runner ? `<p class="s-error">Apps need the runner service from compose.yaml, and it isn't running.</p>` : ""}
         <div class="actions form-actions"><button class="btn primary" type="submit"${a.busy ? " disabled" : ""}>${a.busy === "install" ? "Installing…" : `Install ${esc(form.manifest.name)}`}</button><button class="btn ghost" type="button" data-act="addon-install-cancel">Cancel</button></div>
       </form>`

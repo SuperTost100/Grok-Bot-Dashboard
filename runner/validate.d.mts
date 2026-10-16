@@ -1,5 +1,5 @@
 // Types for validate.mjs, which stays plain JavaScript so the runner image needs nothing but Node.
-export function checkCompose(compose: unknown, o: { id: string; network: string; env: Record<string, string> }): {
+export function checkCompose(compose: unknown, o: { id: string; network: string; env: Record<string, string>; others?: Record<string, string[]> }): {
   name: string;
   services: Record<string, Record<string, unknown>>;
   volumes: Record<string, object>;

@@ -42,7 +42,7 @@ function bytes(v) {
  * Check an app's compose (as JSON) and return the version the runner starts.
  * `network` is the dashboard's network; `id` names the app; `env` goes to services marked "x-dashboard".
  */
-export function checkCompose(compose, { id, network, env }) {
+export function checkCompose(compose, { id, network, env, others = {} }) {
   if (!compose || typeof compose !== "object" || Array.isArray(compose)) throw new Error("The compose file must be a JSON object.");
   for (const k of Object.keys(compose)) {
     if (!["services", "volumes", "name"].includes(k) && !k.startsWith("x-")) throw new Error(`Apps can't set "${k}" in their compose file.`);
@@ -62,6 +62,11 @@ export function checkCompose(compose, { id, network, env }) {
     // Service names are addresses on the shared network: an app may only use names it owns,
     // so it can't answer for "dashboard", "runner" or another app's services.
     if (name !== id && !name.startsWith(`${id}-`)) throw new Error(`Service "${name}" must be named "${id}" or start with "${id}-".`);
+    // Ids may contain dashes, so "aa-bb" could be app aa's service or app aa-bb itself: the first one deployed keeps it.
+    for (const [other, names] of Object.entries(others)) {
+      if (other === id) continue;
+      if (name === other || name.startsWith(`${other}-`) || names.includes(name)) throw new Error(`Service "${name}" would share a name with app "${other}".`);
+    }
     if (!svc || typeof svc !== "object") throw new Error(`Service "${name}" must be an object.`);
     for (const k of Object.keys(svc)) if (!SERVICE_KEYS.has(k)) throw new Error(`Service "${name}" can't set "${k}".`);
     if (!svc.image && !svc.build) throw new Error(`Service "${name}" needs an image or a build.`);
@@ -100,7 +105,7 @@ export function checkCompose(compose, { id, network, env }) {
     out.services[name] = {
       ...rest,
       // A build gets a tag the runner picks, so an app can't overwrite another image on this machine.
-      ...(build ? { build, image: `gd-${id}-${name}:latest` } : {}),
+      ...(build ? { build, image: `gd-${id}/${name}:latest` } : {}),
       volumes: mounts,
       environment,
       mem_limit: mem,

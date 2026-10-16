@@ -9,6 +9,7 @@ import { Polito, POLITO_BOT, createPolitoSync } from "./polito.ts";
 import { createApp, STALE_CLAIM_MS, type AppDeps } from "./app.ts";
 import { Settings } from "./settings.ts";
 import { createSources } from "./sources/index.ts";
+import { CALENDAR_OWNER } from "./sources/calendar.ts";
 import { createTriage } from "./triage.ts";
 import { createPhone } from "./ntfy.ts";
 import { createAddons } from "./addons/manager.ts";
@@ -162,8 +163,10 @@ const addons = createAddons({
   localUrl: `http://127.0.0.1:${config.port}`,
   appUrl: process.env.DASHBOARD_URL_FOR_APPS ?? "http://dashboard:8787",
   runner: runnerUrl ? createRunnerClient(runnerUrl, process.env.RUNNER_KEY_FILE ?? "/run/runner/runner.key") : null,
-  untrustedSafe: config.ownerVia === "gateway" || config.authMode === "none",
+  untrustedSafe: config.ownerVia === "gateway" && config.authMode === "tailscale",
   reserved: () => [settings.str("grokBot")],
+  // The dashboard's own readers: only a trusted add-on may carry their cards and events on.
+  integrations: ["polito", CALENDAR_OWNER, "todoist", "mail", "whatsapp"],
 });
 const deps: AppDeps = { config, store, settings, todoist: makeTodoist(), polito, sources, triage, phone, addons, notify, lastPing: (bot) => lastPing.get(bot), log };
 settings.onChange((keys) => {
