@@ -10,9 +10,10 @@ Each burst of new messages in a chat or mail thread is one decision. Jev answers
 | ----------------------------------------------------------------- | ---------------------------------------------------- | --------------- |
 | Likely needs your reply or decision, clearly urgent               | Urgent card and a phone ping; Grok drafts the answer | Yes, right away |
 | Likely needs your reply or decision                               | A card now; Grok writes the answer at its next run   | Later           |
-| Might need a reply (35% to the "Grok works on a chat at" setting) | A card made from the message                         | No              |
-| A task, news for today, or a person writing to you privately      | A card made from the message                         | No              |
-| Group chatter, or information that can wait                       | A line in Catch up                                   | No              |
+| Might need a reply (35% to the "Grok works on a chat at" setting) | A line in Catch up, made from the message            | No              |
+| A task, news for today, or a person writing to you privately      | A line in Catch up, made from the message            | No              |
+| Group chatter that names you, or information that can wait       | A line in Catch up                                   | No              |
+| Group chatter that isn't for you                                  | Straight to the archive, where search finds it       | No              |
 | Noise or automatic mail                                           | Listed under "Filtered out today" in Catch up        | No              |
 
 In a group, a question needs you only when it names you or asks you to decide. Mentions of you are rewritten as @your-name so Jev can tell. While you're chatting in a chat yourself (you wrote there in the last 15 minutes), its new messages need no decision. When you reply from your phone, the chat's card closes.

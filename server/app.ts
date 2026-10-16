@@ -82,7 +82,17 @@ function when(v: unknown, field: string, tz: string, required: boolean): string 
 
 const KINDS: Kind[] = ["choice", "draft", "reminder", "digest"];
 
-export function parseItem(raw: unknown, i = 0): ItemInput {
+/**
+ * What stays in Needs you: questions with answers, drafts, anything urgent, and taps in progress.
+ * Everything else a bot or triage posts there (news, reminders, PoliTO notices) reads as a catch-up line.
+ */
+export function needsYou(i: Item, awaitingGrok: Set<number> = new Set()): boolean {
+  if (i.section !== "needs") return false;
+  if (i.status === "pending" || (i.status === "closed" && i.closedReason === "action")) return true;
+  return i.kind === "choice" || i.kind === "draft" || i.urgent !== "" || awaitingGrok.has(i.id);
+}
+
+export function parseItem(raw: unknown, i = 0, tz = "UTC"): ItemInput {
   const at = (f: string) => (i ? `items[${i}].${f}` : f);
   const b = obj(raw, i ? `items[${i}]` : "item");
   if (b.section != null && b.section !== "needs" && b.section !== "catchup") throw bad(`"${at("section")}" must be "needs" or "catchup"`);
@@ -106,6 +116,9 @@ export function parseItem(raw: unknown, i = 0): ItemInput {
     const d = obj(b.draft, at("draft"));
     draft = { to: text(d.to, at("draft.to"), 80, true), channel: text(d.channel, at("draft.channel"), 40), text: text(d.text, at("draft.text"), 4000, true) };
   }
+  // A day without a time runs out at the end of that day.
+  const expires = when(b.expires, at("expires"), tz, false);
+  const expiresAt = !expires ? null : zonedToEpoch(expires.length === 10 ? `${addDays(expires, 1)}T00:00:00` : expires, tz);
   return {
     bot: slug(b.bot),
     key: text(b.key, at("key"), 200) || null,
@@ -121,6 +134,7 @@ export function parseItem(raw: unknown, i = 0): ItemInput {
     countLabel: text(b.countLabel, at("countLabel"), 40),
     options,
     draft,
+    expiresAt,
     reopen: b.reopen === true,
   };
 }
@@ -165,6 +179,11 @@ export interface AppDeps {
 }
 
 const RECENT_MS = 10 * 60_000;
+const DAY_MS = 86_400_000;
+/** How long something stays on the page after you first saw it: news a day, questions three days. */
+export const INFO_TTL_MS = DAY_MS;
+export const CARD_TTL_MS = 3 * DAY_MS;
+const MAX_AWAY_DAYS = 60;
 export const STALE_CLAIM_MS = 20 * 60_000;
 // A scheduled run or an accepted ping that hasn't reached the dashboard after this long means the bot can't get here.
 export const OFFLINE_AFTER_MS = 20 * 60_000;
@@ -216,10 +235,20 @@ export function createApp(deps: AppDeps) {
     return { source: "bot", items: todos, hidden, error: "" };
   }
 
+  function awayView() {
+    const a = store.getAway();
+    if (!a) return null;
+    const active = store.isAway();
+    return { from: a.from, until: a.until, active, back: !active && a.until <= store.now() && !a.summarized };
+  }
+
   async function state() {
     store.wakeSnoozed();
     store.expireClaims(STALE_CLAIM_MS);
+    // Nothing expires while you're away, and the clock restarts when you're back.
+    if (!store.isAway()) store.expireStale({ infoMs: INFO_TTL_MS, cardMs: CARD_TTL_MS, clockFrom: store.getAway()?.until ?? 0 });
     const items = store.activeItems(RECENT_MS).map(uiItem);
+    const awaiting = store.awaitingGrok();
     const day = today();
     const bots = store.listBots();
     return {
@@ -234,8 +263,9 @@ export function createApp(deps: AppDeps) {
         refreshRequestedAt: b.refreshRequestedAt, hasWebhook: Boolean(b.webhookUrl), offlineSince: offlineSince(b),
       })),
       lastScanAt: bots.reduce<number | null>((m, b) => (b.lastScanAt && (!m || b.lastScanAt > m) ? b.lastScanAt : m), null),
-      needs: items.filter((i) => i.section === "needs"),
-      catchup: items.filter((i) => i.section === "catchup"),
+      needs: items.filter((i) => needsYou(i, awaiting)),
+      catchup: items.filter((i) => !needsYou(i, awaiting)),
+      away: awayView(),
       todos: await todosState(),
       agenda: agenda(day),
       polito: deps.polito ? { error: deps.polito.error() } : null,
@@ -277,7 +307,7 @@ export function createApp(deps: AppDeps) {
         throw conflict("This card changed since you opened it. Check it again before answering.");
       }
       // A read catch-up summary can still take a follow-up question.
-      if (item.status === "closed" && !(item.section === "catchup" && fields.type === "write")) throw conflict("This card is already closed.");
+      if (item.status === "closed" && !(!needsYou(item) && item.closedReason === "read" && fields.type === "write")) throw conflict("This card is already closed.");
       if (item.status === "snoozed") throw conflict("This card is snoozed. Restore it first.");
       if (store.pendingActionFor(item.id)) throw conflict("The bot is already working on this card.");
       return store.addAction({ item, bot: item.bot, delayMs: undoMs(), ...fields });
@@ -309,7 +339,8 @@ export function createApp(deps: AppDeps) {
         readOnPolito(item);
         return { item: store.closeItem(item.id, "dismissed", "Dismissed") };
       case "read":
-        if (item.section !== "catchup") throw bad("Only catch-up summaries can be marked as read.");
+        if (needsYou(item, store.awaitingGrok())) throw bad("Only catch-up lines can be marked as read.");
+        readOnPolito(item);
         return { item: store.closeItem(item.id, "read", "Read") };
       case "snooze": {
         freeFromBot(item);
@@ -405,6 +436,7 @@ export function createApp(deps: AppDeps) {
           options: "choice only: 1 to 4 of {label (up to 60 chars), instruction (up to 1000)}. The instruction must do exactly what the label says.",
           draft: "draft only: {to, channel, text}", countLabel: "digest only, like '46 messages'",
           reopen: "true to bring back a card the user closed",
+          expires: "date or time after which the card is out of date (the event it's about has happened), like 2026-10-16 or 2026-10-16T21:00:00+02:00. The card goes to the archive then.",
         },
         example: { key: "wa:120363@g.us:poll-7", kind: "choice", app: "whatsapp", source: "WhatsApp · Lab group", title: "Marco needs your vote on the lab swap", urgent: "answer by 14:00", options: [{ label: "Vote Tuesday", instruction: "Vote Tuesday in the Lab group poll" }] },
         list: "GET /api/bot/items?status=open|closed|all", close: "POST /api/bot/items/close {key, reason}",
@@ -455,7 +487,7 @@ export function createApp(deps: AppDeps) {
     const batch = Array.isArray(b.items);
     const list = batch ? (b.items as unknown[]) : [b];
     if (list.length > 50) throw bad("Send at most 50 items per call.");
-    const parsed = list.map((x, i) => parseItem(x && typeof x === "object" && !Array.isArray(x) ? { bot: b.bot, ...x } : x, batch ? i : 0));
+    const parsed = list.map((x, i) => parseItem(x && typeof x === "object" && !Array.isArray(x) ? { bot: b.bot, ...x } : x, batch ? i : 0, tz));
     const keys = parsed.map((p) => p.key).filter(Boolean);
     if (new Set(keys).size !== keys.length) throw bad("Two items in this call share a key. Send each key once.");
     const results = parsed.map((p) => {
@@ -607,6 +639,52 @@ export function createApp(deps: AppDeps) {
 
   route("POST", "/api/ui/items/:id/ack", "ui", async (_r, p) => {
     store.ackItem(itemOr404(p[0]).id);
+    return { ok: true, state: await state() };
+  });
+
+  const idList = (v: unknown) => {
+    if (!Array.isArray(v) || v.length > 200 || !v.every((x) => Number.isSafeInteger(x) && x > 0)) throw bad(`"ids" must be a list of up to 200 item ids`);
+    return v as number[];
+  };
+
+  // The page reports what it showed you, so expiry only counts time you could have seen it.
+  route("POST", "/api/ui/seen", "ui", (_r, _p, _q, b) => {
+    store.markSeen(idList(b.ids));
+    return { ok: true };
+  });
+
+  // One catch-up line can stand for several items (a course's PoliTO notices): they're read together.
+  route("POST", "/api/ui/read", "ui", async (_r, _p, _q, b) => {
+    for (const id of idList(b.ids)) {
+      const item = store.getItem(id);
+      if (!item || item.status !== "open" || needsYou(item, store.awaitingGrok())) continue;
+      readOnPolito(item);
+      store.closeItem(item.id, "read", "Read");
+    }
+    return { ok: true, state: await state() };
+  });
+
+  route("PUT", "/api/ui/away", "ui", async (_r, _p, _q, b) => {
+    // A day means you're away until the end of that day, in the dashboard's time zone.
+    const day = typeof b.until === "string" && /^\d{4}-\d{2}-\d{2}$/.test(b.until) ? when(b.until, "until", tz, true) : "";
+    const until = day ? zonedToEpoch(`${addDays(day, 1)}T00:00:00`, tz) : typeof b.until === "number" ? b.until : Date.parse(String(b.until ?? ""));
+    const now = store.now();
+    if (!Number.isFinite(until) || until <= now) throw bad(`"until" must be a time in the future`);
+    if (until > now + MAX_AWAY_DAYS * DAY_MS) throw bad(`Away mode lasts at most ${MAX_AWAY_DAYS} days.`);
+    store.setAway({ from: store.isAway() ? store.getAway()!.from : now, until, summarized: false });
+    return { ok: true, state: await state() };
+  });
+
+  route("DELETE", "/api/ui/away", "ui", async () => {
+    const a = store.getAway();
+    if (a && store.isAway()) store.setAway({ ...a, until: store.now() });
+    return { ok: true, state: await state() };
+  });
+
+  // You went through what came in while you were away: the summary goes.
+  route("POST", "/api/ui/away/summarized", "ui", async () => {
+    const a = store.getAway();
+    if (a && !store.isAway()) store.setAway({ ...a, summarized: true });
     return { ok: true, state: await state() };
   });
 

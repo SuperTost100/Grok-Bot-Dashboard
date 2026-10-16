@@ -58,7 +58,7 @@ test("in a group, a question needs you only when it's put to you or asks you to 
 
 test("routes follow the table", () => {
   const r = (level: number, need: Decision["need"], o: Partial<Decision> = {}) =>
-    routeFor({ level, need, actionable: false, doubtful: false, automated: false, chat: "private", ...o });
+    routeFor({ level, need, actionable: false, doubtful: false, automated: false, forUser: true, chat: "private", ...o });
   assert.equal(r(4, "reply", { actionable: true }), "wake");
   assert.equal(r(3, "decision", { actionable: true }), "ride");
   assert.equal(r(1, "reply", { actionable: true }), "ride");
@@ -756,4 +756,44 @@ test("ads and other people's plans never touch your calendar", () => {
   assert.equal(calendarFor(groupPlan, "group", false), null);
   assert.equal(calendarFor(answers(1, "info", { event: { proposal: 0.8 }, addressed: 0.8 }), "group", false), "ask");
   assert.equal(calendarFor(answers(1, "info", { event: { fixed: 0.9 }, dated: 0.2 }), "private", false), null, "\"I'm on my way\" has no day to put in a calendar");
+});
+
+test("group talk that isn't for you is archived, never shown", async () => {
+  const t = await setup({ reply: () => answers(2, "info", { addressed: 0.1 }) });
+  try {
+    t.store.addInbox([t.msg("group@g.us", "lol", { isGroup: true, threadName: "group" })]);
+    await t.triage.tick();
+    const digest = t.store.getItemByKey("dashboard", "inbox:whatsapp:group@g.us:digest")!;
+    assert.deepEqual([digest.status, digest.closedReason], ["closed", "quiet"]);
+    assert.equal(t.store.archive("lol", 30).items.length, 1, "search still finds it");
+    assert.equal((await t.ui("GET", "/api/ui/state")).catchup.length, 0);
+  } finally {
+    t.stop();
+  }
+});
+
+test("no phone pings while you're away", async () => {
+  const t = await setup({ reply: () => answers(4, "reply") });
+  try {
+    t.store.setAway({ from: t.now() - 1000, until: t.now() + 86_400_000, summarized: false });
+    t.store.addInbox([t.msg("393401234567@c.us", "Are you coming?")]);
+    await t.triage.tick();
+    assert.equal(t.store.getItemByKey("dashboard", "inbox:whatsapp:393401234567@c.us:needs")!.urgent, "Reply soon");
+    assert.equal(t.pings.length, 0);
+  } finally {
+    t.stop();
+  }
+});
+
+test("a chat waiting for Grok's answer needs you before Grok writes it", async () => {
+  const t = await setup({ reply: () => answers(3, "reply") });
+  try {
+    t.store.addInbox([t.msg("1@c.us", "Can you send me the notes?")]);
+    await t.triage.tick();
+    const card = t.store.getItemByKey("dashboard", "inbox:whatsapp:1@c.us:needs")!;
+    const st = await t.ui("GET", "/api/ui/state");
+    assert.deepEqual([st.needs.map((c: { id: number }) => c.id), st.catchup.length], [[card.id], 0]);
+  } finally {
+    t.stop();
+  }
 });

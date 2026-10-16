@@ -20,6 +20,12 @@ const ui = {
   archive: { items: [], more: false, q: "" },
   settings: null,          // { groups, settings } from the server
   settingErrors: new Map(), // key -> { message, value } from a refused save, so what you typed stays
+  needsAll: false,       // "Show N more" pressed in Needs you
+  catchAll: false,       // "Show N more" pressed in Catch up
+  catchOpen: new Set(),  // catch-up lines opened in this visit: they stay until closed, even once read
+  awayOpen: false,       // the "While you were away" lines are unfolded
+  seenSent: new Set(),   // "id:updatedAt" already reported as seen
+  seenNow: [],           // items on screen after the last render
 };
 
 // ---------- talking to the server ----------
@@ -199,6 +205,7 @@ function focusKey(el) {
 
 function render() {
   if (!ui.state) return;
+  ui.seenNow = [];
   const active = document.activeElement;
   const key = focusKey(active);
   const caret = active && "selectionStart" in active ? active.selectionStart : null;
@@ -208,7 +215,9 @@ function render() {
   renderTodos();
   renderAgenda();
   renderCatch();
+  renderAway();
   paintColors();
+  reportSeen();
   if (key && document.activeElement !== active) {
     const again = document.querySelector(key);
     if (again) {
@@ -387,12 +396,24 @@ function renderCard(c) {
   </article>`;
 }
 
+const PHONE = window.matchMedia("(max-width: 999px)");
+
 function renderNeeds() {
   const list = ui.state.needs.filter(visible);
   const open = list.filter((c) => c.status !== "closed").length;
   $("#needs-count").textContent = open || "";
+  // Urgent cards and taps in progress always show. The rest fill up to a few, then wait behind a button.
+  const limit = PHONE.matches ? 3 : 5;
+  const fixed = (c) => Boolean(c.urgent) || c.status !== "open";
+  let room = Math.max(0, limit - list.filter(fixed).length);
+  const shown = ui.needsAll ? list : list.filter((c) => fixed(c) || room-- > 0);
+  const hidden = list.length - shown.length;
+  ui.seenNow.push(...shown);
+  const toggle = hidden
+    ? `<button class="btn more-btn" data-act="needs-more">Show ${hidden} more</button>`
+    : ui.needsAll && list.length > limit ? `<button class="btn more-btn" data-act="needs-less">Show fewer</button>` : "";
   $("#needs").innerHTML = list.length
-    ? list.map(renderCard).join("")
+    ? shown.map(renderCard).join("") + toggle
     : `<div class="empty"><strong>Nothing needs you right now</strong>Questions from your bots show up here.</div>`;
 }
 
@@ -485,24 +506,102 @@ function renderAgenda() {
   $("#agenda-source").innerHTML = calBrand ? `${brandTile(calBrand)}<span>From ${esc(calBrand.name)}</span>` : "";
 }
 
+const SKIPPED = "inbox:skipped:";
+const CATCH_LINES = 8;
+const unread = (c) => c.status !== "closed";
+
+/** One line per chat or sender: a course's PoliTO notices, or a mail sender's receipts, read as one. */
+function catchGroups() {
+  const groups = new Map();
+  for (const c of ui.state.catchup.filter(visible)) {
+    const key = c.key?.startsWith(SKIPPED) ? SKIPPED : `${c.bot}|${c.source || c.title}`;
+    if (!groups.has(key)) groups.set(key, { key, items: [] });
+    groups.get(key).items.push(c);
+  }
+  // A read line leaves the page, unless you opened it in this visit.
+  return [...groups.values()].filter((g) => g.items.some(unread) || ui.catchOpen.has(g.key));
+}
+
+function catchItem(c, multi) {
+  const pending = c.status === "pending" && c.pendingAction;
+  const ask = c.bot === "polito" ? "" : `<button class="btn ghost" data-act="write" data-id="${c.id}">${icon("msg")}Ask about this</button>`;
+  const open = c.link ? `<a class="btn ghost" href="${esc(c.link)}" target="_blank" rel="noopener noreferrer">Open</a>` : "";
+  return `<div class="catch-item">
+    ${multi ? `<p class="gist-title">${esc(c.title)}</p>` : ""}
+    ${c.body ? `<p class="gist">${esc(c.body)}</p>` : ""}${c.context ? `<p class="gist ctx">${esc(c.context)}</p>` : ""}
+    ${pending ? `<div class="catch-pending">${pendingRow(c)}</div>` : `
+    ${ui.writing.has(c.id) ? writeForm(c, `Ask ${botOf(c.bot).name} about this`) : ""}
+    ${ask || open ? `<div class="actions">${open}${ask}</div>` : ""}`}
+  </div>`;
+}
+
+function catchLine(g) {
+  const first = g.items[0];
+  const fresh = g.items.filter(unread);
+  const multi = g.items.length > 1;
+  const isOpen = ui.catchOpen.has(g.key) || g.items.some((c) => ui.writing.has(c.id) || c.status === "pending");
+  const title = g.key === SKIPPED ? first.title : multi ? first.source.replace(/^WhatsApp · /, "") : first.title;
+  const count = multi ? `${fresh.length || g.items.length} ${fresh.length ? "new" : "read"}` : first.countLabel || when(first.updatedAt);
+  return `<details class="catch${fresh.length ? "" : " read"}${g.key === SKIPPED ? " skipped" : ""}"${isOpen ? " open" : ""}>
+    <summary data-act="toggle-catch" data-group="${esc(g.key)}">${logo(first)}<span class="ttl">${esc(title)}</span><span class="n num">${esc(count)}</span>${icon("chev", "i chev")}</summary>
+    ${g.items.map((c) => catchItem(c, multi)).join("")}
+  </details>`;
+}
+
 function renderCatch() {
-  const list = ui.state.catchup.filter(visible);
-  $("#catch-count").textContent = list.filter((c) => c.status !== "closed").length || "";
-  const openIds = new Set($$("#catchup details[open]").map((d) => d.dataset.id));
-  $("#catchup").innerHTML = list.length
-    ? list.map((c) => {
-        const read = c.status === "closed";
-        const pending = c.status === "pending" && c.pendingAction;
-        const isOpen = openIds.has(String(c.id)) || ui.writing.has(c.id) || pending;
-        return `<details class="catch${read ? " read" : ""}" data-id="${c.id}"${isOpen ? " open" : ""}>
-          <summary data-act="toggle-catch" data-id="${c.id}">${logo(c)}<span class="ttl">${esc(c.title)}</span><span class="n num">${esc(c.countLabel)}</span>${icon("chev", "i chev")}</summary>
-          <p class="gist">${esc(c.body)}</p>
-          ${pending ? `<div class="catch-pending">${pendingRow(c)}</div>` : `
-          ${ui.writing.has(c.id) ? writeForm(c, `Ask ${botOf(c.bot).name} about this`) : ""}
-          <div class="actions">${read ? "" : `<button class="btn" data-act="read" data-id="${c.id}">${icon("check")}Mark as read</button>`}<button class="btn ghost" data-act="write" data-id="${c.id}">${icon("msg")}Ask about this</button></div>`}
-        </details>`;
-      }).join("")
-    : `<div class="empty-row">All caught up.</div>`;
+  const s = ui.state;
+  const all = catchGroups();
+  const skipped = all.filter((g) => g.key === SKIPPED);
+  let lines = all.filter((g) => g.key !== SKIPPED);
+  // Back from Away: what came in meanwhile folds into one line instead of a pile.
+  const away = s.away?.back ? s.away : null;
+  const during = (g) => away && g.items.every((c) => c.createdAt >= away.from && c.createdAt <= away.until);
+  const awayLines = away ? lines.filter(during) : [];
+  if (away) lines = lines.filter((g) => !during(g));
+  const shown = ui.catchAll ? lines : lines.slice(0, CATCH_LINES);
+  const hidden = lines.length - shown.length;
+  const unreadIds = (gs) => gs.flatMap((g) => g.items.filter((c) => c.status === "open").map((c) => c.id));
+  ui.catchIds = { all: unreadIds([...lines, ...awayLines]), away: unreadIds(awayLines) };
+  ui.seenNow.push(...[...shown, ...skipped, ...(ui.awayOpen ? awayLines : [])].flatMap((g) => g.items));
+  $("#catch-count").textContent = lines.length + awayLines.length || "";
+  $("#catch-note").innerHTML = ui.catchIds.all.length ? `<button class="btn ghost" data-act="read-all">${icon("check")}Mark all read</button>` : "";
+  const awayBlock = awayLines.length
+    ? `<div class="away-sum">
+        <p><strong>While you were away</strong> (${esc(dayLabel(localDay(new Date(away.from)), s.today))} to ${esc(dayLabel(localDay(new Date(away.until - 1)), s.today))}): ${awayLines.length} line${awayLines.length === 1 ? "" : "s"}</p>
+        <div class="actions"><button class="btn" data-act="away-show">${ui.awayOpen ? "Hide them" : "Show them"}</button><button class="btn ghost" data-act="away-done">${icon("check")}Mark all read</button></div>
+      </div>${ui.awayOpen ? `<div class="list">${awayLines.map(catchLine).join("")}</div>` : ""}`
+    : "";
+  const more = hidden
+    ? `<div class="list-foot"><button class="btn ghost" data-act="catch-more">Show ${hidden} more</button></div>`
+    : ui.catchAll && lines.length > CATCH_LINES ? `<div class="list-foot"><button class="btn ghost" data-act="catch-less">Show fewer</button></div>` : "";
+  $("#catchup").innerHTML = awayBlock +
+    (shown.length || skipped.length || !awayBlock
+      ? `<div class="list">${shown.map(catchLine).join("") || `<div class="empty-row">All caught up.</div>`}${more}${skipped.map(catchLine).join("")}</div>`
+      : "");
+}
+
+/** Tell the server what you could see, so its expiry clock only counts time you had it on screen. */
+function reportSeen() {
+  if (document.visibilityState !== "visible" || ui.tab !== "today") return;
+  const fresh = ui.seenNow.filter((c) => c.status === "open" && !c.seenAt && !ui.seenSent.has(`${c.id}:${c.updatedAt}`));
+  if (!fresh.length) return;
+  const keys = fresh.map((c) => `${c.id}:${c.updatedAt}`);
+  keys.forEach((k) => ui.seenSent.add(k));
+  api("POST", "/api/ui/seen", { ids: [...new Set(fresh.map((c) => c.id))] }).catch(() => keys.forEach((k) => ui.seenSent.delete(k)));
+}
+
+function renderAway() {
+  const a = ui.state.away;
+  const on = Boolean(a?.active);
+  $("#away-btn").classList.toggle("on", on);
+  $("#away-btn").setAttribute("aria-label", on ? "Away mode is on" : "Away mode");
+  const bar = $("#away-bar");
+  bar.hidden = !on;
+  if (on) {
+    // Away ends at midnight: the last day away is the one before.
+    const last = localDay(new Date(a.until - 1));
+    bar.innerHTML = `<span>Away through <strong>${esc(dayLabel(last, ui.state.today))}</strong>. Nothing expires and your phone stays quiet.</span><button class="btn" data-act="away-end">I'm back</button>`;
+  }
 }
 
 let archiveSeq = 0;
@@ -776,6 +875,29 @@ document.addEventListener("click", async (e) => {
     case "done": await actOn(id, { type: "done" }); break;
     case "dismiss": if (await actOn(id, { type: "dismiss" })) toast("Dismissed. Restore it from the archive."); break;
     case "read": e.preventDefault(); await actOn(id, { type: "read" }); break;
+    case "needs-more": ui.needsAll = true; render(); break;
+    case "needs-less": ui.needsAll = false; render(); break;
+    case "catch-more": ui.catchAll = true; render(); break;
+    case "catch-less": ui.catchAll = false; render(); break;
+    case "toggle-catch": {
+      // Opening a line is reading it. It stays on the page until you fold it again.
+      e.preventDefault();
+      const key = b.dataset.group;
+      if (ui.catchOpen.delete(key)) return render();
+      ui.catchOpen.add(key);
+      render();
+      const ids = catchGroups().find((g) => g.key === key)?.items.filter((c) => c.status === "open").map((c) => c.id) ?? [];
+      if (ids.length) await run("POST", "/api/ui/read", { ids });
+      break;
+    }
+    case "read-all": if (await run("POST", "/api/ui/read", { ids: ui.catchIds.all.slice(0, 200) })) toast("Catch up cleared. It's all in the archive."); break;
+    case "away-show": ui.awayOpen = !ui.awayOpen; render(); break;
+    case "away-done":
+      if (ui.catchIds.away.length && !(await run("POST", "/api/ui/read", { ids: ui.catchIds.away }))) break;
+      ui.awayOpen = false;
+      await run("POST", "/api/ui/away/summarized", {});
+      break;
+    case "away-end": await run("DELETE", "/api/ui/away", {}); break;
     case "restore": if (await actOn(id, { type: "restore" })) loadArchive(); break;
     case "more-archive": loadArchive(true); break;
     case "undo": await run("POST", `/api/ui/actions/${b.dataset.action}/undo`, {}); break;
@@ -847,6 +969,38 @@ function schedule() {
   }, busy ? 4000 : 20000);
 }
 document.addEventListener("visibilitychange", () => { if (document.visibilityState === "visible") load(); });
+PHONE.addEventListener("change", render);
+
+// Away mode: pick the day you're back. You're away until the end of that day.
+const dayAfter = (n) => addDay(localDay(new Date()), n);
+function closeAwayMenu() {
+  $("#away-menu").hidden = true;
+  $("#away-btn").setAttribute("aria-expanded", "false");
+}
+$("#away-btn").addEventListener("click", async () => {
+  if (ui.state?.away?.active) return $("#away-bar [data-act=away-end]")?.focus();
+  const menu = $("#away-menu");
+  menu.hidden = !menu.hidden;
+  $("#away-btn").setAttribute("aria-expanded", String(!menu.hidden));
+  if (!menu.hidden) {
+    const input = $("#away-until");
+    input.min = dayAfter(0);
+    input.max = dayAfter(60);
+    if (!input.value) input.value = dayAfter(3);
+    input.focus();
+  }
+});
+$("#away-menu").addEventListener("click", (e) => {
+  const days = e.target.closest("[data-away-days]")?.dataset.awayDays;
+  if (days) $("#away-until").value = dayAfter(Number(days));
+});
+$("#away-cancel").addEventListener("click", closeAwayMenu);
+$("#away-menu").addEventListener("submit", async (e) => {
+  e.preventDefault();
+  const day = $("#away-until").value;
+  if (!day) return $("#away-until").focus();
+  if (await run("PUT", "/api/ui/away", { until: day })) closeAwayMenu();
+});
 
 load();
 schedule();

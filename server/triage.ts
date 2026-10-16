@@ -97,6 +97,8 @@ export interface Decision {
   /** A reply is possible but Jev isn't sure enough to spend a Grok run: you get a plain card. */
   doubtful: boolean;
   automated: boolean;
+  /** Private chats and mail always are; in a group, only what names you or asks you to decide. */
+  forUser: boolean;
   /** Where the messages are: a private chat, a group chat or an email thread. */
   chat: "private" | "group" | "email";
 }
@@ -129,7 +131,7 @@ export function decide(answers: JevResult["answers"], replyPct: number, automate
   const doubtful = !actionable && !automated && forUser && pAct >= 0.35;
   let picked = need.choice as Need;
   if (actionable || doubtful) picked = pDecision > pReply ? "decision" : "reply";
-  return { level, need: picked, actionable, doubtful, automated, chat };
+  return { level, need: picked, actionable, doubtful, automated, forUser, chat };
 }
 
 /** Where a decision sends the messages. The table in docs/triage.md matches this. */
@@ -382,7 +384,7 @@ export function createTriage(deps: TriageDeps): Triage {
 
   async function phone(urgentCards: number) {
     const topic = settings.str("ntfyTopic");
-    if (!topic || !urgentCards) return;
+    if (!topic || !urgentCards || store.isAway()) return;
     unpinged += urgentCards;
     if (store.now() - lastPing < PING_GAP_MS) return;
     try {
@@ -528,7 +530,10 @@ export function createTriage(deps: TriageDeps): Triage {
       if (d.level >= NOW && !r.ignored) urgent = 1;
     } else if (route === "catchup") {
       const recent = store.threadMessages(last.source, last.thread, 60).filter((m) => m.at > store.now() - 86_400_000);
-      itemId = store.upsertItem(digestCard(bot(), recent.length ? recent : msgs, info), { asServer: true }).item.id;
+      const digest = store.upsertItem(digestCard(bot(), recent.length ? recent : msgs, info), { asServer: true }).item;
+      itemId = digest.id;
+      // Group talk that isn't for you goes straight to the archive, where search still finds it.
+      if (d.chat === "group" && !d.forUser && digest.status === "open") store.closeItem(digest.id, "quiet", "Group talk, not for you");
     }
     store.tx(() => {
       // This decision replaces whatever Grok still owed for the chat (looked up again: Grok may have
