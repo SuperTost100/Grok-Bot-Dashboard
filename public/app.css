@@ -500,3 +500,29 @@ details.arch + details.arch { border-top: 1px solid var(--border); }
   .away-btn { width: 44px; height: 44px; padding: 0; justify-content: center; }
   .away-btn .lbl { display: none; }
 }
+
+/* Now and next: where the day stands and the three to-dos for today */
+.now-next {
+  display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); gap: 4px 28px;
+  margin: 0 0 24px; padding: 14px 16px; border: 1px solid var(--border); border-radius: var(--radius); background: var(--surface);
+}
+.now-next p { margin: 0; font-size: 15px; overflow-wrap: anywhere; }
+.now-next p + p { margin-top: 4px; }
+.nn-k { display: inline-block; min-width: 44px; color: var(--muted); font-size: 13px; }
+p.nn-k { margin: 0 0 4px; }
+.nn-todos ul { list-style: none; margin: 0; padding: 0; display: grid; gap: 6px; }
+.nn-todos li { display: flex; gap: 10px; align-items: flex-start; font-size: 15px; }
+.nn-todos .check { width: 22px; height: 22px; margin-top: 0; }
+.nn-t { min-width: 0; overflow-wrap: anywhere; }
+.nn-when { color: var(--muted); font-size: 13px; white-space: nowrap; }
+.nn-when.late { color: var(--urgent); }
+.nn-none { color: var(--muted); }
+.list-foot.alone { border-top: 0; }
+.list-foot .btn.ghost { color: var(--muted); }
+.setting .s-label { margin: 0; font-size: 15px; font-weight: 500; }
+@media (max-width: 999px) {
+  .now-next { grid-template-columns: 1fr; gap: 12px; margin-bottom: 20px; padding: 12px; }
+}
+#view-settings > .s-group + #settings { margin-top: 28px; }
+.list-foot { gap: 12px; }
+.list-foot a { white-space: nowrap; }

@@ -3,7 +3,7 @@
 // The dashboard checks it at the Dashboard bot's run times and on Refresh. No Grok bot is involved.
 
 import type { Store, ItemInput } from "./store.ts";
-import { addDays, localStamp } from "./time.ts";
+import { addDays, localStamp, zonedToEpoch } from "./time.ts";
 
 /** Cards and agenda entries from PoliTO belong to this pseudo-bot. */
 export const POLITO_BOT = "polito";
@@ -108,6 +108,32 @@ export function politoCard(p: PolitoItem, tz: string): ItemInput {
   };
 }
 
+/** Deadline cards live next to the avvisi but aren't PoliTO items: nothing to mark read there. */
+const DEADLINE_KEY = "deadline-card:";
+export const isDeadlineKey = (key: string) => key.startsWith(DEADLINE_KEY);
+/** A deadline this close becomes a card in Needs you, not just a line on the agenda. */
+const CARD_DAYS = 3;
+
+/** A card for a deadline in the next three days. It leaves on its own once the day is over. */
+export function deadlineCard(d: PolitoDeadline, today: string, tz: string): ItemInput {
+  const day = d.date.slice(0, 10);
+  const days = Math.round((Date.parse(day + "T12:00:00Z") - Date.parse(today + "T12:00:00Z")) / 86_400_000);
+  const when = days <= 0 ? "Due today" : days === 1 ? "Due tomorrow" : `Due ${new Date(day + "T12:00:00Z").toLocaleDateString("en-GB", { weekday: "long", timeZone: "UTC" })}`;
+  return {
+    bot: POLITO_BOT,
+    key: `${DEADLINE_KEY}${d.id}`,
+    section: "needs",
+    kind: "reminder",
+    title: d.title.slice(0, 200),
+    body: [d.course, d.type].filter(Boolean).join(" · "),
+    source: `PoliTO · ${d.course ?? "Scadenze"}`.slice(0, 120),
+    app: "polito",
+    link: d.url && /^https?:\/\//i.test(d.url) ? d.url : "",
+    urgent: when,
+    expiresAt: zonedToEpoch(`${addDays(day, 1)}T00:00:00`, tz),
+  };
+}
+
 export interface PolitoSync {
   /** Bring cards and deadlines in line with PoliTO. Calls that overlap share one run. */
   sync(): Promise<void>;
@@ -145,7 +171,7 @@ export function createPolitoSync(polito: Polito, store: Store, tz: string, log: 
     }
     // Read in the PoliTO app (or on the Portale) since the last check.
     for (const card of store.liveItemsOf(POLITO_BOT)) {
-      if (card.key && !keys.has(card.key)) store.closeItem(card.id, "bot", "Read on PoliTO");
+      if (card.key && !isDeadlineKey(card.key) && !keys.has(card.key)) store.closeItem(card.id, "bot", "Read on PoliTO");
     }
     const from = localStamp(new Date(store.now()), tz).slice(0, 10);
     const to = addDays(from, 30);
@@ -156,6 +182,10 @@ export function createPolitoSync(polito: Polito, store: Store, tz: string, log: 
         .filter((d) => /^\d{4}-\d{2}-\d{2}/.test(d.date))
         .map((d) => ({ title: d.title.slice(0, 200), start: d.date.slice(0, 10), end: "", location: "", allDay: true, app: "polito" })),
     );
+    const soon = addDays(from, CARD_DAYS - 1);
+    for (const d of deadlines) {
+      if (/^\d{4}-\d{2}-\d{2}/.test(d.date) && d.date.slice(0, 10) <= soon) store.upsertItem(deadlineCard(d, from, tz));
+    }
     // Last, a few at a time, so a PoliTO outage can't hold up new avvisi.
     for (const key of retry.slice(0, 10)) await markRead(key);
   }

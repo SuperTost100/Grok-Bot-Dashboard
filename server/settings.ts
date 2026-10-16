@@ -87,7 +87,7 @@ export const DEFS: SettingDef[] = [
   },
   {
     key: "ntfyTopic", env: "NTFY_TOPIC", group: "Phone pings", type: "secret", fallback: "",
-    label: "ntfy topic", help: "Urgent cards ping your phone through ntfy. Subscribe to this topic in the ntfy app. The ping only says how many urgent cards wait, never what they say.",
+    label: "ntfy topic", help: "Your phone gets a ping through ntfy when a PoliTO deadline is due tomorrow or a snoozed reminder comes back. Never for new messages: WhatsApp and mail already tell you. Subscribe to this topic in the ntfy app. A ping only says how many, never what the card says.",
   },
   {
     key: "ntfyServer", env: "NTFY_SERVER", group: "Phone pings", type: "url", fallback: "https://ntfy.sh", placeholder: "https://ntfy.sh",

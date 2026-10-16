@@ -10,6 +10,7 @@ import { createApp, STALE_CLAIM_MS, type AppDeps } from "./app.ts";
 import { Settings } from "./settings.ts";
 import { createSources } from "./sources/index.ts";
 import { createTriage } from "./triage.ts";
+import { createPhone } from "./ntfy.ts";
 import type { InboxMessage } from "./store.ts";
 import { checkWebhookUrl, guardedLookup, missedRun, retryDue, RETRY_WINDOW } from "./webhook.ts";
 import { lastSlot, localStamp } from "./time.ts";
@@ -55,6 +56,7 @@ function sourceInfo(m: InboxMessage) {
   return { label: `${name} · ${m.fromMe ? "You" : m.sender}`, app: gmail ? "gmail" : "mail", where: `Email to the user's ${name} mailbox` };
 }
 const triage = createTriage({ store, settings, tz: config.tz, log, sourceInfo });
+const phone = createPhone({ store, settings, tz: config.tz, log });
 
 // PoliTO is checked whenever the bots are scheduled to check their sources (every 2 hours when no bot
 // has told its schedule yet), plus on Refresh. The first tick checks once at startup.
@@ -140,7 +142,7 @@ function post(url: string, token: string, body: unknown): Promise<number> {
   });
 }
 
-const deps: AppDeps = { config, store, settings, todoist: makeTodoist(), polito, sources, triage, notify, lastPing: (bot) => lastPing.get(bot), log };
+const deps: AppDeps = { config, store, settings, todoist: makeTodoist(), polito, sources, triage, phone, notify, lastPing: (bot) => lastPing.get(bot), log };
 settings.onChange((keys) => {
   if (keys.some((k) => k.startsWith("todoist"))) {
     deps.todoist = makeTodoist();
@@ -167,7 +169,9 @@ process.on("unhandledRejection", (err) => log(`unhandled rejection: ${(err as Er
 let ticks = 0;
 const tick = setInterval(() => {
   try {
-    store.wakeSnoozed();
+    // A snoozed card coming back is a reminder you set: the phone gets told.
+    const back = store.wakeSnoozed();
+    if (back) void phone.ping("reminder", back);
     store.expireClaims(STALE_CLAIM_MS);
     for (const bot of store.promoteDue()) notify(bot, "actions");
     for (const bot of store.botsWithReadyWork(RETRY_WINDOW)) {
@@ -189,6 +193,7 @@ const tick = setInterval(() => {
     if (polito && politoDue(Date.now())) void polito.sync();
     sources.tick();
     if (++ticks % 5 === 0) void triage.tick();
+    if (ticks % 60 === 0) void phone.tick();
     if (triage.wakeDue()) {
       triage.woke();
       const grok = settings.str("grokBot");

@@ -26,6 +26,7 @@ const ui = {
   awayOpen: false,       // the "While you were away" lines are unfolded
   seenSent: new Set(),   // "id:updatedAt" already reported as seen
   seenNow: [],           // items on screen after the last render
+  todosAll: false,       // the to-dos beyond today's three are unfolded
 };
 
 // ---------- talking to the server ----------
@@ -212,6 +213,7 @@ function render() {
   renderHeader();
   renderFilters();
   renderNeeds();
+  renderNow();
   renderTodos();
   renderAgenda();
   renderCatch();
@@ -418,6 +420,76 @@ function renderNeeds() {
     : `<div class="empty"><strong>Nothing needs you right now</strong>Questions from your bots show up here.</div>`;
 }
 
+// ---------- now and next ----------
+
+/** Free time counts until this hour: after it, the day is over. */
+const DAY_END = "22:00";
+
+/**
+ * Today's three to-dos: overdue P1 and P2 first, then what's due today, then other overdue ones.
+ * Only things with a date today or earlier: the rest of the week can wait in the list.
+ */
+function pickForToday(items, today) {
+  const stamp = nowStamp();
+  const rank = (x) => {
+    const late = x.due.length > 10 ? x.due < stamp : x.due.slice(0, 10) < today;
+    return late && x.priority <= 2 ? 0 : late ? 2 : 1;
+  };
+  return items
+    .filter((x) => x.due && x.due.slice(0, 10) <= today)
+    .sort((a, b) => rank(a) - rank(b) || a.priority - b.priority || (a.due < b.due ? -1 : a.due > b.due ? 1 : 0))
+    .slice(0, 3);
+}
+
+/** Minutes left in today outside timed events, from now until DAY_END. */
+function freeMinutes(events, today, stamp) {
+  const at = (st) => (st.slice(0, 10) < today ? 0 : st.slice(0, 10) > today ? 1440 : Number(st.slice(11, 13)) * 60 + Number(st.slice(14, 16)));
+  const from = at(stamp);
+  const to = at(`${today}T${DAY_END}`);
+  if (to <= from) return null;
+  const busy = events
+    .map((e) => [Math.max(from, at(e.start)), Math.min(to, at(e.end || e.start))])
+    .filter(([a, b]) => b > a)
+    .sort((x, y) => x[0] - y[0]);
+  let free = 0;
+  let cur = from;
+  for (const [a, b] of busy) {
+    if (a > cur) free += a - cur;
+    cur = Math.max(cur, b);
+  }
+  return free + Math.max(0, to - cur);
+}
+
+const duration = (min) => (min < 60 ? `${min} min` : `${Math.floor(min / 60)} h${min % 60 ? ` ${min % 60}` : ""}`);
+
+function renderNow() {
+  const s = ui.state;
+  const stamp = nowStamp();
+  const today = s.today;
+  const tomorrow = `${addDay(today, 1)}T00:00:00`;
+  const timed = s.agenda.filter((e) => !e.allDay && e.start.length > 10 && e.start < tomorrow && (e.end || e.start) > `${today}T00:00:00`);
+  const current = timed.find((e) => e.start <= stamp && (e.end || e.start) > stamp);
+  const next = timed.find((e) => e.start > stamp);
+  const mins = (st) => Math.round((Date.parse(st + "Z") - Date.parse(stamp + "Z")) / 60000);
+  const lines = [];
+  if (current) lines.push(`<p><span class="nn-k">Now</span> <strong>${esc(current.title)}</strong>${current.end ? ` until ${esc(current.end.slice(11, 16))}` : ""}</p>`);
+  if (next) lines.push(`<p><span class="nn-k">Next</span> <strong>${esc(next.start.slice(11, 16))} ${esc(next.title)}</strong> in ${esc(duration(mins(next.start)))}</p>`);
+  if (!current && !next) lines.push(`<p><span class="nn-k">Next</span> Nothing else in the calendar today</p>`);
+  const free = freeMinutes(timed, today, stamp);
+  if (free !== null) lines.push(`<p><span class="nn-k">Free</span> ${free ? `${esc(duration(free))} before ${DAY_END}` : `Booked until ${DAY_END}`}</p>`);
+  const t = s.todos;
+  const picks = t.source === "none" ? [] : pickForToday(t.items.filter((x) => !ui.doneTodos.has(todoKey(x))), today);
+  const todo = (x) => {
+    const k = todoKey(x);
+    const busy = ui.todoBusy.has(k) ? " disabled" : "";
+    const when = todoWhen(x, today)[0];
+    return `<li><button class="check p${x.priority}" data-act="todo" data-todo="${esc(k)}" aria-pressed="false" aria-label="Complete: ${esc(x.content)}"${busy}>${icon("check")}</button>
+      <span class="nn-t">${esc(x.content)}${when ? ` <span class="nn-when${when.late ? " late" : ""}">${esc(when.text)}</span>` : ""}</span></li>`;
+  };
+  $("#now").innerHTML = `<div class="nn-day">${lines.join("")}</div>
+    <div class="nn-todos"><p class="nn-k">For today</p>${picks.length ? `<ul>${picks.map(todo).join("")}</ul>` : `<p class="nn-none">Nothing due today.</p>`}</div>`;
+}
+
 function todoWhen(t, today) {
   const parts = [];
   if (t.due) {
@@ -439,8 +511,12 @@ function renderTodos() {
   $("#todo-source").innerHTML = t.source === "none" ? "" : todoBrand ? `${brandTile(todoBrand)}<span>From ${esc(todoBrand.name)}</span>` : "From your bots";
   const now = Date.now();
   for (const [k, v] of ui.doneTodos) if (now - v.at > 15000) ui.doneTodos.delete(k);
-  const items = t.items.filter((x) => !ui.doneTodos.has(todoKey(x)));
-  $("#todo-count").textContent = items.length || "";
+  const all = t.items.filter((x) => !ui.doneTodos.has(todoKey(x)));
+  $("#todo-count").textContent = all.length || "";
+  // Today's three sit in the strip at the top; the rest fold away here.
+  const picked = new Set(pickForToday(all, today).map(todoKey));
+  const rest = all.filter((x) => !picked.has(todoKey(x)));
+  const items = ui.todosAll ? rest : [];
   if (t.source === "none") {
     $("#todos").innerHTML = `<div class="empty-row"><strong>No to-do list connected.</strong> Set <code>TODOIST_TOKEN</code> on the server, or let a bot send your to-dos.</div>`;
     return;
@@ -461,12 +537,15 @@ function renderTodos() {
   };
   const done = [...ui.doneTodos.values()].map((v) => row(v.todo, true));
   const body = done.join("") + items.map((x) => row(x, false)).join("");
-  const more = t.hidden ? `${t.hidden} more without a date this week` : "Sorted by date, then priority";
+  const later = t.hidden ? `, ${t.hidden} more without a date` : "";
+  const more = !rest.length
+    ? (t.hidden ? `${t.hidden} more without a date this week` : "")
+    : `<button class="btn ghost" data-act="${ui.todosAll ? "todos-less" : "todos-more"}" aria-expanded="${ui.todosAll}">${ui.todosAll ? "Show fewer" : `${rest.length} more this week${later}`}</button>`;
   const link = t.source === "todoist" ? `<a href="https://app.todoist.com/app/today" target="_blank" rel="noopener noreferrer">Open Todoist</a>` : "";
   $("#todos").innerHTML =
     (t.error ? `<div class="empty-row"><strong>Todoist didn't answer.</strong> ${esc(t.error)}</div>` : "") +
-    (body || `<div class="empty-row">Nothing due this week.</div>`) +
-    `<div class="list-foot"><span>${esc(more)}</span>${link}</div>`;
+    (body || (all.length ? "" : `<div class="empty-row">Nothing due this week.</div>`)) +
+    `<div class="list-foot${body ? "" : " alone"}"><span>${rest.length ? more : esc(more)}</span>${link}</div>`;
 }
 
 function renderAgenda() {
@@ -594,6 +673,11 @@ function reportSeen() {
 function renderAway() {
   const a = ui.state.away;
   const on = Boolean(a?.active);
+  $("#settings-away").innerHTML = `<div class="setting is-bool">
+    <div class="s-text"><p class="s-label">${on ? `Away through ${esc(dayLabel(localDay(new Date(a.until - 1)), ui.state.today))}` : "Away mode"}</p>
+    <p class="help">Going away for a few days? Until you're back nothing on the page expires and your phone gets no pings. Afterwards, what came in folds into one line.</p></div>
+    <div class="s-control">${on ? `<button class="btn" data-act="away-end">I'm back</button>` : `<button class="btn" data-act="away-open">Pick a return day</button>`}</div>
+  </div>`;
   $("#away-btn").classList.toggle("on", on);
   $("#away-btn").setAttribute("aria-label", on ? "Away mode is on" : "Away mode");
   const bar = $("#away-bar");
@@ -877,6 +961,9 @@ document.addEventListener("click", async (e) => {
     case "dismiss": if (await actOn(id, { type: "dismiss" })) toast("Dismissed. Restore it from the archive."); break;
     case "read": e.preventDefault(); await actOn(id, { type: "read" }); break;
     case "needs-more": ui.needsAll = true; render(); break;
+    case "todos-more": ui.todosAll = true; renderTodos(); break;
+    case "todos-less": ui.todosAll = false; renderTodos(); break;
+    case "away-open": openAwayMenu(); break;
     case "needs-less": ui.needsAll = false; render(); break;
     case "catch-more": ui.catchAll = true; render(); break;
     case "catch-less": ui.catchAll = false; render(); break;
@@ -978,18 +1065,21 @@ function closeAwayMenu() {
   $("#away-menu").hidden = true;
   $("#away-btn").setAttribute("aria-expanded", "false");
 }
-$("#away-btn").addEventListener("click", async () => {
-  if (ui.state?.away?.active) return $("#away-bar [data-act=away-end]")?.focus();
+function openAwayMenu(toggle = false) {
   const menu = $("#away-menu");
-  menu.hidden = !menu.hidden;
+  menu.hidden = toggle ? !menu.hidden : false;
   $("#away-btn").setAttribute("aria-expanded", String(!menu.hidden));
-  if (!menu.hidden) {
-    const input = $("#away-until");
-    input.min = dayAfter(0);
-    input.max = dayAfter(60);
-    if (!input.value) input.value = dayAfter(3);
-    input.focus();
-  }
+  if (menu.hidden) return;
+  window.scrollTo({ top: 0 });
+  const input = $("#away-until");
+  input.min = dayAfter(0);
+  input.max = dayAfter(60);
+  if (!input.value) input.value = dayAfter(3);
+  input.focus();
+}
+$("#away-btn").addEventListener("click", () => {
+  if (ui.state?.away?.active) return $("#away-bar [data-act=away-end]")?.focus();
+  openAwayMenu(true);
 });
 $("#away-menu").addEventListener("click", (e) => {
   const days = e.target.closest("[data-away-days]")?.dataset.awayDays;

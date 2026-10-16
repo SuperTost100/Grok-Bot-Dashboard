@@ -18,7 +18,7 @@ If the local command tool fails because the computer is offline, stop at once an
 
 1. **Taps.** Run `grokdash actions`. Do each action and report it with `grokdash done ID "what you did"` or `grokdash fail ID "why"`.
 2. **Inbox.** `grokdash actions` also lists `inbox`: work the dashboard sorted out of the user's chats and mail. Each item has a `key`, a `task`, the `messages` (`isNew` marks the new ones), `need` and `urgent`.
-   - `task: "card"`: the chat needs a reply or an answer from the user. Write the card with that exact key: `choice` with 2 to 4 likely answers, or `draft` with a reply. If it needs nothing after all, close the key with `grokdash close KEY "reason"`. Post all inbox cards in one call. The dashboard already pinged the user about urgent ones, so don't notify anyone.
+   - `task: "card"`: the chat needs a reply or an answer from the user. Write the card with that exact key: `choice` with 2 to 4 likely answers, or `draft` with a reply. If it needs nothing after all, close the key with `grokdash close KEY "reason"`. Post all inbox cards in one call. Don't notify anyone: WhatsApp and mail already told the user about the message.
    - `task: "calendar"`: an event or deadline that's already set. Do what `instruction` says in the user's main Google Calendar, then close the key with what you did, like `grokdash close KEY "Added to calendar: Esame di Analisi, lun 20 ott 9:00"`.
 3. **Stop here** unless this is a scheduled run or `refreshRequested` is true. When the dashboard reads the user's sources itself, neither happens, and your run ends after step 2 with one short line.
 4. **Check for news.** Read each source in "Your setup" for messages since `lastScanAt` from `grokdash actions`, not since your last run. Fetch only those messages, plus at most the last 20 of a chat when you need context.
@@ -47,6 +47,7 @@ A card is JSON for `grokdash post`. Give each decision a stable `key` (source, c
 - `kind`: `choice` for 2 to 4 likely answers (`options`: `[{"label": "Vote Tuesday", "instruction": "Vote Tuesday in the Lab group poll"}]`, recommended answer first). `draft` when someone waits for a reply you can write (`draft`: `{"to", "channel", "text"}`). `reminder` for things the user does themselves. `digest` for a busy chat that needs no answer (`"section": "catchup"`, `countLabel` like `"46 messages"`, two or three sentences on what was decided or changed).
 - `title`: what's needed, under 80 characters. "Marco needs your vote on the lab swap", not "New WhatsApp message". `body`: one or two sentences with the facts to decide.
 - `source` like `WhatsApp · Lab group`, and `app` for the logo: `whatsapp`, `gmail`, `googlecalendar`, `mail`, `github`, `todoist`, `subito`, `vinted`, `telegram`. The agenda gets `"app": "googlecalendar"`.
+- When a card is about something with a date (an event, a deadline, an offer that runs out), add `expires` with that date or time, like `2026-10-16` or `2026-10-16T21:00:00+02:00`. The dashboard archives the card once it's past.
 - One card per decision. Newsletters and notifications go in a digest or nowhere.
 - Write each card in the language of its source. Never translate quotes, names or poll options.
 

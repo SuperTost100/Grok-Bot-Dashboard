@@ -6,7 +6,6 @@
 import type { InboxMessage, ItemInput, Store, TriageRow } from "./store.ts";
 import type { Settings } from "./settings.ts";
 import { askJev, JevError, type ChoiceAnswer, type JevResult, type NoulAnswer, type Question, type ScoreAnswer } from "./jev.ts";
-import { pingPhone } from "./ntfy.ts";
 import { localStamp, zonedToEpoch } from "./time.ts";
 
 type Fetch = typeof fetch;
@@ -309,9 +308,6 @@ const CLAIM_LEASE_MS = 30 * 60_000;
 /** Hand-outs per chat before giving up on Grok for it. The card stays for you. */
 const MAX_HANDOUTS = 2;
 
-/** At most one phone ping in this long; later urgent cards wait for the next one. */
-const PING_GAP_MS = 10 * 60_000;
-
 export interface TriageStatus { group: string; on: boolean; ok: boolean; text: string }
 
 export interface Triage {
@@ -373,28 +369,12 @@ export function createTriage(deps: TriageDeps): Triage {
   let error = "";
   let retryAt = 0;
   let lastAttempt = 0;
-  let lastPing = 0;
-  let unpinged = 0;
 
   /** Jev decides: in shadow mode it only logs, when on it acts. */
   const on = () => Boolean(settings.str("openrouterKey")) && settings.str("triageMode") !== "off";
   const active = () => on() && settings.str("triageMode") === "on";
   const bot = () => settings.str("grokBot") || "dashboard";
   const dayStart = () => zonedToEpoch(`${localStamp(new Date(store.now()), tz).slice(0, 10)}T00:00:00`, tz);
-
-  async function phone(urgentCards: number) {
-    const topic = settings.str("ntfyTopic");
-    if (!topic || !urgentCards || store.isAway()) return;
-    unpinged += urgentCards;
-    if (store.now() - lastPing < PING_GAP_MS) return;
-    try {
-      await pingPhone(settings.str("ntfyServer") || "https://ntfy.sh", topic, unpinged, settings.str("dashboardUrl"), fetchImpl);
-      lastPing = store.now();
-      unpinged = 0;
-    } catch (err) {
-      log(`phone ping failed: ${(err as Error).message}`);
-    }
-  }
 
   /** You wrote last in this chat: the cards about it are settled, and Grok doesn't need it. */
   function replied(msgs: InboxMessage[]) {
@@ -572,7 +552,6 @@ export function createTriage(deps: TriageDeps): Triage {
       groups.set(k, [...(groups.get(k) ?? []), m]);
     }
     let done = 0;
-    let urgent = 0;
     for (let msgs of groups.values()) {
       const old = msgs.filter((m) => stale(m, now, onSince));
       if (old.length) store.markTriaged(old.map((m) => m.id));
@@ -582,9 +561,8 @@ export function createTriage(deps: TriageDeps): Triage {
       const oldest = msgs[0].receivedAt;
       if (now - newest < QUIET_MS && now - oldest < MAX_WAIT_MS && !msgs.at(-1)!.fromMe) continue;
       if (done++ >= GROUPS_PER_RUN) break;
-      urgent += await handle(msgs);
+      await handle(msgs);
     }
-    if (active()) await phone(urgent);
   }
 
   return {
@@ -678,15 +656,11 @@ export function createTriage(deps: TriageDeps): Triage {
         return [
           error ? { group: "Triage", on: true, ok: false, text: error } : { group: "Triage", on: true, ok: true, text: `Shadow: ${sorted}. ${would}.` },
           { group: "Grok wakes", on: false, ok: true, text: "Grok keeps its schedule while triage is in shadow mode" },
-          { group: "Phone pings", on: false, ok: true, text: "Off in shadow mode" },
         ];
       }
       return [
         error ? { group: "Triage", on: true, ok: false, text: error } : { group: "Triage", on: true, ok: true, text: sorted },
         { group: "Grok wakes", on: true, ok: true, text: `${store.wakesSince(dayStart(), bot()).length} Grok runs today, ${waiting} chat${waiting === 1 ? "" : "s"} waiting for Grok` },
-        settings.str("ntfyTopic")
-          ? { group: "Phone pings", on: true, ok: true, text: lastPing ? `Last ping ${localStamp(new Date(lastPing), tz).slice(11, 16)}` : "No ping yet" }
-          : { group: "Phone pings", on: false, ok: true, text: "Off" },
       ];
     },
   };
