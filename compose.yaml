@@ -25,8 +25,8 @@ services:
     networks: [default, admin]
 
   # Starts apps and untrusted add-ons in containers. It's the only service with the Docker socket,
-  # which is as good as root here, so it's kept apart: it shares the "admin" network with the
-  # dashboard only, gets none of .env, answers only the key it writes into runner-key at its first
+  # which is as good as root here, so it's kept apart: of the dashboard's networks it shares only
+  # "admin", gets none of .env, answers only the key it writes into runner-key at its first
   # start, and starts nothing that fails runner/validate.mjs. Remove it to turn apps off.
   runner:
     build: ./runner
@@ -46,7 +46,7 @@ networks:
   # Apps and untrusted add-ons join this one to reach the dashboard at http://dashboard:8787.
   default:
     name: grokdash
-  # The dashboard and the runner only.
+  # The dashboard and the runner only. Not "internal": the runner's builds fetch registry
+  # tokens and base images over it. Apps never join it, so they can't reach the runner.
   admin:
     name: grokdash-admin
-    internal: true
