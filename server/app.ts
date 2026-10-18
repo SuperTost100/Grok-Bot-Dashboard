@@ -633,7 +633,8 @@ export function createApp(deps: AppDeps) {
     const item = b.id != null ? store.getItem(Number(b.id)) : store.getItemByKey(bot, text(b.key, "key", 200, true));
     if (!item || item.bot !== bot) throw new HttpError(404, "No item with that id or key for this bot.");
     if (store.pendingActionFor(item.id)?.status === "claimed") throw conflict("You hold an action on this card. Report it instead of closing the card.");
-    const closed = store.closeItem(item.id, "bot", text(b.reason, "reason", 200) || "Closed by the bot");
+    // A tap that came in after the bot read its actions isn't lost: the bot gets it on its next run.
+    const closed = store.closeItem(item.id, "bot", text(b.reason, "reason", 200) || "Closed by the bot", true);
     if (item.key && bot === settings.str("grokBot")) deps.triage?.ack(item.key);
     return { id: closed!.id, status: closed!.status };
   });
