@@ -284,6 +284,17 @@ test("the bot can close its own cards by key", async () => {
   assert.equal((await call("GET", "/api/ui/archive?q=Old")).body.items[0].resolution, "Poll closed");
 });
 
+test("a tap that arrives while the bot closes the card still reaches the bot, and its result shows on the card", async () => {
+  const { body } = await bot("POST", "/api/bot/items", { key: "cal:late-tap", kind: "reminder", title: "Calendar: call at 18" });
+  await act(body.id, { type: "write", text: "also find out which short film it is" });
+  assert.equal((await bot("POST", "/api/bot/items/close", { key: "cal:late-tap", reason: "Added to calendar" })).status, 200);
+  clock += 6000;
+  const [a] = (await bot("GET", "/api/bot/actions")).body.actions;
+  assert.equal(a?.text, "also find out which short film it is");
+  await bot("POST", `/api/bot/actions/${a.id}`, { ok: true, result: "It's the Ireos short" });
+  assert.equal((await call("GET", "/api/ui/archive?q=Calendar")).body.items[0].resolution, "It's the Ireos short");
+});
+
 test("bad input gets a clear 400, never a 500", async () => {
   const cases: unknown[] = [
     { kind: "choice", title: "No options" },

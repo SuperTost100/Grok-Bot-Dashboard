@@ -56,7 +56,7 @@ Response:
 
 ### Close a card
 
-`POST /api/bot/items/close` with `{"key": "...", "reason": "Poll closed"}` or `{"id": 12, "reason": "..."}`. The reason shows in the archive.
+`POST /api/bot/items/close` with `{"key": "...", "reason": "Poll closed"}` or `{"id": 12, "reason": "..."}`. The reason shows in the archive. A tap the user made on the card that you haven't taken yet survives the close: you get it at your next `GET /api/bot/actions`, and its result replaces the reason.
 
 ## Taps from the page
 

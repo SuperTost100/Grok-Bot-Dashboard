@@ -1198,14 +1198,15 @@ export class Store {
     });
   }
 
-  closeItem(id: number, reason: string, resolution = "") {
+  /** `keepActions` leaves the user's waiting taps for the bot, for when the bot closes a card the user just tapped. */
+  closeItem(id: number, reason: string, resolution = "", keepActions = false) {
     const now = this.now();
     this.db
       .prepare(
         "UPDATE items SET status = 'closed', closed_reason = ?, resolution = ?, closed_at = ?, snoozed_until = NULL WHERE id = ?",
       )
       .run(reason, resolution, now, id);
-    this.cancelOpenActions(id);
+    if (!keepActions) this.cancelOpenActions(id);
     return this.getItem(id);
   }
 
@@ -1510,7 +1511,7 @@ export class Store {
         : null;
       const current = a.itemId ? this.getItem(a.itemId) : null;
       // A card the user dismissed, finished or snoozed after the action went quiet stays that way.
-      const userMovedOn = current && (current.status === "snoozed" || (current.status === "closed" && current.closedReason !== "action"));
+      const userMovedOn = current && (current.status === "snoozed" || (current.status === "closed" && !["action", "bot"].includes(current.closedReason)));
       if (a.itemId && !newer && !userMovedOn) {
         const item = current;
         const changed = item && a.snapshot && item.rev !== a.snapshot.rev;
