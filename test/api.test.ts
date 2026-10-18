@@ -157,6 +157,7 @@ test("a choice goes from card to bot and back, with an undo window and a frozen 
   assert.equal(res.actions[0].instruction, "Vote Monday in the Lab group poll");
   assert.equal(res.actions[0].card.title, "Marco needs your vote on the lab swap");
   assert.equal(res.actions[0].card.body, "It's 4 to 4.");
+  assert.match(res.actions[0].approved, /^The user tapped this on the dashboard at \d{4}-\d\d-\d\dT\d\d:\d\d:\d\d\. The tap is their approval/);
   assert.equal(res.timeZone, "Europe/Rome");
   assert.equal((await call("POST", `/api/ui/actions/${second.body.action.id}/undo`, {})).status, 409, "too late to undo");
   assert.equal((await bot("GET", "/api/bot/actions")).body.actions.length, 0, "not handed out twice");
